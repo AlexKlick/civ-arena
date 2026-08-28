@@ -9,6 +9,7 @@ Sentinel conventions (None is never stored in state):
 
 from __future__ import annotations
 
+import copy
 import random
 from collections.abc import Iterator
 from typing import Any
@@ -104,7 +105,8 @@ class SimState:
 
     # -- serialization --------------------------------------------------
     def to_doc(self) -> dict[str, Any]:
-        out = dict(self.doc)
+        """DEEP copy: a snapshot must never alias live nested state."""
+        out = copy.deepcopy(self.doc)
         out["rng"] = rng_to_doc(self.rng)
         return out
 

@@ -39,6 +39,10 @@ class DedupeIndex:
     def record(self, key: str, result_doc: dict[str, Any]) -> None:
         self._results[key] = result_doc
 
+    def forget(self, key: str) -> None:
+        """Drop a recorded key (rollback path: a retry may re-execute)."""
+        self._results.pop(key, None)
+
     def __len__(self) -> int:
         return len(self._results)
 

@@ -23,6 +23,7 @@ from civ_arena.game.sim.rules import (
     check_action,
 )
 from civ_arena.game.sim.state import SimState, tile_key
+from civ_arena.game.sim.visibility import ground_truth
 
 
 class SimulatorAdapter:
@@ -155,6 +156,11 @@ class SimulatorAdapter:
         )
 
     # -- watchdog support ---------------------------------------------------------
+    def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
+        self._require_state()
+        vis = ground_truth(self.state, player_id)
+        return vis.observable, vis.remembered
+
     def snapshot(self) -> Any:
         self._require_state()
         return self.state.to_doc()

@@ -145,6 +145,9 @@ class GameAdapter(Protocol):
     # observation (referee applies visibility scope AFTER this returns)
     async def observe(self, req: ObserveRequest) -> Any: ...
 
+    # ground-truth visibility for projection: (observable, remembered) tile keys
+    def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]: ...
+
     # action
     async def act(self, cmd: ActionCommand) -> ActionResult: ...
 
