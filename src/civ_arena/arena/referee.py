@@ -110,16 +110,21 @@ class Referee:
     def _lease_reason(self, ctx: SessionCtx, phase: dict[str, Any],
                       *, tool: str, args: dict[str, Any]) -> RejectionReason | None:
         """Lease validation INCLUDING identity: the ctx must carry the lease
-        this referee issued, not merely a structurally similar one."""
+        this referee issued, not merely a structurally similar one. Every
+        failure — foreign identity OR expired/released state — is written to
+        the durable audit log."""
         if self._lease is None or ctx.lease is None or ctx.lease is not self._lease:
             self._unauthorized(ctx, phase, RejectionReason.LEASE_FOREIGN,
                                tool=tool, args=args,
                                detail="lease is not the referee-issued lease")
             return RejectionReason.LEASE_FOREIGN
-        return validate_lease(
+        reason = validate_lease(
             ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
             player_id=ctx.player_id, agent_id=ctx.agent_id,
         )
+        if reason is not None:
+            self._unauthorized(ctx, phase, reason, tool=tool, args=args)
+        return reason
 
     def _can_rollback(self) -> bool:
         return (self.cfg.watchdog_mode == "rollback"
@@ -132,25 +137,10 @@ class Referee:
             raise RuntimeError(f"cannot begin turn {turn} from phase {phase}")
         # PRE-phase snapshot: a begin-phase violation restores this and
         # re-runs begin_phase (ambient re-applies; consumed chaos does not).
-        if self._can_rollback():
-            self._ls.lease_start_snapshot = self.adapter.snapshot()
-        info = await self.adapter.begin_phase(player_id, turn)
-        manifest = [MutationRecord.from_doc(d) for d in info["manifest"]]
-        self._ls.allowed = list(manifest)
-        self._ls.actual = list(self.adapter.drain_mutations())
-        self.log.write(
-            "AMBIENT",
-            match_id=self.match_id, game_instance_id=self.game_instance_id,
-            turn=turn, phase_player_id=player_id, player_id=player_id,
-            agent_id=agent_id, visibility_scope="referee",
-            manifest=[m.to_doc() for m in manifest],
-        )
-        try:
-            violations = await self._sweep(player_id, agent_id, turn)
-        except MatchAborted:
-            raise
-        if violations and self._can_rollback() and self._ls.lease_start_snapshot:
-            self.adapter.restore(self._ls.lease_start_snapshot)
+        # Each retry starts with FRESH ledger bookkeeping — acknowledged
+        # violations from a discarded attempt must never mask new ones.
+        snapshot = self.adapter.snapshot() if self._can_rollback() else None
+        for attempt in range(3):
             info = await self.adapter.begin_phase(player_id, turn)
             manifest = [MutationRecord.from_doc(d) for d in info["manifest"]]
             self._ls.allowed = list(manifest)
@@ -160,11 +150,21 @@ class Referee:
                 match_id=self.match_id, game_instance_id=self.game_instance_id,
                 turn=turn, phase_player_id=player_id, player_id=player_id,
                 agent_id=agent_id, visibility_scope="referee",
-                note="re-applied after begin-phase rollback",
+                attempt=attempt,
                 manifest=[m.to_doc() for m in manifest],
             )
-            # re-verify the lease window is clean now
-            await self._sweep(player_id, agent_id, turn)
+            try:
+                violations = await self._sweep(player_id, agent_id, turn)
+            except MatchAborted:
+                if snapshot is not None:
+                    self.adapter.restore(snapshot)
+                raise
+            if not violations or snapshot is None:
+                return  # clean, or flag-and-continue mode: state stands
+            self.adapter.restore(snapshot)
+            self._ls = _LeaseState(lease_start_snapshot=snapshot)
+        # retries exhausted: the last attempt's state stands with its
+        # violations flagged (bounded to guarantee termination)
 
     async def end_turn(self, ctx: SessionCtx) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -180,21 +180,6 @@ class Referee:
         await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
         await self.adapter.end_phase(ctx.player_id, turn)
         ctx.lease.release()
-        # Post-phase sweep: chaos fired INSIDE adapter.end_phase is caught HERE,
-        # blamed on this agent — never silently carried into the final state or
-        # dumped on the next player's ledger. Flag-and-count only (see module
-        # docstring for why rollback does not apply past the phase boundary).
-        try:
-            await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
-        except MatchAborted:
-            self.log.write(
-                "LEASE_RELEASE",
-                match_id=self.match_id, game_instance_id=self.game_instance_id,
-                turn=turn, phase_player_id=ctx.player_id, player_id=ctx.player_id,
-                agent_id=ctx.agent_id, visibility_scope="referee",
-                lease_id=ctx.lease.lease_id, aborted=True,
-            )
-            raise
         self.log.write(
             "LEASE_RELEASE",
             match_id=self.match_id, game_instance_id=self.game_instance_id,
@@ -210,10 +195,17 @@ class Referee:
             agent_id=ctx.agent_id, visibility_scope="referee",
             state_hash=post_hash,
         )
+        # The end_turn tool records are emitted BEFORE the post-phase sweep can
+        # raise: a limit abort here must still leave a replayable end_turn.
         self._emit_pair(ctx, phase, "end_turn", {}, None,
                         {"status": "accepted", "turn": turn}, post_hash=post_hash)
         self.telemetry.note_call(ctx.agent_id, "end_turn",
                                  int((time.perf_counter() - t0) * 1000), ok=True)
+        # Post-phase sweep: chaos fired INSIDE adapter.end_phase is caught HERE,
+        # blamed on this agent — never silently carried into the final state or
+        # dumped on the next player's ledger. Flag-and-count only (see module
+        # docstring for why rollback does not apply past the phase boundary).
+        await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
         return {"status": "accepted", "turn": turn}
 
     # -------------------------------------------------------------- observe
@@ -406,6 +398,22 @@ class Referee:
         return violations
 
     # -------------------------------------------------------------- misc
+    async def abort_cleanup(self, agent_id: str) -> None:
+        """After a MatchAborted: close an open phase THROUGH the adapter and
+        sweep whatever it fires — cleanup must not smuggle in unobserved
+        mutations (an end_phase-queued chaos event would otherwise land
+        unflagged)."""
+        import contextlib
+
+        if self.adapter.state is None or self.adapter.state.phase_player == -1:
+            return
+        pid = self.adapter.state.phase_player
+        turn = self.adapter.state.turn
+        with contextlib.suppress(RuntimeError):
+            await self.adapter.end_phase(pid, turn)
+        with contextlib.suppress(MatchAborted):  # already aborting
+            await self._sweep(pid, agent_id, turn, final=True)
+
     async def _phase(self) -> dict[str, Any]:
         return await self.adapter.current_phase()
 

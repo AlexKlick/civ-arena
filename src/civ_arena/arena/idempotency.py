@@ -53,28 +53,24 @@ class DedupeIndex:
 
     @classmethod
     def from_log(cls, records: list[dict[str, Any]]) -> DedupeIndex:
-        """Rebuild from event records: every accepted, non-duplicate TOOL_RESULT
-        that was NOT subsequently rolled back (a rolled-back command's key
-        must stay forgettable so a retry can re-execute, exactly as in the
-        live process)."""
-        rolled_back_keys = {
-            rec.get("idempotency_key")
-            for rec in records
-            if rec.get("kind") == "TOOL_RESULT" and rec.get("rolled_back")
-        }
+        """Rebuild by replaying the log IN ORDER: a rolled-back key is
+        forgotten (retryable), and a LATER committed acceptance of the same
+        key re-registers it — the rebuilt index ends exactly where the live
+        one was, instead of blanket-excluding everything ever rolled back."""
         idx = cls()
         for rec in records:
             if rec.get("kind") != "TOOL_RESULT":
                 continue
-            if rec.get("status") != "accepted" or rec.get("duplicate"):
-                continue
             key = rec.get("idempotency_key")
-            if not key or key in rolled_back_keys:
+            if not key:
                 continue
-            idx.record(key, {
-                "status": rec["status"],
-                "tool": rec.get("tool"),
-                "result": rec.get("result_doc"),
-                "after_state_hash": rec.get("after_state_hash"),
-            })
+            if rec.get("rolled_back"):
+                idx.forget(key)
+            elif rec.get("status") == "accepted" and not rec.get("duplicate"):
+                idx.record(key, {
+                    "status": rec["status"],
+                    "tool": rec.get("tool"),
+                    "result": rec.get("result_doc"),
+                    "after_state_hash": rec.get("after_state_hash"),
+                })
         return idx

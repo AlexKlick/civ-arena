@@ -320,3 +320,132 @@ async def test_resume_with_pending_chaos_matches_clean(tmp_path):
     resumed_summary = await resumed.run(resume_state=ckpt)
     assert resumed_summary["final_state_hash"] == clean_summary["final_state_hash"]
     assert resumed_summary["violations_total"] == clean_summary["violations_total"]
+
+
+# ---------------------------------------------------- round-2 findings
+
+async def test_two_identical_begin_phase_steals_both_rolled_back(tmp_path):
+    """R2-1 (P0): after a begin-phase rollback, FRESH ledger bookkeeping must
+    not let an identical second mutation hide behind the acknowledged first."""
+    adapter, referee, log, ctx, _director = await harness(
+        tmp_path,
+        chaos=[ChaosEvent(MutationSpec.STEAL_GOLD, hook="begin_phase"),
+               ChaosEvent(MutationSpec.STEAL_GOLD, hook="begin_phase")],
+        mode="rollback", violation_limit=50)
+    # begin_turn already ran inside harness: both steals fired across retry
+    # attempts, each flagged, and the final attempt is violation-free (the
+    # steals are undone), so the phase is fully usable
+    docs = violation_docs(log)
+    assert len(docs) >= 2, "each unauthorized begin-phase mutation must be flagged"
+    settler = own_units(adapter.state, 0, "SETTLER")[0]
+    doc = await referee.execute(ctx, "found_city", {"unit_id": settler["unit_id"]})
+    assert doc["status"] == "accepted"
+
+
+async def test_begin_phase_limit_abort_restores_pre_phase_state(tmp_path):
+    """R2-2 (P1): a begin-phase violation that trips the limit must still
+    restore the pre-phase snapshot before raising."""
+    from civ_arena.arena.referee import Referee, RefereeConfig
+    from civ_arena.arena.telemetry import TelemetryRegistry
+    from civ_arena.arena.visibility import VisibilityPolicy
+    from civ_arena.game.sim.simulator import SimulatorAdapter
+
+    adapter = SimulatorAdapter()
+    director = ChaosDirector([ChaosEvent(MutationSpec.STEAL_GOLD, hook="begin_phase")])
+    await adapter.setup({"seed": 5, "chaos_director": director})
+    log = EventLog(tmp_path / "e.jsonl")
+    referee = Referee(adapter, VisibilityPolicy(), log, TelemetryRegistry(),
+                      "m2", "g1", RefereeConfig(watchdog_mode="rollback",
+                                                violation_limit=0))
+    lease = referee.grant_lease(0, "roman", 1)
+    pre = adapter.state_hash()
+    with pytest.raises(MatchAborted):
+        await referee.begin_turn(0, "roman", 1)
+    assert adapter.state_hash() == pre, "abort must leave the pre-phase state"
+    assert adapter.state.phase_player == -1
+    assert not lease.released  # begin_turn aborts before any lease bookkeeping
+
+
+async def test_abort_cleanup_sweeps_end_phase_chaos(tmp_path):
+    """R2-3 (P1): the coordinator's post-abort phase close goes through the
+    referee, so end-phase chaos during cleanup is flagged, not smuggled."""
+    from civ_arena.arena.coordinator import Arena
+    from civ_arena.config import AgentSpec, ChaosSpec, MatchSpec
+
+    spec = MatchSpec(
+        match_id="abort-cleanup", seed=90909, max_turns=10, adapter="simulator",
+        watchdog_mode="flag_and_continue", violation_limit=1, checkpoint_every=5,
+        agents=[AgentSpec("roman", 0, "expansionist", 11),
+                AgentSpec("korea", 1, "turtler", 22)],
+        chaos=[ChaosSpec("steal_gold", offset=1),          # act-time: flags + aborts
+               ChaosSpec("spawn_free_unit", hook="end_phase", offset=0)],
+    )
+    arena = Arena(tmp_path / "run", spec)
+    summary = await arena.run()
+    assert summary["aborted"] is not None
+    violations = [r for r in arena.log.records() if r["kind"] == "VIOLATION"]
+    assert violations, "the act-time violation must be flagged"
+    # the end-phase cleanup mutation must ALSO be flagged (never unobserved)
+    spawned = any(
+        m.get("kind") == "unit.spawned"
+        for v in violations for m in v["watchdog"]["mutations"]
+    )
+    assert spawned, "end-phase chaos during abort cleanup must be swept"
+
+
+async def test_end_phase_limit_abort_is_replayable(tmp_path):
+    """R2-4 (P1): even when the post-end-phase sweep aborts, the end_turn
+    TOOL records must already be in the log (replay reconstructs the turn)."""
+    adapter, referee, log, ctx, _director = await harness(
+        tmp_path, chaos=[ChaosEvent(MutationSpec.STEAL_GOLD, hook="end_phase")],
+        violation_limit=0)
+    with pytest.raises(MatchAborted):
+        await referee.end_turn(ctx)
+    end_turn_results = [r for r in log.records()
+                        if r["kind"] == "TOOL_RESULT" and r.get("tool") == "end_turn"]
+    assert end_turn_results, "end_turn must be logged even when the sweep aborts"
+    assert end_turn_results[-1]["status"] == "accepted"
+
+
+def test_from_log_rolled_back_then_retried_key_wins():
+    """R2-5 (P1): a key rolled back and then successfully retried must be
+    REGISTERED after rebuild — the replayed log order decides, not a blanket
+    exclusion."""
+    records = [
+        {"kind": "TOOL_RESULT", "status": "accepted", "duplicate": False,
+         "idempotency_key": "k1", "tool": "purchase"},
+        {"kind": "TOOL_RESULT", "status": "rejected", "rejection": "rollback",
+         "rolled_back": True, "idempotency_key": "k1", "tool": "purchase"},
+        {"kind": "TOOL_RESULT", "status": "accepted", "duplicate": False,
+         "idempotency_key": "k1", "tool": "purchase"},  # the retry committed
+    ]
+    idx = DedupeIndex.from_log(records)
+    assert idx.seen("k1") is not None, "a committed retry re-registers the key"
+
+
+def test_checkpoint_turn_tamper_rejected(tmp_path):
+    """R2-6 (P1): the content hash covers turn + match authority."""
+    state = CheckpointState(
+        match_id="m", game_instance_id_of_origin="g", turn=5, seq=10,
+        sim_doc={"turn": 6}, rng_states={"sim": [3, [0], 0]},
+        coordinator_state={"violations": 0}, log_prefix_sha256="x",
+    )
+    doc = state.to_doc()
+    doc["turn"] = 100  # lie about progress
+    with pytest.raises(ValueError, match="content hash mismatch"):
+        CheckpointState.from_doc(doc)
+
+
+async def test_released_lease_attempt_is_audited(tmp_path):
+    """R2-7 (P2): reusing the exact released lease must leave an audit record."""
+    adapter, referee, log, ctx, _director = await harness(tmp_path)
+    await referee.end_turn(ctx)
+    n_before = len(log.records())
+    doc = await referee.execute(ctx, "fortify", {"unit_id": "u3"})
+    assert doc["status"] == "rejected"
+    assert len(log.records()) > n_before, (
+        "an expired-lease attempt must not vanish from the audit log"
+    )
+    unauth = [r for r in log.records()[n_before:]
+              if r["kind"] == "UNAUTHORIZED_TOOL_CALL"]
+    assert unauth

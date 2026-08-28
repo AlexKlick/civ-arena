@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import signal
@@ -114,14 +113,15 @@ class Arena:
             final_turn = spec.max_turns
         except MatchAborted as exc:
             aborted = str(exc)
-            # best-effort: close an open phase so the engine is not wedged
-            # (resume imports checkpoint state anyway, but a live post-mortem
-            # inspection should not hit phase_player != -1)
-            if self.adapter.state is not None and self.adapter.state.phase_player != -1:
+            # Close an open phase THROUGH the referee so cleanup sweeps
+            # whatever the phase boundary fires (never bypass the watchdog).
+            abort_agent = self.spec.agents[0].agent_id
+            if self.adapter.state is not None:
                 pid = self.adapter.state.phase_player
-                with contextlib.suppress(RuntimeError):
-                    await self.adapter.end_phase(pid, self.adapter.state.turn)
-            final_turn = self.adapter.state.turn
+                if pid != -1:
+                    abort_agent = self.spec.agent_for_player(pid).agent_id
+            await self.referee.abort_cleanup(abort_agent)
+            final_turn = self.adapter.state.turn if self.adapter.state else 0
 
         _write_heartbeat(self.run_dir, "match_end", final_turn)
         summary = {

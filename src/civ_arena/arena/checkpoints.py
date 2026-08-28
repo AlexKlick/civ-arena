@@ -27,12 +27,19 @@ class CheckpointState:
     content_hash: str = ""
 
     def compute_content_hash(self) -> str:
-        """Hash over the checkpoint's OWN content (sim + rng + coordinator) —
-        resume verifies this so a tampered or foreign checkpoint cannot be
-        imported on the strength of a valid log prefix alone."""
+        """Hash over the checkpoint's OWN content — sim + rng + coordinator
+        state PLUS the turn and match authority fields, so a tampered turn
+        (resume would skip gameplay and report completion from stale state)
+        or a foreign match body cannot pass on the strength of a valid log
+        prefix alone."""
         from civ_arena.canonical import checkpoint_hash
 
-        return checkpoint_hash(self.sim_doc, self.rng_states, self.coordinator_state)
+        return checkpoint_hash(
+            self.sim_doc, self.rng_states,
+            {**self.coordinator_state,
+             "_turn": self.turn, "_match_id": self.match_id,
+             "_seq": self.seq},
+        )
 
     def to_doc(self) -> dict[str, Any]:
         return {
