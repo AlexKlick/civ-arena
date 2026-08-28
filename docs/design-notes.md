@@ -10,7 +10,7 @@ intended. Each maps to tests in `tests/`.
 | `referee` | complete engine state | `Referee.referee_snapshot()` only; a session requesting it is logged as an unauthorized call |
 | `public_match` | turn, civ names, alive flags | any session |
 | `bilateral` | stub (diplomacy is post-spike) | any session |
-| `private_player` | own entities full-field; foreign entities closed-field allowlists; hidden entities ABSENT, not null-masked | the bound session |
+| `private_player` | own entities full-field; foreign entities closed-field allowlists; hidden entities ABSENT, not null-masked. Foreign cities appear only while their tile is CURRENTLY OBSERVED — a remembered tile must not reveal a city founded after you explored it, or live population/HP drift of an unwatched city (last-known snapshots are a post-spike refinement). Observations are DEEP copies: an agent mutating a returned entity never touches live state. | the bound session |
 
 The projection allowlists live in `arena/visibility.py`. The no-leak
 checker's expectations are hardcoded separately from the policy, and a
@@ -40,10 +40,22 @@ Three response tiers: pre-commit **reject** (never a watchdog event),
 **flag-and-continue** (default), and **rollback** (capability-gated; the sim
 has it, live Civ cannot — the same code path degrades to flag/abort).
 
+Rollback granularity: begin-phase violations restore the PRE-phase snapshot
+and re-run `begin_phase` (ambient re-applies on clean state; a consumed
+chaos event does not re-fire). Command violations restore a PER-COMMAND
+snapshot — an earlier accepted command in the same lease always survives,
+and only the violating command's key is forgotten from the dedupe index.
+End-phase violations (fired inside `adapter.end_phase`, after the lease) are
+flag-and-count only: restoring there would undo a phase the engine already
+closed. When the violation limit trips, the referee still rolls the current
+command back before raising `MatchAborted`, and the coordinator closes any
+open phase.
+
 Rollback and replay: a rolled-back command gets a follow-up
 `TOOL_RESULT(status=rejected, rejection=rollback)` record; replay re-runs
 the whole match through the same referee machinery (same watchdog config),
-so rollbacks reproduce deterministically.
+so rollbacks reproduce deterministically. `DedupeIndex.from_log` skips keys
+that were subsequently rolled back, so resume matches live forget-semantics.
 
 ## Determinism
 
