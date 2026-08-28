@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UNVALIDATED DRAFT — never enable against a real save without docs/live-validation.md -->
+<Mod id="CIV_ARENA_PUPPETEER" version="1">
+  <Properties>
+    <Name>Civ Arena Puppeteer (UNVALIDATED DRAFT)</Name>
+    <Description>Turn interception for referee-driven agent control: freeze at hook, per-unit restore, command/ambient ledgers, digest</Description>
+    <EnabledByDefault>0</EnabledByDefault>
+  </Properties>
+  <Components>
+    <AddGameplayScripts>
+      <File>PuppeteerMod.lua</File>
+    </AddGameplayScripts>
+  </Components>
+</Mod>
