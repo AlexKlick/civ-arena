@@ -93,7 +93,7 @@ def run_ambient(state: SimState, player_id: int) -> list[MutationRecord]:
         prod = _production_per_turn(state, city)
         science_total += 2 * city["population"]
         gold_total += city["population"] + sum(
-            BUILDINGS[b]["gold"] for b in city["buildings"]
+            BUILDINGS[b].get("gold", 0) for b in city["buildings"]
         )
 
         if city["production_queue"]:

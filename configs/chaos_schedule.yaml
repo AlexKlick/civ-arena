@@ -1,0 +1,29 @@
+# Acceptance-run configuration: adversarial injections during live play.
+# Used to prove the watchdog is not vacuous on a full match.
+match:
+  match_id: chaos-001
+  seed: 947381
+  max_turns: 40
+  checkpoint_every: 5
+  adapter: simulator
+  watchdog_mode: flag_and_continue
+  violation_limit: 50   # keep the match alive through many violations
+
+agents:
+  - agent_id: roman-expansionist
+    player_id: 0
+    policy: expansionist
+    seed: 1101
+  - agent_id: korean-turtler
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos:
+  - {spec: move_uncommanded_unit, hook: act, offset: 3}
+  - {spec: flip_production, hook: act, offset: 6}
+  - {spec: change_research, hook: act, offset: 4}
+  - {spec: steal_gold, hook: act, offset: 2}
+  - {spec: spawn_free_unit, hook: act, offset: 5}
+  - {spec: ambient_like_trap, hook: act, offset: 8}
+  - {spec: move_uncommanded_unit, hook: begin_phase, offset: 1}

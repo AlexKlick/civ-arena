@@ -1,0 +1,21 @@
+match:
+  match_id: duel-001
+  seed: 947381
+  max_turns: 100
+  checkpoint_every: 5
+  adapter: simulator
+  watchdog_mode: flag_and_continue
+  violation_limit: 5
+
+agents:
+  - agent_id: roman-expansionist
+    player_id: 0
+    policy: expansionist
+    seed: 1101
+    # model: parsed and ignored in the spike (decided post-spike)
+  - agent_id: korean-turtler
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []

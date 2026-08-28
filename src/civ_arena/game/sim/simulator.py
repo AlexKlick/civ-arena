@@ -36,6 +36,7 @@ class SimulatorAdapter:
         self._broken_freeze = False
         self._stock_ai = False
         self._player_count = 2
+        self._hash_cache: str | None = None
 
     # -- lifecycle ---------------------------------------------------------
     async def setup(self, cfg: dict[str, Any]) -> None:
@@ -62,6 +63,7 @@ class SimulatorAdapter:
         if self.state.turn != turn:
             raise RuntimeError(f"turn mismatch: engine at {self.state.turn}, asked {turn}")
 
+        self._hash_cache = None
         freeze = not self._broken_freeze
         self.state.doc["freeze_active"] = freeze
         # The built-in "AI" only gets to act when the freeze FAILED to engage —
@@ -80,6 +82,7 @@ class SimulatorAdapter:
         self._require_state()
         if self.state.phase_player != player_id or self.state.turn != turn:
             raise RuntimeError("end_phase does not match the open phase")
+        self._hash_cache = None
         if self._chaos is not None:
             self._chaos.maybe_fire("end_phase", self)
         self.state.phase_player = -1
@@ -133,6 +136,7 @@ class SimulatorAdapter:
     # -- action ----------------------------------------------------------------
     async def act(self, cmd: ActionCommand) -> ActionResult:
         self._require_state()
+        self._hash_cache = None
         if self.state.phase_player != cmd.player_id:
             return ActionResult(
                 status="rejected", result=None, mutations=(),
@@ -166,6 +170,7 @@ class SimulatorAdapter:
         return self.state.to_doc()
 
     def restore(self, snap: Any) -> None:
+        self._hash_cache = None
         self.state = SimState.from_doc(snap)
 
     def drain_mutations(self) -> list[MutationRecord]:
@@ -175,7 +180,9 @@ class SimulatorAdapter:
 
     def state_hash(self) -> str:
         self._require_state()
-        return _state_hash(self.state.to_doc())
+        if self._hash_cache is None:
+            self._hash_cache = _state_hash(self.state.to_doc())
+        return self._hash_cache
 
     # -- persistence ------------------------------------------------------------
     def export_state(self) -> dict[str, Any]:
@@ -183,6 +190,7 @@ class SimulatorAdapter:
         return self.state.to_doc()
 
     def import_state(self, doc: dict[str, Any]) -> None:
+        self._hash_cache = None
         self.state = SimState.from_doc(doc)
 
     # -- helpers (chaos/tests) ------------------------------------------------------
@@ -193,6 +201,7 @@ class SimulatorAdapter:
     def chaos_move_unit(self, unit_id: str, q: int, r: int) -> None:
         """Raw unauthorized teleport used by the ChaosDirector."""
         self._require_state()
+        self._hash_cache = None
         unit = self.state.unit(unit_id)
         if unit is None:
             return
@@ -206,6 +215,7 @@ class SimulatorAdapter:
                   origin: str = "chaos") -> None:
         """Raw unauthorized attribute write used by the ChaosDirector."""
         self._require_state()
+        self._hash_cache = None
         if entity_type == "city":
             entity = self.state.city(entity_id)
         elif entity_type == "player":
@@ -222,6 +232,7 @@ class SimulatorAdapter:
 
     def chaos_spawn_unit(self, owner: int, type_: str, q: int, r: int) -> None:
         self._require_state()
+        self._hash_cache = None
         _, unit = self.state.spawn_unit(owner, type_, q, r)
         self._journal.append(MutationRecord(
             kind="unit.spawned", entity_type="unit", entity_id=unit["unit_id"],

@@ -120,6 +120,7 @@ class Referee:
         await self._sweep(player_id, agent_id, turn)
 
     async def end_turn(self, ctx: SessionCtx) -> dict[str, Any]:
+        t0 = time.perf_counter()
         phase = await self._phase()
         reason = validate_lease(
             ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
@@ -127,6 +128,10 @@ class Referee:
         )
         if reason is not None:
             self._unauthorized(ctx, phase, reason, tool="end_turn", args={})
+            self.telemetry.note_call(ctx.agent_id, "end_turn",
+                                     int((time.perf_counter() - t0) * 1000), ok=False)
+            self._emit_pair(ctx, phase, "end_turn", {}, None,
+                            {"status": "rejected", "rejection": reason.value})
             return {"status": "rejected", "rejection": reason.value}
         turn = ctx.lease.turn
         await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
@@ -139,13 +144,18 @@ class Referee:
             agent_id=ctx.agent_id, visibility_scope="referee",
             lease_id=ctx.lease.lease_id,
         )
+        post_hash = self.adapter.state_hash()
         self.log.write(
             "TURN_END",
             match_id=self.match_id, game_instance_id=self.game_instance_id,
             turn=turn, phase_player_id=ctx.player_id, player_id=ctx.player_id,
             agent_id=ctx.agent_id, visibility_scope="referee",
-            state_hash=self.adapter.state_hash(),
+            state_hash=post_hash,
         )
+        self._emit_pair(ctx, phase, "end_turn", {}, None,
+                        {"status": "accepted", "turn": turn}, post_hash=post_hash)
+        self.telemetry.note_call(ctx.agent_id, "end_turn",
+                                 int((time.perf_counter() - t0) * 1000), ok=True)
         return {"status": "accepted", "turn": turn}
 
     # -------------------------------------------------------------- observe
@@ -156,26 +166,39 @@ class Referee:
         subject_id: str | None = None,
         scope: Scope = Scope.PRIVATE_PLAYER,
     ) -> Any:
+        t0 = time.perf_counter()
+        tool = f"get_{kind.value}"
+        args = {"subject_id": subject_id} if subject_id else {}
         phase = await self._phase()
         if scope is Scope.REFEREE:
             self._unauthorized(ctx, phase, RejectionReason.ARGS_INVALID,
-                               tool=f"observe:{kind.value}", args={"scope": "referee"},
+                               tool=tool, args={"scope": "referee"},
                                detail="agent requested referee scope")
+            self.telemetry.note_call(ctx.agent_id, tool,
+                                     int((time.perf_counter() - t0) * 1000), ok=False)
             return {"error": "referee scope is not agent-reachable"}
         reason = validate_lease(
             ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
             player_id=ctx.player_id, agent_id=ctx.agent_id,
         )
         if reason is not None:
-            self._unauthorized(ctx, phase, reason, tool=f"observe:{kind.value}", args={})
+            self._unauthorized(ctx, phase, reason, tool=tool, args={})
+            self.telemetry.note_call(ctx.agent_id, tool,
+                                     int((time.perf_counter() - t0) * 1000), ok=False)
+            self._emit_pair(ctx, phase, tool, args, None,
+                            {"status": "rejected", "rejection": reason.value})
             return {"error": reason.value}
         omniscient = await self.adapter.observe(
             ObserveRequest(kind=kind, player_id=ctx.player_id, subject_id=subject_id)
         )
         observable, remembered = self.adapter.visibility_for(ctx.player_id)
-        return self.policy.project(
+        projected = self.policy.project(
             omniscient, kind.value, ctx.player_id, observable, remembered, scope
         )
+        self._emit_pair(ctx, phase, tool, args, None, {"status": "accepted"})
+        self.telemetry.note_call(ctx.agent_id, tool,
+                                 int((time.perf_counter() - t0) * 1000), ok=True)
+        return projected
 
     # -------------------------------------------------------------- execute
     async def execute(
