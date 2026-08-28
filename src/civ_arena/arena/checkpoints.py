@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from civ_arena.arena.events import EventLog
 from civ_arena.canonical import log_prefix_hash
 
-CHECKPOINT_SCHEMA = 1
+CHECKPOINT_SCHEMA = 2
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,15 @@ class CheckpointState:
     rng_states: dict[str, list[Any]]
     coordinator_state: dict[str, Any]
     log_prefix_sha256: str
+    content_hash: str = ""
+
+    def compute_content_hash(self) -> str:
+        """Hash over the checkpoint's OWN content (sim + rng + coordinator) —
+        resume verifies this so a tampered or foreign checkpoint cannot be
+        imported on the strength of a valid log prefix alone."""
+        from civ_arena.canonical import checkpoint_hash
+
+        return checkpoint_hash(self.sim_doc, self.rng_states, self.coordinator_state)
 
     def to_doc(self) -> dict[str, Any]:
         return {
@@ -36,6 +45,7 @@ class CheckpointState:
             "rng_states": self.rng_states,
             "coordinator_state": self.coordinator_state,
             "log_prefix_sha256": self.log_prefix_sha256,
+            "content_hash": self.content_hash or self.compute_content_hash(),
         }
 
     @classmethod
@@ -43,14 +53,23 @@ class CheckpointState:
         if doc.get("schema") != CHECKPOINT_SCHEMA:
             raise ValueError(f"checkpoint schema {doc.get('schema')} != "
                              f"{CHECKPOINT_SCHEMA}")
-        return cls(
+        state = cls(
             match_id=doc["match_id"],
             game_instance_id_of_origin=doc["game_instance_id_of_origin"],
             turn=doc["turn"], seq=doc["seq"], sim_doc=doc["sim_doc"],
             rng_states=doc["rng_states"],
             coordinator_state=doc["coordinator_state"],
             log_prefix_sha256=doc["log_prefix_sha256"],
+            content_hash=doc.get("content_hash", ""),
         )
+        if not state.content_hash:
+            raise ValueError("checkpoint missing content_hash (schema 2 required)")
+        if state.content_hash != state.compute_content_hash():
+            raise ValueError(
+                "checkpoint content hash mismatch — tampered or corrupt; "
+                "refusing to load"
+            )
+        return state
 
 
 class CheckpointManager:
@@ -64,6 +83,8 @@ class CheckpointManager:
             return None
         path = self.dir / f"ckpt-turn-{turn:04d}.json"
         tmp = path.with_suffix(".json.tmp")
+        if not state.content_hash:
+            state = replace(state, content_hash=state.compute_content_hash())
         tmp.write_text(json.dumps(state.to_doc(), sort_keys=True))
         os.replace(tmp, path)
         return path

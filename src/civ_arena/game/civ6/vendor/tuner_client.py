@@ -58,7 +58,7 @@ async def recv_message_timeout(
     """Read a message with a timeout. Returns None on timeout."""
     try:
         return await asyncio.wait_for(recv_message(reader), timeout=timeout)
-    except TimeoutError:
+    except asyncio.TimeoutError:
         return None
 
 
@@ -177,7 +177,7 @@ async def main() -> None:
     try:
         reader, writer = await connect(host, port)
     except ConnectionRefusedError:
-        print("Connection refused. Is Civ 6 running with EnableTuner=1?")
+        print(f"Connection refused. Is Civ 6 running with EnableTuner=1?")
         sys.exit(1)
     except OSError as e:
         print(f"Connection failed: {e}")

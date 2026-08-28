@@ -36,6 +36,17 @@ class ChaosDirector:
         self._pending: deque[ChaosEvent] = deque(events)
         self.fired: list[MutationSpec] = []
 
+    # -- checkpoint round-trip: pending queue + live offsets must survive
+    # resume, or fired events re-fire and offsets shift against a clean run.
+    def state_doc(self) -> list[list[Any]]:
+        return [[e.spec.value, e.hook, e.offset] for e in self._pending]
+
+    def restore(self, doc: list[list[Any]]) -> None:
+        self._pending = deque(
+            ChaosEvent(MutationSpec(spec), hook=hook, offset=offset)
+            for spec, hook, offset in doc
+        )
+
     @property
     def armed(self) -> int:
         return len(self._pending)

@@ -96,7 +96,9 @@ class EventLog:
         return self._seq
 
     def _load(self) -> tuple[list[dict[str, Any]], bool]:
-        """Returns (records, torn_tail_detected)."""
+        """Returns (records, torn_tail_detected). Fails CLOSED on a stored
+        seq that does not equal its position — seq is the log's only
+        ordering authority and must not be trusted from disk."""
         if not self.path.exists():
             return [], False
         raw = self.path.read_text(encoding="utf-8").splitlines()
@@ -105,11 +107,17 @@ class EventLog:
             if not line.strip():
                 continue
             try:
-                out.append(json.loads(line))
+                rec = json.loads(line)
             except json.JSONDecodeError:
                 if i == len(raw) - 1:
                     return out, True  # torn tail from a crash mid-write
                 raise ValueError(f"corrupt event log line {i}: {line[:80]!r}") from None
+            if not isinstance(rec, dict) or rec.get("seq") != len(out):
+                raise ValueError(
+                    f"event log seq broken at line {i}: expected {len(out)}, "
+                    f"got {rec.get('seq') if isinstance(rec, dict) else type(rec)}"
+                )
+            out.append(rec)
         return out, False
 
     def _rewrite(self, recs: list[dict[str, Any]]) -> None:
@@ -124,6 +132,8 @@ class EventLog:
     # -- resume support ----------------------------------------------------------
     def truncate_to(self, keep: int) -> None:
         """Keep the first ``keep`` records; rewrite atomically; continue seq there."""
+        if keep < 0:
+            raise ValueError(f"cannot truncate to a negative count: {keep}")
         recs, _ = self._load()
         if keep > len(recs):
             raise ValueError(f"cannot truncate to {keep}: only {len(recs)} records")

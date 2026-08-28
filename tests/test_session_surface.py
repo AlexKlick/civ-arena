@@ -32,11 +32,7 @@ def test_no_tool_name_leaks_identity_or_scope():
 
 
 def test_facade_exposes_only_tools():
-    class _Ref:
-        pass
-
     facade = ToolFacade.__new__(ToolFacade)
-    facade.__dict__["_ctx"] = None
     facade.__dict__["_bound"] = {n: n for n in TOOL_REGISTRY}
     assert set(facade.names()) == set(TOOL_REGISTRY)
     try:
@@ -49,6 +45,28 @@ def test_facade_exposes_only_tools():
         raise AssertionError("facade must not expose the referee")
     except AttributeError:
         pass
+
+
+def test_facade_hides_ctx_from_attribute_surface():
+    """The bound context must not be reachable as ANY attribute (Codex P0:
+    `facade._ctx` used to hand out the referee)."""
+    from civ_arena.session.tools import SessionCtx, ToolFacade
+
+    referee = object()
+    ctx = SessionCtx(referee=referee, player_id=7, agent_id="x",
+                     lease=None, turn=1)
+    facade = ToolFacade(ctx)
+    assert not hasattr(facade, "_ctx")
+    assert not hasattr(facade, "ctx")
+    assert set(vars(facade)) == {"_bound"}, (
+        f"unexpected facade attributes: {sorted(vars(facade))}"
+    )
+    for value in vars(facade).values():
+        assert value is not ctx and value is not referee
+    # bound tools are closures, not partials: no .args carrying the ctx
+    tool = facade.names()[0]
+    bound = getattr(facade, tool)
+    assert not hasattr(bound, "args"), "partial objects leak the ctx via .args"
 
 
 def test_session_hides_adapter_and_player_id():

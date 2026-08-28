@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -113,6 +114,13 @@ class Arena:
             final_turn = spec.max_turns
         except MatchAborted as exc:
             aborted = str(exc)
+            # best-effort: close an open phase so the engine is not wedged
+            # (resume imports checkpoint state anyway, but a live post-mortem
+            # inspection should not hit phase_player != -1)
+            if self.adapter.state is not None and self.adapter.state.phase_player != -1:
+                pid = self.adapter.state.phase_player
+                with contextlib.suppress(RuntimeError):
+                    await self.adapter.end_phase(pid, self.adapter.state.turn)
             final_turn = self.adapter.state.turn
 
         _write_heartbeat(self.run_dir, "match_end", final_turn)
@@ -138,6 +146,14 @@ class Arena:
 
     # -------------------------------------------------------------- resume
     async def _resume_from(self, state: CheckpointState) -> None:
+        if state.match_id != self.spec.match_id:
+            raise ValueError(
+                f"checkpoint is for match {state.match_id!r}, config is "
+                f"{self.spec.match_id!r} — refusing to resume"
+            )
+        # CheckpointState.from_doc already verified the content hash; verify
+        # it against THIS config too (the hash covers sim+rng+coordinator,
+        # and match identity above covers the config's match).
         await self.adapter.setup({
             "seed": self.spec.seed, "chaos_director": self.chaos,
         })
@@ -146,6 +162,14 @@ class Arena:
         from civ_arena.arena.idempotency import DedupeIndex
 
         self.referee.dedupe = DedupeIndex.from_log(self.log.records())
+        # control-plane counters and chaos schedule must resume, not reset
+        self.referee.restore_violation_counters(
+            state.coordinator_state.get("violations", 0),
+            state.coordinator_state.get("violations_by_agent"),
+        )
+        chaos_doc = state.coordinator_state.get("chaos")
+        if chaos_doc is not None:
+            self.chaos.restore(chaos_doc)
         # restore agent rngs
         for agent_spec in self.spec.agents:
             doc = state.rng_states.get(f"agent-{agent_spec.player_id}")
@@ -174,7 +198,11 @@ class Arena:
             seq=len(self.log),
             sim_doc=self.adapter.export_state(),
             rng_states=rng_states,
-            coordinator_state={"violations": self.referee.violation_count()},
+            coordinator_state={
+                "violations": self.referee.violation_count(),
+                "violations_by_agent": dict(self.referee.violations_by_agent),
+                "chaos": self.chaos.state_doc(),
+            },
             log_prefix_sha256=log_prefix_hash(self.log.records()),
         )
 

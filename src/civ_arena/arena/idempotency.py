@@ -5,6 +5,11 @@ turn (the failure window that matters) while allowing the same content again
 next turn. Agents that intentionally repeat an effect within one turn pass an
 explicit nonce key. The durable index is the event log itself; this class is
 the in-memory view, rebuilt by ``from_log`` on resume and replay.
+
+Known collision semantics (deliberate): an EXPLICIT nonce key excludes both
+turn and args, so reusing one nonce for the same player+tool with different
+args (or in a later turn) returns the FIRST cached result and suppresses the
+new action — a caller-visible contract, not a double-execution hazard.
 """
 
 from __future__ import annotations
@@ -48,7 +53,15 @@ class DedupeIndex:
 
     @classmethod
     def from_log(cls, records: list[dict[str, Any]]) -> DedupeIndex:
-        """Rebuild from event records: every accepted, non-duplicate TOOL_RESULT."""
+        """Rebuild from event records: every accepted, non-duplicate TOOL_RESULT
+        that was NOT subsequently rolled back (a rolled-back command's key
+        must stay forgettable so a retry can re-execute, exactly as in the
+        live process)."""
+        rolled_back_keys = {
+            rec.get("idempotency_key")
+            for rec in records
+            if rec.get("kind") == "TOOL_RESULT" and rec.get("rolled_back")
+        }
         idx = cls()
         for rec in records:
             if rec.get("kind") != "TOOL_RESULT":
@@ -56,7 +69,7 @@ class DedupeIndex:
             if rec.get("status") != "accepted" or rec.get("duplicate"):
                 continue
             key = rec.get("idempotency_key")
-            if not key:
+            if not key or key in rolled_back_keys:
                 continue
             idx.record(key, {
                 "status": rec["status"],

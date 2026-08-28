@@ -12,6 +12,7 @@ never null-masked (an absent key leaks nothing, not even existence).
 
 from __future__ import annotations
 
+import copy
 import enum
 from typing import Any
 
@@ -160,12 +161,18 @@ class VisibilityPolicy:
 
     def _city(self, c: dict[str, Any], player_id: int, observable: frozenset[str],
               remembered: frozenset[str]) -> dict[str, Any] | None:
+        _ = remembered
         key = f"{c['q']},{c['r']}"
         if c["owner"] == player_id:
-            own = dict(c)
+            own = copy.deepcopy(c)
             own["coord"] = key
             return own
-        if key not in observable and key not in remembered:
+        # Foreign cities are visible ONLY while currently observed: a
+        # remembered tile must not reveal live hidden-city state (a city
+        # founded after you explored the tile, or live population/HP changes
+        # to a city you are not watching). Last-known snapshots are a
+        # post-spike refinement.
+        if key not in observable:
             return None
         full = {
             "city_id": c["city_id"],
@@ -190,6 +197,9 @@ class VisibilityPolicy:
             "researched": list(p["researched"]),
             "researching": p["researching"],
         }
+
+    # NOTE: own-entity projections deep-copy nested lists so an agent
+    # mutating a returned observation cannot reach live game state.
 
 
 # --------------------------------------------------------------------------
@@ -240,12 +250,13 @@ def find_city_leaks(
     observable: frozenset[str],
     remembered: frozenset[str],
 ) -> list[str]:
+    _ = remembered
     leaks: list[str] = []
     cities = projected if isinstance(projected, list) else []
     projected_ids = {c.get("city_id") for c in cities if isinstance(c, dict)}
     for c in omniscient_cities:
         key = f"{c['q']},{c['r']}"
-        visible = c["owner"] == player_id or key in observable or key in remembered
+        visible = c["owner"] == player_id or key in observable
         if visible and c["city_id"] not in projected_ids:
             leaks.append(f"visible city {c['city_id']} missing from projection")
         if not visible and c["city_id"] in projected_ids:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from civ_arena.canonical import state_hash as _state_hash
@@ -111,27 +112,28 @@ class SimulatorAdapter:
             return {
                 "turn": state.turn,
                 "phase_player": state.phase_player,
-                "players": {k: dict(v) for k, v in state.players.items()},
-                "cities": {k: dict(v) for k, v in state.cities.items()},
-                "units": {k: dict(v) for k, v in state.units.items()},
-                "tiles": {k: dict(v) for k, v in state.tiles.items()},
+                "players": {k: copy.deepcopy(v) for k, v in state.players.items()},
+                "cities": {k: copy.deepcopy(v) for k, v in state.cities.items()},
+                "units": {k: copy.deepcopy(v) for k, v in state.units.items()},
+                "tiles": {k: copy.deepcopy(v) for k, v in state.tiles.items()},
             }
         if req.kind is ObserveKind.UNITS:
             # deterministic observation order (numeric id) — dict insertion
-            # order does not survive checkpoint round-trips
+            # order does not survive checkpoint round-trips. DEEP copies:
+            # observations handed to agents must never alias live state.
             return sorted(
-                (dict(u) for u in state.units.values()),
+                (copy.deepcopy(u) for u in state.units.values()),
                 key=lambda u: int(u["unit_id"][1:]),
             )
         if req.kind is ObserveKind.CITIES:
             return sorted(
-                (dict(c) for c in state.cities.values()),
+                (copy.deepcopy(c) for c in state.cities.values()),
                 key=lambda c: int(c["city_id"][1:]),
             )
         if req.kind is ObserveKind.VISIBLE_MAP:
             return {
                 "turn": state.turn,
-                "tiles": {k: dict(v) for k, v in state.tiles.items()},
+                "tiles": {k: copy.deepcopy(v) for k, v in state.tiles.items()},
             }
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
             return available_research(state, req.player_id)

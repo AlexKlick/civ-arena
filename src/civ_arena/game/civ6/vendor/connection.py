@@ -1,11 +1,11 @@
 """Persistent, reconnectable FireTuner connection to Civilization VI.
 
 VENDORED from https://github.com/lmwilki/civ6-mcp (MIT) at commit
-dd2019056371b92ea4854e879ddf05a8cad95e8a. Local changes: the two imports
-below were rewritten to relative form (upstream imports
-``from civ_mcp import tuner_client`` and
-``from civ_mcp.lua._helpers import SENTINEL``); nothing else differs. See
-vendor/VENDORED.md.
+dd2019056371b92ea4854e879ddf05a8cad95e8a. Local changes: ONLY the import
+block below (upstream: ``from civ_mcp import tuner_client`` and
+``from civ_mcp.lua._helpers import SENTINEL``) plus this provenance note.
+Nothing else differs — verified by diff against the reference checkout.
+See vendor/VENDORED.md.
 
 Wraps tuner_client.py into a stateful connection manager with:
 - Lua state index discovery (GameCore_Tuner, InGame)
@@ -53,7 +53,7 @@ class GameConnection:
             self._reader, self._writer = await tuner_client.connect(
                 self.host, self.port
             )
-        except (TimeoutError, OSError) as e:
+        except (asyncio.TimeoutError, OSError) as e:
             raise ConnectionError(
                 f"Cannot connect to Civ 6 at {self.host}:{self.port}. "
                 "Is the game running with EnableTuner=1?"

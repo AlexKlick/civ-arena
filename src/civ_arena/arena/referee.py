@@ -7,6 +7,14 @@ Adapter-reported mutation origins are diagnostic. Pre-commit rejections
 events; committed violations are flagged, counted, and — on adapters with
 rollback capability — rolled back with a follow-up rejection record so replay
 skips the rolled-back command.
+
+Rollback semantics: begin-phase violations restore the PRE-phase snapshot and
+re-run begin_phase (ambient re-applies on clean state; a consumed chaos event
+does not re-fire). Command violations restore the PER-COMMAND snapshot, so an
+earlier accepted command in the same lease always survives. End-phase
+violations (fired inside adapter.end_phase, after the lease) are
+flag-and-count only — restoring there would undo a phase the engine already
+closed.
 """
 
 from __future__ import annotations
@@ -49,7 +57,7 @@ class _LeaseState:
     allowed: list[MutationRecord] = field(default_factory=list)
     actual: list[MutationRecord] = field(default_factory=list)
     acknowledged: list[MutationRecord] = field(default_factory=list)
-    snapshot: Any = None
+    lease_start_snapshot: Any = None
 
 
 class Referee:
@@ -99,17 +107,37 @@ class Referee:
         )
         return lease
 
+    def _lease_reason(self, ctx: SessionCtx, phase: dict[str, Any],
+                      *, tool: str, args: dict[str, Any]) -> RejectionReason | None:
+        """Lease validation INCLUDING identity: the ctx must carry the lease
+        this referee issued, not merely a structurally similar one."""
+        if self._lease is None or ctx.lease is None or ctx.lease is not self._lease:
+            self._unauthorized(ctx, phase, RejectionReason.LEASE_FOREIGN,
+                               tool=tool, args=args,
+                               detail="lease is not the referee-issued lease")
+            return RejectionReason.LEASE_FOREIGN
+        return validate_lease(
+            ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
+            player_id=ctx.player_id, agent_id=ctx.agent_id,
+        )
+
+    def _can_rollback(self) -> bool:
+        return (self.cfg.watchdog_mode == "rollback"
+                and self.adapter.capabilities().rollback)
+
     # ------------------------------------------------------------- turn flow
     async def begin_turn(self, player_id: int, agent_id: str, turn: int) -> None:
         phase = await self.adapter.current_phase()
         if phase["turn"] != turn or phase["phase_player"] != -1:
             raise RuntimeError(f"cannot begin turn {turn} from phase {phase}")
+        # PRE-phase snapshot: a begin-phase violation restores this and
+        # re-runs begin_phase (ambient re-applies; consumed chaos does not).
+        if self._can_rollback():
+            self._ls.lease_start_snapshot = self.adapter.snapshot()
         info = await self.adapter.begin_phase(player_id, turn)
         manifest = [MutationRecord.from_doc(d) for d in info["manifest"]]
         self._ls.allowed = list(manifest)
         self._ls.actual = list(self.adapter.drain_mutations())
-        if self.cfg.watchdog_mode == "rollback" and self.adapter.capabilities().rollback:
-            self._ls.snapshot = self.adapter.snapshot()
         self.log.write(
             "AMBIENT",
             match_id=self.match_id, game_instance_id=self.game_instance_id,
@@ -117,17 +145,32 @@ class Referee:
             agent_id=agent_id, visibility_scope="referee",
             manifest=[m.to_doc() for m in manifest],
         )
-        await self._sweep(player_id, agent_id, turn)
+        try:
+            violations = await self._sweep(player_id, agent_id, turn)
+        except MatchAborted:
+            raise
+        if violations and self._can_rollback() and self._ls.lease_start_snapshot:
+            self.adapter.restore(self._ls.lease_start_snapshot)
+            info = await self.adapter.begin_phase(player_id, turn)
+            manifest = [MutationRecord.from_doc(d) for d in info["manifest"]]
+            self._ls.allowed = list(manifest)
+            self._ls.actual = list(self.adapter.drain_mutations())
+            self.log.write(
+                "AMBIENT",
+                match_id=self.match_id, game_instance_id=self.game_instance_id,
+                turn=turn, phase_player_id=player_id, player_id=player_id,
+                agent_id=agent_id, visibility_scope="referee",
+                note="re-applied after begin-phase rollback",
+                manifest=[m.to_doc() for m in manifest],
+            )
+            # re-verify the lease window is clean now
+            await self._sweep(player_id, agent_id, turn)
 
     async def end_turn(self, ctx: SessionCtx) -> dict[str, Any]:
         t0 = time.perf_counter()
         phase = await self._phase()
-        reason = validate_lease(
-            ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
-            player_id=ctx.player_id, agent_id=ctx.agent_id,
-        )
+        reason = self._lease_reason(ctx, phase, tool="end_turn", args={})
         if reason is not None:
-            self._unauthorized(ctx, phase, reason, tool="end_turn", args={})
             self.telemetry.note_call(ctx.agent_id, "end_turn",
                                      int((time.perf_counter() - t0) * 1000), ok=False)
             self._emit_pair(ctx, phase, "end_turn", {}, None,
@@ -137,6 +180,21 @@ class Referee:
         await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
         await self.adapter.end_phase(ctx.player_id, turn)
         ctx.lease.release()
+        # Post-phase sweep: chaos fired INSIDE adapter.end_phase is caught HERE,
+        # blamed on this agent — never silently carried into the final state or
+        # dumped on the next player's ledger. Flag-and-count only (see module
+        # docstring for why rollback does not apply past the phase boundary).
+        try:
+            await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
+        except MatchAborted:
+            self.log.write(
+                "LEASE_RELEASE",
+                match_id=self.match_id, game_instance_id=self.game_instance_id,
+                turn=turn, phase_player_id=ctx.player_id, player_id=ctx.player_id,
+                agent_id=ctx.agent_id, visibility_scope="referee",
+                lease_id=ctx.lease.lease_id, aborted=True,
+            )
+            raise
         self.log.write(
             "LEASE_RELEASE",
             match_id=self.match_id, game_instance_id=self.game_instance_id,
@@ -178,12 +236,8 @@ class Referee:
             self.telemetry.note_call(ctx.agent_id, tool,
                                      int((time.perf_counter() - t0) * 1000), ok=False)
             return {"error": "referee scope is not agent-reachable"}
-        reason = validate_lease(
-            ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
-            player_id=ctx.player_id, agent_id=ctx.agent_id,
-        )
+        reason = self._lease_reason(ctx, phase, tool=tool, args=args)
         if reason is not None:
-            self._unauthorized(ctx, phase, reason, tool=tool, args={})
             self.telemetry.note_call(ctx.agent_id, tool,
                                      int((time.perf_counter() - t0) * 1000), ok=False)
             self._emit_pair(ctx, phase, tool, args, None,
@@ -215,12 +269,8 @@ class Referee:
         if tool == "end_turn":
             return await self.end_turn(ctx)
 
-        reason = validate_lease(
-            ctx.lease, current_turn=phase["turn"], phase_player=phase["phase_player"],
-            player_id=ctx.player_id, agent_id=ctx.agent_id,
-        )
+        reason = self._lease_reason(ctx, phase, tool=tool, args=args)
         if reason is not None:
-            self._unauthorized(ctx, phase, reason, tool=tool, args=args)
             self.telemetry.note_call(ctx.agent_id, tool,
                                      int((time.perf_counter() - t0) * 1000), ok=False)
             return {"status": "rejected", "rejection": reason.value}
@@ -250,6 +300,9 @@ class Referee:
                                      int((time.perf_counter() - t0) * 1000), ok=True)
             return doc
 
+        # PER-COMMAND snapshot: a rollback undoes only this command; earlier
+        # accepted commands in the lease survive.
+        cmd_snapshot = self.adapter.snapshot() if self._can_rollback() else None
         pre_hash = self.adapter.state_hash()
         res = await self.adapter.act(ActionCommand(
             tool=tool, args=args, player_id=ctx.player_id,
@@ -281,29 +334,43 @@ class Referee:
                 "status": "accepted", "tool": tool, "result": res.result,
             })
 
-        violations = await self._sweep(ctx.player_id, ctx.agent_id, phase["turn"])
-        if (violations and self.cfg.watchdog_mode == "rollback"
-                and self.adapter.capabilities().rollback
-                and self._ls.snapshot is not None):
-            self.adapter.restore(self._ls.snapshot)
-            # the command is rolled back: state is restored, the key is NOT
-            # recorded (a retry may re-execute), and a follow-up rejection
-            # record tells replay to skip this command.
-            rolled = self.dedupe.seen(key)
-            if rolled is not None:
-                self.dedupe.forget(key)
-            self.log.write(
-                "TOOL_RESULT",
-                match_id=self.match_id, game_instance_id=self.game_instance_id,
-                turn=phase["turn"], phase_player_id=ctx.player_id,
-                player_id=ctx.player_id, agent_id=ctx.agent_id,
-                visibility_scope="referee", tool=tool,
-                idempotency_key=key, status="rejected", rejection="rollback",
-                rolled_back=True, after_state_hash=self.adapter.state_hash(),
-            )
-            doc = {**doc, "status": "rejected", "rejection": "rollback",
-                   "rolled_back": True}
+        try:
+            violations = await self._sweep(ctx.player_id, ctx.agent_id, phase["turn"])
+        except MatchAborted:
+            # the limit tripped: still roll the command back before aborting
+            if cmd_snapshot is not None:
+                self._rollback_command(ctx, phase, tool, key, cmd_snapshot)
+            raise
+        if violations and cmd_snapshot is not None:
+            doc = self._rollback_command(ctx, phase, tool, key, cmd_snapshot, doc)
         return doc
+
+    def _rollback_command(
+        self,
+        ctx: SessionCtx,
+        phase: dict[str, Any],
+        tool: str,
+        key: str,
+        cmd_snapshot: Any,
+        doc: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Restore the per-command snapshot; mark the command rejected for replay."""
+        self.adapter.restore(cmd_snapshot)
+        if self.dedupe.seen(key) is not None:
+            self.dedupe.forget(key)  # a retry may re-execute
+        self.log.write(
+            "TOOL_RESULT",
+            match_id=self.match_id, game_instance_id=self.game_instance_id,
+            turn=phase["turn"], phase_player_id=ctx.player_id,
+            player_id=ctx.player_id, agent_id=ctx.agent_id,
+            visibility_scope="referee", tool=tool,
+            idempotency_key=key, status="rejected", rejection="rollback",
+            rolled_back=True, after_state_hash=self.adapter.state_hash(),
+        )
+        if doc is not None:
+            return {**doc, "status": "rejected", "rejection": "rollback",
+                    "rolled_back": True}
+        return {"status": "rejected", "rejection": "rollback", "rolled_back": True}
 
     # -------------------------------------------------------------- watchdog
     async def _sweep(self, player_id: int, agent_id: str, turn: int,
@@ -351,6 +418,12 @@ class Referee:
         if agent_id is None:
             return self.violations_total
         return self.violations_by_agent.get(agent_id, 0)
+
+    def restore_violation_counters(self, total: int,
+                                   by_agent: dict[str, int] | None) -> None:
+        """Resume support: restore counters persisted in checkpoints."""
+        self.violations_total = int(total)
+        self.violations_by_agent = dict(by_agent or {})
 
     def _unauthorized(self, ctx: SessionCtx, phase: dict[str, Any],
                       reason: RejectionReason, *, tool: str, args: dict[str, Any],

@@ -7,7 +7,6 @@ maps tool-schema calls onto this same registry — the seam stays stable.
 
 from __future__ import annotations
 
-import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -127,14 +126,28 @@ TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
 }
 
 
+def _bind(fn: Callable[..., Any], ctx: SessionCtx) -> Callable[..., Any]:
+    """Closure binding: the ctx must NOT be stored as an attribute (a facade
+    handed to arbitrary runtime code exposes every attribute, underscore or
+    not). A closure keeps the reference off the attribute surface entirely;
+    `functools.partial` would expose it via `.args`."""
+
+    async def bound(*args: Any, **kwargs: Any) -> Any:
+        return await fn(ctx, *args, **kwargs)
+
+    return bound
+
+
 class ToolFacade:
-    """The object an agent runtime receives: bound tools, nothing else."""
+    """The object an agent runtime receives: bound tools, nothing else.
+
+    No attribute of this object is (or reaches) the referee, the adapter, or
+    any player identity. Deep reflection into closure cells is outside the
+    spike's threat model (LLM tool-callers, not hostile Python); the
+    attribute surface is what the tests pin."""
 
     def __init__(self, ctx: SessionCtx) -> None:
-        self._ctx = ctx
-        self._bound = {
-            name: functools.partial(fn, ctx) for name, fn in TOOL_REGISTRY.items()
-        }
+        self._bound = {name: _bind(fn, ctx) for name, fn in TOOL_REGISTRY.items()}
 
     def names(self) -> list[str]:
         return sorted(self._bound)
