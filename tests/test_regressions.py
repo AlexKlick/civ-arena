@@ -368,16 +368,18 @@ async def test_begin_phase_limit_abort_restores_pre_phase_state(tmp_path):
 
 async def test_abort_cleanup_sweeps_end_phase_chaos(tmp_path):
     """R2-3 (P1): the coordinator's post-abort phase close goes through the
-    referee, so end-phase chaos during cleanup is flagged, not smuggled."""
+    referee, so end-phase chaos during cleanup is flagged, not smuggled.
+    limit=0 aborts on the FIRST act-time violation, MID-lease — the phase is
+    still open when cleanup runs, which is exactly the path under test."""
     from civ_arena.arena.coordinator import Arena
     from civ_arena.config import AgentSpec, ChaosSpec, MatchSpec
 
     spec = MatchSpec(
         match_id="abort-cleanup", seed=90909, max_turns=10, adapter="simulator",
-        watchdog_mode="flag_and_continue", violation_limit=1, checkpoint_every=5,
+        watchdog_mode="flag_and_continue", violation_limit=0, checkpoint_every=5,
         agents=[AgentSpec("roman", 0, "expansionist", 11),
                 AgentSpec("korea", 1, "turtler", 22)],
-        chaos=[ChaosSpec("steal_gold", offset=1),          # act-time: flags + aborts
+        chaos=[ChaosSpec("steal_gold", offset=1),          # act-time: aborts mid-lease
                ChaosSpec("spawn_free_unit", hook="end_phase", offset=0)],
     )
     arena = Arena(tmp_path / "run", spec)
@@ -385,12 +387,37 @@ async def test_abort_cleanup_sweeps_end_phase_chaos(tmp_path):
     assert summary["aborted"] is not None
     violations = [r for r in arena.log.records() if r["kind"] == "VIOLATION"]
     assert violations, "the act-time violation must be flagged"
-    # the end-phase cleanup mutation must ALSO be flagged (never unobserved)
+    # the end-phase CLEANUP mutation (fired inside abort_cleanup's end_phase)
+    # must ALSO be flagged — never unobserved
     spawned = any(
         m.get("kind") == "unit.spawned"
         for v in violations for m in v["watchdog"]["mutations"]
     )
     assert spawned, "end-phase chaos during abort cleanup must be swept"
+    # cleanup actually closed the phase (the abort happened mid-lease)
+    assert arena.adapter.state is not None
+    assert arena.adapter.state.phase_player == -1
+
+
+async def test_begin_phase_retry_exhaustion_leaves_phase_open(tmp_path):
+    """R3-1 (P1): with MORE begin-phase violations than rollback retries, the
+    final attempt's phase must stay OPEN — a closed phase would strand the
+    lease (it could neither act nor end its turn)."""
+    adapter, referee, log, ctx, _director = await harness(
+        tmp_path,
+        chaos=[ChaosEvent(MutationSpec.STEAL_GOLD, hook="begin_phase"),
+               ChaosEvent(MutationSpec.STEAL_GOLD, hook="begin_phase"),
+               ChaosEvent(MutationSpec.STEAL_GOLD, hook="begin_phase")],
+        mode="rollback", violation_limit=50)
+    assert adapter.state.phase_player == 0, (
+        "after retry exhaustion the lease's phase must be open"
+    )
+    assert len(violation_docs(log)) >= 3
+    # the lease remains fully usable
+    settler = own_units(adapter.state, 0, "SETTLER")[0]
+    doc = await referee.execute(ctx, "found_city", {"unit_id": settler["unit_id"]})
+    assert doc["status"] == "accepted"
+    assert (await referee.end_turn(ctx))["status"] == "accepted"
 
 
 async def test_end_phase_limit_abort_is_replayable(tmp_path):

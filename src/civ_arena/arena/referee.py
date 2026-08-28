@@ -161,10 +161,12 @@ class Referee:
                 raise
             if not violations or snapshot is None:
                 return  # clean, or flag-and-continue mode: state stands
-            self.adapter.restore(snapshot)
-            self._ls = _LeaseState(lease_start_snapshot=snapshot)
-        # retries exhausted: the last attempt's state stands with its
-        # violations flagged (bounded to guarantee termination)
+            if attempt < 2:
+                self.adapter.restore(snapshot)
+                self._ls = _LeaseState(lease_start_snapshot=snapshot)
+        # Retries exhausted: the LAST attempt's phase stays OPEN with its
+        # violations flagged — a closed phase would strand the lease (it can
+        # neither act nor end its phase). Bounded: at most 3 rollbacks.
 
     async def end_turn(self, ctx: SessionCtx) -> dict[str, Any]:
         t0 = time.perf_counter()

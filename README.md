@@ -41,8 +41,10 @@ uv run ruff check .
 
 The FireTuner wire layer under `src/civ_arena/game/civ6/vendor/` is vendored
 from [`lmwilki/civ6-mcp`](https://github.com/lmwilki/civ6-mcp) (MIT) — see
-`vendor/VENDORED.md`. The arena architecture follows the agent-vs-agent design
-sketched in that project's `docs/agent-vs-agent.md` proposal, hardened per
-this repository's own fairness model (`docs/design-notes.md`).
+`src/civ_arena/game/civ6/vendor/VENDORED.md` for the exact local diff. The
+arena architecture follows the agent-vs-agent design sketched in that
+project's upstream `docs/agent-vs-agent.md` proposal (a file in the upstream
+repository, not in this one; local reference clone at `~/documents/civ6-mcp`),
+hardened per this repository's own fairness model (`docs/design-notes.md`).
 
 Local pytest is the only release gate. No hosted CI.
