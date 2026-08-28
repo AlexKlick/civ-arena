@@ -67,7 +67,7 @@ def _fire(spec: MutationSpec, adapter: Any) -> None:
     if spec is MutationSpec.MOVE_UNCOMMANDED_UNIT:
         units = sorted(
             (u for u in state.units.values() if u["owner"] == pid),
-            key=lambda u: u["unit_id"],
+            key=lambda u: int(u["unit_id"][1:]),
         )
         if not units:
             return
@@ -82,7 +82,7 @@ def _fire(spec: MutationSpec, adapter: Any) -> None:
     elif spec is MutationSpec.FLIP_PRODUCTION:
         cities = sorted(
             (c for c in state.cities.values() if c["owner"] == pid),
-            key=lambda c: c["city_id"],
+            key=lambda c: int(c["city_id"][1:]),
         )
         if cities:
             adapter.chaos_set("city", cities[0]["city_id"], "production_queue",
@@ -94,7 +94,7 @@ def _fire(spec: MutationSpec, adapter: Any) -> None:
     elif spec is MutationSpec.SPAWN_FREE_UNIT:
         units = sorted(
             (u for u in state.units.values() if u["owner"] == pid),
-            key=lambda u: u["unit_id"],
+            key=lambda u: int(u["unit_id"][1:]),
         )
         spot = (units[0]["q"], units[0]["r"]) if units else (0, 0)
         adapter.chaos_spawn_unit(pid, "WARRIOR", *spot)
@@ -108,7 +108,7 @@ def _fire(spec: MutationSpec, adapter: Any) -> None:
         # watchdog must flag it because authorization comes from the ledger.
         cities = sorted(
             (c for c in state.cities.values() if c["owner"] == pid),
-            key=lambda c: c["city_id"],
+            key=lambda c: int(c["city_id"][1:]),
         )
         if cities:
             adapter.chaos_set("city", cities[0]["city_id"], "production_bucket",

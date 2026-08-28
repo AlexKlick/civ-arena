@@ -41,11 +41,11 @@ def run_ambient(state: SimState, player_id: int) -> list[MutationRecord]:
     muts: list[MutationRecord] = []
     own_units = sorted(
         (u for u in state.units.values() if u["owner"] == player_id),
-        key=lambda u: u["unit_id"],
+        key=lambda u: int(u["unit_id"][1:]),
     )
     own_cities = sorted(
         (c for c in state.cities.values() if c["owner"] == player_id),
-        key=lambda c: c["city_id"],
+        key=lambda c: int(c["city_id"][1:]),
     )
 
     # 1. healing — units that were idle last turn (full movement) heal
@@ -175,7 +175,7 @@ def stock_ai_turn(state: SimState, player_id: int) -> list[MutationRecord]:
     muts: list[MutationRecord] = []
     for unit in sorted(
         (u for u in state.units.values() if u["owner"] == player_id),
-        key=lambda u: u["unit_id"],
+        key=lambda u: int(u["unit_id"][1:]),
     ):
         live = state.unit(unit["unit_id"])
         if live is None:
@@ -187,7 +187,7 @@ def stock_ai_turn(state: SimState, player_id: int) -> list[MutationRecord]:
                 break
     for city in sorted(
         (c for c in state.cities.values() if c["owner"] == player_id),
-        key=lambda c: c["city_id"],
+        key=lambda c: int(c["city_id"][1:]),
     ):
         args = {"city_id": city["city_id"], "item_id": "WARRIOR"}
         if check_action(state, player_id, "set_city_production", args) is None:

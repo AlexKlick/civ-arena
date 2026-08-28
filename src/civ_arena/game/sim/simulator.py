@@ -117,9 +117,17 @@ class SimulatorAdapter:
                 "tiles": {k: dict(v) for k, v in state.tiles.items()},
             }
         if req.kind is ObserveKind.UNITS:
-            return [dict(u) for u in state.units.values()]
+            # deterministic observation order (numeric id) — dict insertion
+            # order does not survive checkpoint round-trips
+            return sorted(
+                (dict(u) for u in state.units.values()),
+                key=lambda u: int(u["unit_id"][1:]),
+            )
         if req.kind is ObserveKind.CITIES:
-            return [dict(c) for c in state.cities.values()]
+            return sorted(
+                (dict(c) for c in state.cities.values()),
+                key=lambda c: int(c["city_id"][1:]),
+            )
         if req.kind is ObserveKind.VISIBLE_MAP:
             return {
                 "turn": state.turn,

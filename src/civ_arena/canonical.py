@@ -87,11 +87,12 @@ def checkpoint_hash(sim_doc: Any, rng_states: dict[str, list], coordinator_state
 def log_prefix_hash(records: list[dict[str, Any]]) -> str:
     """Hash over the canonical form of the first N event records (order = seq).
 
-    Envelope fields (ts, duration_ms) are stripped before hashing — the log
-    prefix identity must hold across processes and restarts.
+    Envelope fields (ts, duration_ms, game_instance_id) are stripped before
+    hashing — the log prefix identity must hold across processes and restarts.
     """
+    envelope = ("ts", "duration_ms", "game_instance_id")
     stripped = [
-        {k: v for k, v in rec.items() if k not in ("ts", "duration_ms")} for rec in records
+        {k: v for k, v in rec.items() if k not in envelope} for rec in records
     ]
     return sha256_hex(canonical(stripped))
 

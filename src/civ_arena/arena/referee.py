@@ -168,7 +168,8 @@ class Referee:
     ) -> Any:
         t0 = time.perf_counter()
         tool = f"get_{kind.value}"
-        args = {"subject_id": subject_id} if subject_id else {}
+        # record the tool's real positional arg name so replay can dispatch
+        args = {"city_id": subject_id} if subject_id else {}
         phase = await self._phase()
         if scope is Scope.REFEREE:
             self._unauthorized(ctx, phase, RejectionReason.ARGS_INVALID,

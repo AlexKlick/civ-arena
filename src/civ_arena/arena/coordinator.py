@@ -29,7 +29,8 @@ def _write_heartbeat(run_dir: Path, phase: str, turn: int) -> None:
 
 
 class Arena:
-    def __init__(self, run_dir: Path, spec: MatchSpec) -> None:
+    def __init__(self, run_dir: Path, spec: MatchSpec,
+                 runtimes: dict[int, Any] | None = None) -> None:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "checkpoints").mkdir(exist_ok=True)
@@ -51,12 +52,15 @@ class Arena:
         self.runtimes: dict[int, Any] = {}
         self.sessions: dict[int, PlayerSession] = {}
         for agent_spec in spec.agents:
-            profile = AgentProfile(
-                agent_id=agent_spec.agent_id, player_id=agent_spec.player_id,
-                policy=agent_spec.policy, seed=agent_spec.seed,
-                model=agent_spec.model,
-            )
-            self.runtimes[agent_spec.player_id] = build_runtime(profile)
+            if runtimes is not None and agent_spec.player_id in runtimes:
+                self.runtimes[agent_spec.player_id] = runtimes[agent_spec.player_id]
+            else:
+                profile = AgentProfile(
+                    agent_id=agent_spec.agent_id, player_id=agent_spec.player_id,
+                    policy=agent_spec.policy, seed=agent_spec.seed,
+                    model=agent_spec.model,
+                )
+                self.runtimes[agent_spec.player_id] = build_runtime(profile)
             self.sessions[agent_spec.player_id] = PlayerSession(
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
         self.checkpoints = CheckpointManager(

@@ -87,10 +87,12 @@ def test_args_digest_stable():
 
 
 def test_log_prefix_hash_ignores_envelope_fields():
-    base = {"seq": 0, "kind": "TOOL_CALL", "args": {"x": 1}, "ts": "2026-01-01T00:00:00"}
+    base = {"seq": 0, "kind": "TOOL_CALL", "args": {"x": 1}, "ts": "2026-01-01T00:00:00",
+            "game_instance_id": "m1-i111"}
     variant = dict(base)
     variant["ts"] = "2027-12-31T23:59:59"
     variant["duration_ms"] = 17
+    variant["game_instance_id"] = "m1-i999"  # process-lifetime label, not content
     assert log_prefix_hash([base]) == log_prefix_hash([variant])
     other = dict(base)
     other["args"] = {"x": 2}
