@@ -31,6 +31,8 @@ asyncio_mode = "auto"
 line-length = 100
 src = ["src", "tests"]
 target-version = "py312"
+# vendored upstream code is verbatim by policy (see vendor/VENDORED.md)
+extend-exclude = ["src/civ_arena/game/civ6/vendor"]
 
 [tool.ruff.lint]
 select = [
