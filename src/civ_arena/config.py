@@ -1,7 +1,8 @@
-"""Match configuration: YAML -> typed spec. Model blocks parse but are ignored.
+"""Match configuration: YAML -> typed spec.
 
-The spike has no LLM; ``model:`` exists in the schema so later stages plug in
-without config churn (a round-trip test pins that).
+``model:`` remains a display hint that parses and is ignored (a round-trip
+test pins that); the LLM lane's live wiring lives in the ``llm:`` block —
+the api key NEVER appears inline, only the NAME of the env var holding it.
 """
 
 from __future__ import annotations
@@ -17,13 +18,73 @@ class ConfigError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class LLMSpec:
+    """Provider wiring for a ``policy: llm`` agent. The wire label used by
+    telemetry is ``model_id`` — what actually went on the wire, not the
+    display-only top-level ``model:``."""
+
+    base_url: str
+    api_key_env: str
+    model_id: str
+    max_tokens: int = 4096
+    max_tool_rounds: int = 16
+    max_result_chars: int = 8000
+    request_timeout_s: float = 120.0
+    max_retries: int = 2
+    max_requests_per_match: int = 2000
+
+
+def _parse_llm(block: Any, where: str) -> LLMSpec:
+    if not isinstance(block, dict):
+        raise ConfigError(f"{where}: llm block must be a mapping")
+    if "api_key" in block:
+        # structural refusal: a literal key in YAML is a leak waiting to
+        # happen. Only the env var NAME belongs in config.
+        raise ConfigError(
+            f"{where}: llm.api_key must not appear in config — "
+            "use llm.api_key_env (name of the env var holding the key)"
+        )
+    base_url = str(_require(block, "base_url", f"{where}.llm"))
+    api_key_env = str(_require(block, "api_key_env", f"{where}.llm"))
+    model_id = str(_require(block, "model_id", f"{where}.llm"))
+    if not base_url.startswith(("http://", "https://")):
+        raise ConfigError(f"{where}.llm: base_url must be an http(s) URL")
+    if not api_key_env:
+        raise ConfigError(f"{where}.llm: api_key_env must be a non-empty name")
+    ints = {
+        "max_tokens": block.get("max_tokens", 4096),
+        "max_tool_rounds": block.get("max_tool_rounds", 16),
+        "max_result_chars": block.get("max_result_chars", 8000),
+        "max_retries": block.get("max_retries", 2),
+        "max_requests_per_match": block.get("max_requests_per_match", 2000),
+    }
+    for key, value in ints.items():
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ConfigError(f"{where}.llm: {key} must be a positive integer")
+    if ints["max_tool_rounds"] < 1:
+        raise ConfigError(f"{where}.llm: max_tool_rounds must be >= 1")
+    timeout = block.get("request_timeout_s", 120.0)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) \
+            or timeout <= 0:
+        raise ConfigError(f"{where}.llm: request_timeout_s must be positive")
+    return LLMSpec(
+        base_url=base_url, api_key_env=api_key_env, model_id=model_id,
+        max_tokens=ints["max_tokens"], max_tool_rounds=ints["max_tool_rounds"],
+        max_result_chars=ints["max_result_chars"],
+        request_timeout_s=float(timeout), max_retries=ints["max_retries"],
+        max_requests_per_match=ints["max_requests_per_match"],
+    )
+
+
 @dataclass
 class AgentSpec:
     agent_id: str
     player_id: int
-    policy: str  # "expansionist" | "turtler"
+    policy: str  # "expansionist" | "turtler" | "llm"
     seed: int
-    model: str | None = None  # parsed and ignored in the spike
+    model: str | None = None  # display hint; parsed and ignored
+    llm: LLMSpec | None = None
 
 
 @dataclass
@@ -52,7 +113,7 @@ class MatchSpec:
         raise ConfigError(f"no agent for player {player_id}")
 
 
-VALID_POLICIES = frozenset({"expansionist", "turtler"})
+VALID_POLICIES = frozenset({"expansionist", "turtler", "llm"})
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
 
@@ -89,10 +150,18 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             player_id=int(_require(entry, "player_id", where)),
             policy=str(_require(entry, "policy", where)),
             seed=int(entry.get("seed", seed * 10 + i)),
-            model=entry.get("model"),  # parsed and ignored
+            model=entry.get("model"),  # display hint; parsed and ignored
+            llm=_parse_llm(entry["llm"], where) if "llm" in entry else None,
         )
         if agent.policy not in VALID_POLICIES:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
+        if agent.policy == "llm" and agent.llm is None:
+            raise ConfigError(f"{where}: policy 'llm' requires an llm: block")
+        if agent.policy != "llm" and agent.llm is not None:
+            raise ConfigError(
+                f"{where}: llm: block on policy {agent.policy!r} — remove it "
+                "or set policy: llm (fail loudly, never silently ignore)"
+            )
         if agent.player_id in seen_players:
             raise ConfigError(f"{where}: duplicate player_id {agent.player_id}")
         seen_players.add(agent.player_id)
