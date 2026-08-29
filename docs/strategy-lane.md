@@ -113,4 +113,33 @@ already structured):
 
 ## Live validation
 
-(recorded in the LLM lane table format after the M11 validation runs)
+### 2026-08-29 — M11 complete (review rounds 1–5 converged; 11→8→5→3→3)
+
+`configs/llm-vs-turtler-002.yaml` — the same duel as the M10 baseline
+(`llm-vs-turtler-001`: same seed 947381, same MiniMax-M3 vs the scripted
+turtler), with the typed memory tools in the model's hands. A 2-turn smoke
+gated the paid run at the final HEAD (0 violations, REPLAY OK 138 events).
+
+| Run | Result |
+|---|---|
+| `llm-vs-turtler-002` (40 turns) | finished, **0 violations**; tokens 550,242 in / 151,466 out (+34% input vs baseline — the memory view's cost); 979 LLM tool calls, 9 model-side malformed-args (self-corrected); 395 counted posts of the 2000 budget; final score ROME **4 cities / 21 pop / 509 gold** / 24 units / 8 techs vs KOREA 2 / 15 / 81 / 20 / 8 — where the M10 baseline played the turtler to a 2-city draw with 86 gold, the memory-enabled run doubled the empire and banked 6× the gold |
+| replay of the 40-turn run | **REPLAY OK: 2,884 comparable events identical**, zero network — claims and observation digests in the log are replay-invisible by construction |
+
+Claim adoption was immediate and sustained: 45 `set_goal` (9 goals, 26
+amendments — g1 ran 11 revisions before closing itself as "DONE: Founded
+4th city Florentia at (-1,2) on t23"), 10 predictions (one closed by its
+lesson, two pending past the horizon), 20 lessons carrying explicit
+verdicts (8 MET / 1 MISS), 34 `get_strategy` reads, and the diary relaxed
+to 30 free-form notes. The belief layer ended with 16 last-known foreign
+entities — including the enemy city c3 and three successive respawned
+defenders tracked by id across their deaths, exactly the opponent picture
+the 2000-char diary could not hold. One lesson is pure engine discovery:
+"military units CAN stack on same tile in this engine (confirmed)".
+
+Honest caveats: the model self-assesses most verdicts through lessons
+rather than metric-scored goals (g9 — "march on c2, cities>=5 by t50" —
+is the only metric-bearing goal still open at match end, so nothing was
+arena-scored on the final turn); the +34% input tokens is above the
+predicted 10–25%; and the production-gap heuristic is blind on the
+baseline (pre-M11 logs carry no digests). Rejections remained fog-of-war
+noise (move_unit), with a handful of self-corrected claim rejections.
