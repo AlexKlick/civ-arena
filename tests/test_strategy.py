@@ -1092,18 +1092,112 @@ async def test_digest_rejects_conflicting_ownership_keys():
 
 
 def test_overflow_due_goals_stay_visible_in_goals():
-    """Codex R2 #4: more due goals than the REVIEW item cap — the overflow
-    must remain in GOALS, never vanish from both sections."""
+    """Codex R3 #1/#5 (superseding the R2 #4 pin, whose count assertion
+    double-counted): with more due claims than the REVIEW item cap, every
+    claim id stays visible somewhere — full lines for the earliest six
+    (goals and predictions interleaved by deadline, so predictions are
+    never starved out by goals), the overflow ids in a summary line and in
+    GOALS."""
     from civ_arena.strategy.view import render_memory
 
     store = StrategyStore()
     store.facts.note(0, 3, {"cities": 2, "gold": 5})
-    for i in range(8):
+    for i in range(1, 9):  # eight due goals, deadline t3
         store.apply_goal(0, {"text": f"due {i}", "by_turn": 3}, 1, i)
+    # predictions with EARLIER deadlines interleave into the slots
+    store.apply_prediction(0, {"text": "earliest", "review_turn": 2}, 1, 20)
+    store.apply_prediction(0, {"text": "also early", "review_turn": 2}, 1, 21)
     text = render_memory(store, 0, 3)
-    # six in REVIEW DUE, the remaining two in GOALS — all eight somewhere
-    assert text.count("\n- goal g") + text.count("\n- g") >= 8
-    assert "g7" in text and "g8" in text
+    # predictions are visible (deadline-sorted ahead of the t3 goals)
+    assert "p1" in text and "p2" in text
+    assert "prediction p1" in text  # full line, not just the summary ids
+    # every due goal id appears somewhere: full lines, GOALS, or summary
+    for i in range(1, 9):
+        assert f"g{i}" in text, f"due goal g{i} vanished from the view"
+    # the overflow is summarized explicitly
+    assert "more due:" in text
+
+
+def test_many_due_goals_do_not_starve_predictions():
+    """Codex R3 #1: goals must not fill all six review slots ahead of
+    every prediction — interleaving is by deadline."""
+    from civ_arena.strategy.view import render_memory
+
+    store = StrategyStore()
+    store.facts.note(0, 5, {"cities": 2})
+    for i in range(1, 7):  # six due goals, deadline t5
+        store.apply_goal(0, {"text": f"goal {i}", "by_turn": 5}, 1, i)
+    store.apply_prediction(0, {"text": "pred due earlier", "review_turn": 4},
+                           1, 20)
+    text = render_memory(store, 0, 5)
+    assert "prediction p1" in text  # deadline t4 beats the t5 goals
+
+
+def test_from_log_rejects_bool_phase_identity_only():
+    """Codex R3 #2: phase_player_id=true with player_id=1 passes plain
+    equality (True == 1) — the typed check must reject it."""
+    records = _log_records()
+    doctored = []
+    for rec in records:
+        if rec.get("kind") in ("TOOL_CALL", "TOOL_RESULT") \
+                and rec.get("tool") == "set_goal":
+            rec = {**rec, "player_id": 1, "phase_player_id": True}
+        doctored.append(rec)
+    assert StrategyStore.from_log(doctored).goals == {}
+
+
+async def test_hook_collision_and_readonly_property_survive(tmp_path):
+    """Codex R3 #3/#4: a runtime with an UNRELATED bind_services signature
+    is skipped (not called with alien kwargs), and a runtime whose diary is
+    a read-only property resumes cleanly — no legacy attribute assignment
+    after the log is truncated."""
+    import json
+
+    from civ_arena.arena.checkpoints import CheckpointState
+
+    class AlienHookBot:
+        def __init__(self) -> None:
+            self.rng = random.Random(0)
+
+        def bind_services(self, services: list) -> None:  # unrelated signature
+            raise AssertionError("must never be called")
+
+        async def take_turn(self, facade: Any) -> None:
+            await facade.end_turn()
+
+    class ReadonlyDiaryBot:
+        """bind_services opts in for strategy only; diary is read-only."""
+
+        def __init__(self) -> None:
+            self.rng = random.Random(0)
+            self._diary = "frozen"
+            self.strategy = None
+
+        @property
+        def diary(self) -> str:
+            return self._diary
+
+        def bind_services(self, *, diary=None, strategy=None) -> None:
+            if strategy is not None:
+                self.strategy = strategy
+
+        async def take_turn(self, facade: Any) -> None:
+            await facade.end_turn()
+
+    spec = _strategy_spec("hook-collision", 2)
+    arena = Arena(tmp_path / "run", spec,
+                  runtimes={0: AlienHookBot(), 1: ReadonlyDiaryBot()})
+    await arena.run()  # construction + run: no hook collision, no raise
+
+    ckpt = CheckpointState.from_doc(json.loads(
+        (tmp_path / "run" / "checkpoints" / "ckpt-turn-0001.json")
+        .read_text()))
+    resumed = Arena(tmp_path / "run", spec,
+                    runtimes={0: AlienHookBot(), 1: ReadonlyDiaryBot()})
+    await resumed.run(resume_state=ckpt)  # resume: still no raise
+    readonly = resumed.runtimes[1]
+    assert readonly.diary == "frozen"  # never assigned behind its back
+    assert readonly.strategy is resumed.strategy  # hooked, though
 
 
 def test_displayed_value_is_bound_to_the_deadline():
@@ -1142,7 +1236,8 @@ def test_render_memory_budget_drops_stages_in_order():
     asserts exactly which stage went."""
     from civ_arena.strategy.view import MEMORY_BUDGET, render_memory
 
-    def noisy(resolved: int, lessons: int, seen_len: int) -> StrategyStore:
+    def noisy(resolved: int, lessons: int, seen_len: int,
+              active: int) -> StrategyStore:
         store = StrategyStore()
         store.facts.note(0, 3, {"own_cities": 2, "gold": 5})
         # 6 due goals (REVIEW DUE fills to its item cap, every line clipped)
@@ -1159,22 +1254,22 @@ def test_render_memory_budget_drops_stages_in_order():
         for i in range(6):
             unit = {**_fu(f"u{i}"), "type": "S" * seen_len}
             store.beliefs.see(0, 2, 30 + i, foreign_units=[unit])
-        for i in range(6):
+        for i in range(active):
             store.apply_goal(0, {"text": f"active {i} " + "a" * 100},
                              1, 60 + i)
         return store
 
-    # stage 1: RESOLVED is dropped, everything else survives (the long due
-    # texts clip their verdict suffix — the verdict rendering itself is
+    # stage 1: over budget pre-drop, RESOLVED is dropped, all else survives
+    # (the long due texts clip their verdict suffix — verdict rendering is
     # pinned in test_render_memory_sections_and_identity_freedom)
-    text = render_memory(noisy(3, 3, seen_len=40), 0, 3)
+    text = render_memory(noisy(3, 3, seen_len=5, active=2), 0, 3)
     assert len(text) <= MEMORY_BUDGET
     assert "RESOLVED" not in text
     assert "LESSONS" in text and "LAST SEEN" in text
     assert text.count("\n- goal g") == 6
 
     # stage 2: still over without RESOLVED — LESSONS goes too
-    text = render_memory(noisy(0, 3, seen_len=90), 0, 3)
+    text = render_memory(noisy(0, 3, seen_len=45, active=3), 0, 3)
     assert len(text) <= MEMORY_BUDGET
     assert "LESSONS" not in text
     assert "LAST SEEN" in text

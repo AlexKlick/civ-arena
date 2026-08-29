@@ -36,24 +36,28 @@ def _quote(text: str) -> str:
 def _review_due(
     store: Any, player_id: int, turn: int,
 ) -> tuple[list[str], set[str]]:
-    """Returns (lines, goal ids rendered here). The rendered ids drive the
-    GOALS dedup: a due goal that did NOT make the item cap must stay
-    visible in GOALS, not vanish from both sections."""
+    """Returns (lines, goal ids rendered in full here). Due claims are
+    interleaved by DEADLINE (goals before predictions on ties) so neither
+    kind can starve the other out of the item cap, and an overflow summary
+    line lists the ids that did not make the cap — a due claim is never
+    invisible. The rendered ids drive the GOALS dedup: overflow goals stay
+    listed in GOALS."""
+    due: list[tuple[int, int, str, str, Any]] = []
+    for goal in scoring.due_goals(store, player_id, turn):
+        due.append((goal.by_turn, 0, goal.goal_id, "goal", goal))
+    for pred in scoring.due_predictions(store, player_id, turn):
+        due.append((pred.review_turn, 1, pred.prediction_id, "prediction",
+                    pred))
+    due.sort(key=lambda t: (t[0], t[1], t[2]))
+
     lines: list[str] = []
     rendered: set[str] = set()
-    candidates: list[tuple[str, str, Any]] = []
-    for goal in scoring.due_goals(store, player_id, turn):
-        candidates.append(("goal", goal.goal_id, goal))
-    for pred in scoring.due_predictions(store, player_id, turn):
-        candidates.append(("prediction", pred.prediction_id, pred))
-    for kind_word, _cid, claim in candidates[:REVIEW_ITEM_CAP]:
+    for _deadline, _rank, claim_id, kind_word, claim in due[:REVIEW_ITEM_CAP]:
         verdict = scoring.verdict(claim, store.facts, player_id, turn)
         # the DISPLAYED value is bound to the same deadline as the verdict:
         # "MISSED (gold=150)" for a goal that had 50 at its deadline would
         # contradict the sticky verdict next to it
         as_of = min(turn, scoring.deadline_turn(claim, turn) or turn)
-        claim_id = claim.goal_id if kind_word == "goal" \
-            else claim.prediction_id
         if verdict == scoring.SELF_ASSESS:
             remedy = ("judge it: amend (set_goal) or record_lesson"
                       if kind_word == "goal"
@@ -68,8 +72,12 @@ def _review_due(
                 f"- {kind_word} {claim_id} {_quote(claim.text)} "
                 f"due t{as_of}: {verdict.upper()} ({claim.metric}={value})")
         if kind_word == "goal":
-            rendered.add(claim.goal_id)
-    return [_clip(line) for line in lines], rendered
+            rendered.add(claim_id)
+    if len(due) > REVIEW_ITEM_CAP:
+        overflow = " ".join(entry[2] for entry in due[REVIEW_ITEM_CAP:])
+        lines.append(_clip(
+            f"...and {len(due) - REVIEW_ITEM_CAP} more due: {overflow}"))
+    return lines, rendered
 
 
 def _goals(store: Any, player_id: int, exclude: set[str]) -> list[str]:

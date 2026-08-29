@@ -390,6 +390,7 @@ class StrategyStore:
             type(rec.get("player_id")) is int
             and type(rec.get("turn")) is int
             and type(rec.get("seq")) is int
+            and type(rec.get("phase_player_id")) is int
             and isinstance(rec.get("agent_id"), str)
             and isinstance(rec.get("match_id"), str)
             and isinstance(rec.get("game_instance_id"), str)

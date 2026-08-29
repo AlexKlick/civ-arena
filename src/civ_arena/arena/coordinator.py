@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import os
 import signal
@@ -30,6 +31,29 @@ def _write_heartbeat(run_dir: Path, phase: str, turn: int) -> None:
     tmp = run_dir / "heartbeat.json.tmp"
     tmp.write_text(json.dumps({"phase": phase, "turn": turn, "pid": os.getpid()}))
     os.replace(tmp, path)
+
+
+def _binds_services(rt: Any) -> bool:
+    """True only for a DELIBERATE service opt-in: a callable bind_services
+    that declares the diary and strategy keyword parameters. A runtime with
+    an unrelated same-named method (different signature) is skipped, and a
+    runtime exposing a read-only store property is never assigned behind
+    its back — the hook is the only binding path, at construction AND
+    resume."""
+    bind = getattr(rt, "bind_services", None)
+    if not callable(bind):
+        return False
+    try:
+        params = inspect.signature(bind).parameters
+    except (TypeError, ValueError):
+        return False
+    return "diary" in params and "strategy" in params
+
+
+def _wire_services(runtimes: dict[int, Any], diary: Any, strategy: Any) -> None:
+    for rt in runtimes.values():
+        if _binds_services(rt):
+            rt.bind_services(diary=diary, strategy=strategy)
 
 
 class Arena:
@@ -76,15 +100,10 @@ class Arena:
                              if agent_spec.policy == "llm" else None))
             self.sessions[agent_spec.player_id] = PlayerSession(
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
-        # Arena-owned services reach EVERY runtime that opts in via the
-        # bind_services hook, injected ones included: a runtime holding its
-        # own store reference would read empty memory after resume. A hook
-        # (not attribute probing) so a runtime exposing a read-only property
-        # never breaks Arena construction.
-        for rt in self.runtimes.values():
-            bind = getattr(rt, "bind_services", None)
-            if callable(bind):
-                bind(diary=self.diary, strategy=self.strategy)
+        # Arena-owned services reach EVERY opted-in runtime, injected ones
+        # included: a runtime holding its own store reference would read
+        # empty memory after resume.
+        _wire_services(self.runtimes, self.diary, self.strategy)
         self.checkpoints = CheckpointManager(
             self.run_dir / "checkpoints", every_n_turns=spec.checkpoint_every)
 
@@ -240,15 +259,12 @@ class Arena:
         self.strategy = StrategyStore.from_log(self.log.records())
         self.referee.strategy = self.strategy
         # the runtimes hold their OWN store references from construction —
-        # point them at the rebuilt ones or every resumed prompt reads empty
-        # and resumed writes land in a store nobody feeds back
-        for rt in self.runtimes.values():
-            if hasattr(rt, "diary"):
-                rt.diary = self.diary
-        for rt in self.runtimes.values():
-            bind = getattr(rt, "bind_services", None)
-            if callable(bind):
-                bind(diary=self.diary, strategy=self.strategy)
+        # point the opted-in ones at the rebuilt stores or every resumed
+        # prompt reads empty and resumed writes land in a store nobody
+        # feeds back. One binding path (the signature-checked hook) for
+        # construction and resume alike: no legacy attribute assignment that
+        # could hit a read-only property after the log is already truncated.
+        _wire_services(self.runtimes, self.diary, self.strategy)
         # cumulative accounting across legs (spend budget, tokens)
         telemetry_doc = state.coordinator_state.get("telemetry")
         if telemetry_doc:
