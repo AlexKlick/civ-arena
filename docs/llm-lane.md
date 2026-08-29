@@ -52,4 +52,19 @@ Same client, different config: `base_url: https://api.z.ai/api/anthropic/v1`,
 
 ## Live match validation
 
-(to be recorded after the first `llm-vs-turtler` run)
+### 2026-08-28 — shakedown complete
+
+`configs/llm-vs-turtler.yaml` (MiniMax-M3 as ROME/pid 0 vs the scripted
+turtler as KOREA/pid 1), preceded by a 2-turn smoke on the same seed:
+
+| Run | Result |
+|---|---|
+| `llm-smoke` (2 turns) | finished, 0 violations, 29 LLM tool calls, 0 errors; diary preview: *"Turn 2: Founded ANTIUM at (-5,0) on plains. u3 warrior escorting+fortifying there…"*; REPLAY OK (110 comparable events) |
+| `llm-vs-turtler-001` (40 turns) | finished, **0 violations**, 838 LLM tool calls (162 rejections = fog-of-war noise), tokens 410,477 in / 108,671 out; final score ROME 2 cities / 24 units / 8 techs vs KOREA 2 / 19 / 8 — the model played the turtler to a draw |
+| replay of the 40-turn run | **REPLAY OK: 2,580 comparable events identical**, final hash `49914109…`, zero network — the model-free replay seam holds on a real LLM match |
+
+The model wrote 38 diary entries across 40 turns and used them as genuine
+bookkeeping — its final note tracks per-unit combat damage from the turn's
+fights. The first shakedown verdict: the harness works end-to-end, and the
+model neither stalled, nor leaked, nor tripped the watchdog.
+
