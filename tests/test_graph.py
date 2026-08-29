@@ -553,6 +553,39 @@ def test_reference_to_a_future_claim_drops_rather_than_binding_an_entity():
                for d in proj.report["dropped_references"])
 
 
+def test_id_charset_boundary():
+    # 64 chars legal, 65 rejected — the bound is part of the collision
+    # story (uuid templates must not be truncated into ambiguity)
+    ok = "a" * 64
+    long = "a" * 65
+    project([_start(match_id=ok)])
+    with pytest.raises(ValueError, match="unsafe match_id"):
+        project([_start(match_id=long)])
+
+
+def test_ambiguous_claim_entity_id_drops_loudly():
+    # round-3 P2: an id naming BOTH an own claim and an entity cannot be
+    # resolved from the bare string — drop and report, never choose
+    log = [
+        _start(),
+        _obs("get_units",
+             {"own_units": 1, "foreign_units": [
+                 {"unit_id": "g1", "type": "WARRIOR", "coord": "0,0",
+                  "owner_id": 1, "hp_bucket": 2}]},
+             seq=1, pid=0, turn=1),
+        *_pair("set_goal", {"text": "a goal also named g1"}, seq=2, pid=0,
+               turn=1),
+        *_pair("record_prediction",
+               {"text": "about g1", "review_turn": 5, "subject_id": "g1"},
+               seq=4, pid=0, turn=1),
+        _end(seq=6, final_turn=2),
+    ]
+    proj = project(log)
+    assert not any(e["rel"] == "REFERENCES" for e in proj.edges)
+    assert any("ambiguous claim/entity id" in d
+               for d in proj.report["dropped_references"])
+
+
 def test_agent_node_carries_no_policy_but_the_edge_does():
     # review round-1 P2: policy is a per-MATCH fact; on the shared Agent
     # node it would make DB contents load-order dependent across matches
@@ -771,8 +804,11 @@ def test_load_plan_is_one_transaction_with_reconcile():
     # reconcile nodes, reconcile edges
     assert counts["queries"] == 6
     assert session.calls == 1  # ONE transaction: all-or-nothing
-    # the legacy pipe-uuid sweep runs FIRST, before any other statement
-    assert "CONTAINS '|'" in session.queries[0][0]
+    # the legacy sweep runs FIRST and is SCOPED to this load's own tuples —
+    # upgrading one match never strips another match's legacy relationships
+    assert "IN $legacy" in session.queries[0][0]
+    assert session.queries[0][1]["legacy"] == \
+        ["agent:roman|PLAYED_AS|m:main:player:p0"]
     assert any("DETACH DELETE" in q for q, _ in session.queries)
     reconcile = [p for q, p in session.queries if "DETACH DELETE" in q][0]
     assert reconcile["group"] == "m:main"
@@ -857,17 +893,18 @@ def test_live_db_round_trip_idempotent():
 
     try:
         with driver.session() as session:
-            # seed a LEGACY pipe-uuid, group-less edge between two live
-            # nodes — the next load's migration sweep must remove it
+            # seed a LEGACY pipe-uuid duplicate of a real PLAYED_IN edge —
+            # exactly what a pre-rework load would have written — the next
+            # load's scoped migration sweep must remove it
             session.run(
                 "MATCH (a {uuid: 'agent:roman-live'}) "
                 "MATCH (b {uuid: 'match:live-1'}) "
-                "MERGE (a)-[r:LEGACY {uuid: 'agent:roman-live|LEGACY|"
-                "match:live-1'}]->(b)")
+                "MERGE (a)-[r:PLAYED_IN {uuid: 'agent:roman-live|"
+                "PLAYED_IN|match:live-1'}]->(b)")
             legacy_before = _count(
-                session, "MATCH ()-[r]->() WHERE r.uuid CONTAINS '|' "
-                         "AND (r.uuid STARTS WITH 'agent:roman-live') "
-                         "RETURN count(r) AS c")
+                session, "MATCH ()-[r:PLAYED_IN]->(:Match "
+                         "{uuid: 'match:live-1'}) "
+                         "WHERE r.uuid CONTAINS '|' RETURN count(r) AS c")
             assert legacy_before == 1
 
         # review round-1 P2 pin: re-loading a CHANGED projection reconciles
@@ -887,6 +924,9 @@ def test_live_db_round_trip_idempotent():
                 session, "MATCH ()-[r]->() WHERE r.uuid CONTAINS '|' "
                          "AND (r.uuid STARTS WITH 'agent:roman-live') "
                          "RETURN count(r) AS c")
+            played_in_all = _count(
+                session, "MATCH ()-[r:PLAYED_IN]->(:Match "
+                         "{uuid: 'match:live-1'}) RETURN count(r) AS c")
             agent = _count(session, "MATCH (n:Agent "
                                     "{uuid: 'agent:roman-live'}) "
                                     "RETURN count(n) AS c")
@@ -896,6 +936,9 @@ def test_live_db_round_trip_idempotent():
             dupes = session.run(
                 "MATCH (n) WITH n.uuid AS u, count(*) AS c WHERE c > 1 "
                 "RETURN count(*) AS c").single()["c"]
+            rel_dupes = session.run(
+                "MATCH ()-[r]->() WITH r.uuid AS u, count(*) AS c "
+                "WHERE c > 1 RETURN count(*) AS c").single()["c"]
             session.run(
                 "MATCH (n) WHERE n.uuid STARTS WITH 'live-1:' "
                 "OR n.uuid IN ['agent:roman-live', 'agent:cart-live', "
@@ -908,6 +951,8 @@ def test_live_db_round_trip_idempotent():
     assert group_edges == 3  # 2 PLAYED_AS + 1 OBSERVED
     assert legacy_after == 0  # migrated away
     # spine intact: the agent exists exactly once, and BOTH roster agents
-    # still play in the match — exactly one PLAYED_IN edge each
-    assert agent == 1 and played_in == 2
-    assert dupes == 0  # no duplicate uuids anywhere in the DB
+    # still play in the match — the pipe duplicate gone, exactly one
+    # PLAYED_IN edge per agent
+    assert agent == 1 and played_in == 2 and played_in_all == 2
+    # no duplicate uuids anywhere in the DB — nodes OR relationships
+    assert dupes == 0 and rel_dupes == 0

@@ -416,20 +416,26 @@ def _add_reference(
     at the referencing claim's created_seq) or an entity node; dangling refs
     are dropped and reported, never guessed."""
     src = f"{group}:claim:p{pid}:{cid}:r{revision}"
-    target = ""
+    claim_target = ""
     claim_namespace = False
     for by_id in (store.goals.get(pid) or {}, store.predictions.get(pid) or {}):
         if ref in by_id:
-            # the id names a CLAIM: if no revision was authoritative yet
-            # (the reference predates the claim), it must DROP — falling
-            # through to a same-id entity would silently misbind it
             claim_namespace = True
             resolved = _revision_at(by_id[ref], created_seq)
             if resolved is not None:
-                target = f"{group}:claim:p{pid}:{ref}:r{resolved.revision}"
+                claim_target = f"{group}:claim:p{pid}:{ref}:r{resolved.revision}"
             break
-    if not target and not claim_namespace and ref in entity_ids:
-        target = f"{group}:entity:{ref}"
+    entity_hit = ref in entity_ids
+    if claim_namespace and entity_hit:
+        # the id names BOTH an own claim and an entity — real logs never
+        # produce one (claim ids are g/p/l+digits, sim entity ids are
+        # u/c+digits), and intent cannot be inferred from the bare string;
+        # drop loudly instead of choosing silently
+        dropped.append(f"p{pid}:{cid} -> {ref!r} "
+                       f"({via}, ambiguous claim/entity id)")
+        return
+    target = claim_target or (
+        f"{group}:entity:{ref}" if entity_hit else "")
     if not target:
         dropped.append(f"p{pid}:{cid} -> {ref!r} ({via})")
         return
