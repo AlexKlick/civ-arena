@@ -38,8 +38,8 @@ class ScriptedRuntime:
         await run_policy(self, facade)
 
 
-def build_runtime(profile: AgentProfile, *,
-                  telemetry: Any = None, diary: Any = None) -> AgentRuntime:
+def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
+                  diary: Any = None, on_post: Any = None) -> AgentRuntime:
     if profile.policy == "llm":
         from civ_arena.agents.llm.runtime import LLMAgentRuntime
 
@@ -48,7 +48,8 @@ def build_runtime(profile: AgentProfile, *,
                 f"agent {profile.agent_id!r}: policy 'llm' requires an LLMSpec "
                 "on the profile (config validation should have caught this)"
             )
-        return LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary)
+        return LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
+                                     on_post=on_post)
     if profile.policy == "expansionist":
         return ScriptedRuntime(profile=profile)
     if profile.policy == "turtler":

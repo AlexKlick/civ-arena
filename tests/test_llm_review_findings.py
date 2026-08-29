@@ -266,16 +266,16 @@ def test_config_bounds_finite_and_capped():
                                  max_retries=10)).agents[0].llm
 
 
-# Finding 10: the diary bound applies to the RAW text, not just the trim.
+# Finding 10: the diary bound applies to the RAW text, not just the trim —
+# bounded at the runtime (malformed args), never an event.
 async def test_padded_oversized_diary_rejected(tmp_path):
     fake = FakeModel(script=[[use("write_diary", {"text": "x" + " " * 5000}),
                               use("end_turn")]])
     arena, _ = build_arena(tmp_path, "f10-padded", 1, fake)
-    await arena.run()
+    summary = await arena.run()
     assert arena.diary.get(0) == ""
-    results = [r for r in arena.log.records()
-               if r.get("tool") == "write_diary" and r["kind"] == "TOOL_RESULT"]
-    assert results and results[-1]["status"] == "rejected"
+    assert summary["telemetry"]["roman"]["model_errors"]["llm_malformed_args"] == 1
+    assert not [r for r in arena.log.records() if r.get("tool") == "write_diary"]
 
 
 # Finding 11: from_log requires namespace identity within the pair.
@@ -408,17 +408,32 @@ async def test_model_errors_do_not_break_recount_parity(tmp_path):
     assert "llm_unknown_tool" not in tel["tool_calls"]
 
 
-# R2-8: an oversized diary write caps what is serialized into the log.
-async def test_oversized_diary_log_args_capped(tmp_path):
+# R2-8/R3-5: oversized diary text is bounded at the RUNTIME (malformed
+# args, no event) — and the referee logs args RAW so replay digests match.
+async def test_oversized_model_diary_is_malformed_and_replay_stable(tmp_path):
+    fake = FakeModel(script=[[use("write_diary", {"text": "x" + " " * 5000}),
+                              use("end_turn")]])
+    arena, _ = build_arena(tmp_path, "r35-oversized", 1, fake)
+    summary = await arena.run()
+    tel = summary["telemetry"]["roman"]
+    assert tel["model_errors"].get("llm_malformed_args") == 1
+    assert arena.diary.get(0) == ""
+    assert not [r for r in arena.log.records()
+                if r.get("tool") == "write_diary"], "no event may carry it"
+    result = await replay_run(tmp_path, arena.spec, tmp_path / "replay")
+    assert result["identical"]
+
+
+async def test_referee_oversized_diary_logs_raw_for_replay(tmp_path):
     from test_hostile_agent import hostile_setup
 
     _a, log, referee, _s, ctx, _l = await hostile_setup(tmp_path)
-    await referee.write_diary(ctx, "x" + " " * 5000)
+    big = "x" + " " * 5000
+    doc = await referee.write_diary(ctx, big)
+    assert doc["rejection"] == "args_invalid"
     call = [r for r in log.records()
             if r["kind"] == "TOOL_CALL" and r.get("tool") == "write_diary"][-1]
-    logged = call["args"]["text"]
-    assert len(logged) <= 2100, f"raw oversized text hit the log ({len(logged)})"
-    assert "[truncated, full" in logged
+    assert call["args"]["text"] == big, "logged args must be EXACTLY as sent"
 
 
 # R2-9: from_log requires match identity within the pair.
@@ -433,3 +448,134 @@ def test_from_log_requires_match_identity():
     assert DiaryStore.from_log(records).get(0) == ""
     records[1]["match_id"] = "m1"
     assert DiaryStore.from_log(records).get(0) == "cross"
+
+
+# ------------------------------------------------------------------ round 3
+
+# R3-1: spend survives the post-checkpoint crash window via spend.jsonl.
+async def test_spend_survives_crash_window(tmp_path):
+    import json
+
+    fake1 = FakeModel(script=[[use("end_turn")]])
+    arena1, _ = build_arena(tmp_path, "r31-spend", 2, fake1)
+    # wire the production spend sink into the fake client
+    arena1.runtimes[0].client.on_post = arena1._spend_sink(arena1.spec.agents[0])
+    await arena1.run()
+    assert len(fake1.requests) == 2
+    assert arena1.spend.counts() == {"0": 2}
+
+    # three requests happened after the last checkpoint, then a crash:
+    sink = arena1._spend_sink(arena1.spec.agents[0])
+    for _ in range(3):
+        sink()
+
+    ckpt = CheckpointState.from_doc(json.loads(
+        (tmp_path / "checkpoints" / "ckpt-turn-0002.json").read_text()))
+    fake2 = FakeModel(script=[[use("end_turn")]])
+    arena2, rt2 = build_arena(tmp_path, "r31-spend", 4, fake2)
+    rt2.client.on_post = arena2._spend_sink(arena2.spec.agents[0])
+    await arena2.run(resume_state=ckpt)
+    # the durable ledger (5) beats the checkpoint (2): the budget remembers
+    # everything actually attempted
+    assert rt2.client.posts_sent == 5 + 2  # 2 more turns after resume
+    assert arena2.spend.counts() == {"0": 7}
+
+
+# R3-2: an intermediate-version (agent-keyed) llm_posts checkpoint refuses.
+async def test_agent_keyed_llm_posts_checkpoint_refused(tmp_path):
+    import json
+
+    from civ_arena.canonical import checkpoint_hash
+
+    fake = FakeModel(script=[[use("end_turn")]])
+    arena1, _ = build_arena(tmp_path, "r32-keys", 2, fake)
+    await arena1.run()
+    path = tmp_path / "checkpoints" / "ckpt-turn-0002.json"
+    doc = json.loads(path.read_text())
+    doc["coordinator_state"]["llm_posts"] = {"roman": 2}  # old keying
+    doc["content_hash"] = checkpoint_hash(
+        doc["sim_doc"], doc["rng_states"],
+        {**doc["coordinator_state"], "_turn": doc["turn"],
+         "_match_id": doc["match_id"], "_seq": doc["seq"]})
+    path.write_text(json.dumps(doc, sort_keys=True))
+
+    before = len(arena1.log.records())
+    arena2, _ = build_arena(tmp_path, "r32-keys", 4, FakeModel(
+        script=[[use("end_turn")]]))
+    ckpt = CheckpointState.from_doc(json.loads(path.read_text()))
+    with pytest.raises(ValueError, match="do not cover"):
+        await arena2.run(resume_state=ckpt)
+    # R3-3: the refusal must not have touched the log
+    assert len(arena2.log.records()) == before
+
+
+# R3-3 (direct pin): a refused resume leaves the event log untouched.
+async def test_refused_resume_never_truncates(tmp_path):
+    import json
+
+    fake = FakeModel(script=[[use("end_turn")]])
+    arena1, _ = build_arena(tmp_path, "r33-notrunc", 2, fake)
+    await arena1.run()
+    path = tmp_path / "checkpoints" / "ckpt-turn-0002.json"
+    doc = json.loads(path.read_text())
+    del doc["coordinator_state"]["llm_posts"]
+    from civ_arena.canonical import checkpoint_hash
+
+    doc["content_hash"] = checkpoint_hash(
+        doc["sim_doc"], doc["rng_states"],
+        {**doc["coordinator_state"], "_turn": doc["turn"],
+         "_match_id": doc["match_id"], "_seq": doc["seq"]})
+    path.write_text(json.dumps(doc, sort_keys=True))
+    before = len((tmp_path / "events.jsonl").read_text().splitlines())
+
+    arena2, _ = build_arena(tmp_path, "r33-notrunc", 4, FakeModel(
+        script=[[use("end_turn")]]))
+    ckpt = CheckpointState.from_doc(json.loads(path.read_text()))
+    with pytest.raises(ValueError, match="predates"):
+        await arena2.run(resume_state=ckpt)
+    after = len((tmp_path / "events.jsonl").read_text().splitlines())
+    assert before == after, "a refusal mutated the run dir"
+
+
+# R3-4: merged telemetry keeps total_errors == sum of rejected calls.
+def test_merge_snapshot_total_errors_parity():
+    from civ_arena.arena.telemetry import TelemetryRegistry
+
+    reg = TelemetryRegistry()
+    reg.merge_snapshot({"roman": {
+        "tool_calls": {"attack": 5}, "tool_errors": {"attack": 1},
+        "model_errors": {"llm_malformed_args": 2},
+        "total_calls": 5, "total_errors": 1, "total_ms": 0,
+        "input_tokens": 0, "output_tokens": 0, "model": "m",
+    }})
+    doc = reg.snapshot()["roman"]
+    assert doc["total_calls"] == 5
+    assert doc["total_errors"] == 1, "rejected calls are errors"
+    assert doc["model_errors"] == {"llm_malformed_args": 2}
+
+
+# R3-6: a literal '<' in an error body is not a redaction marker.
+def test_snippet_leaves_literal_lt_alone():
+    body = "value < expected in payload " + "y" * 400
+    out = MiniMaxMessagesClient._snippet(body)
+    assert out.startswith("value < expected")
+    assert "<redacted>" not in out
+    # a cut landing inside a REAL marker still closes it
+    marked = "z" * 296 + "<redacted> tail"
+    out2 = MiniMaxMessagesClient._snippet(marked)
+    assert out2.endswith("<redacted>")
+
+
+# R3-7: from_log requires game-instance identity within the pair.
+def test_from_log_requires_game_instance_identity():
+    records = [
+        {"kind": "TOOL_CALL", "tool": "write_diary", "player_id": 0,
+         "agent_id": "a", "turn": 1, "match_id": "m", "game_instance_id": "g1",
+         "args": {"text": "x"}},
+        {"kind": "TOOL_RESULT", "tool": "write_diary", "status": "accepted",
+         "player_id": 0, "agent_id": "a", "turn": 1, "match_id": "m",
+         "game_instance_id": "g2"},
+    ]
+    assert DiaryStore.from_log(records).get(0) == ""
+    records[1]["game_instance_id"] = "g1"
+    assert DiaryStore.from_log(records).get(0) == "x"

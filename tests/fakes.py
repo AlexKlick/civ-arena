@@ -29,6 +29,7 @@ class FakeModel:
     model_name: str = "fake-model"
     posts_sent: int = 0
     closed: bool = False
+    on_post: Any = None  # mirrors the real client's durable-spend hook
 
     async def create(self, *, system: str, messages: list[dict],
                      tools: list[dict]) -> ModelReply:
@@ -38,6 +39,8 @@ class FakeModel:
             "tools": tools,
         })
         self.posts_sent += 1
+        if self.on_post is not None:
+            self.on_post()
         blocks = self.script[min(self.posts_sent - 1, len(self.script) - 1)]
         return ModelReply(content=[dict(b) for b in blocks],
                           stop_reason="tool_use", model=self.model_name,

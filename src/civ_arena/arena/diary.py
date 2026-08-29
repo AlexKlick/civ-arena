@@ -52,7 +52,8 @@ class DiaryStore:
                     or nxt.get("player_id") != rec.get("player_id")
                     or nxt.get("agent_id") != rec.get("agent_id")
                     or nxt.get("turn") != rec.get("turn")
-                    or nxt.get("match_id") != rec.get("match_id")):
+                    or nxt.get("match_id") != rec.get("match_id")
+                    or nxt.get("game_instance_id") != rec.get("game_instance_id")):
                 continue
             text = (rec.get("args") or {}).get("text")
             pid = rec.get("player_id")

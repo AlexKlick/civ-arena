@@ -14,6 +14,7 @@ from civ_arena.arena.checkpoints import CheckpointManager, CheckpointState
 from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
 from civ_arena.arena.referee import MatchAborted, Referee, RefereeConfig
+from civ_arena.arena.spend import SpendLedger
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.canonical import checkpoint_hash, log_prefix_hash, rng_to_doc, state_hash
@@ -41,6 +42,7 @@ class Arena:
         self.log = EventLog(self.run_dir / "events.jsonl")
         self.telemetry = TelemetryRegistry()
         self.diary = DiaryStore()
+        self.spend = SpendLedger(self.run_dir / "spend.jsonl")
         self.adapter = SimulatorAdapter()
         self.chaos = ChaosDirector([
             ChaosEvent(MutationSpec(e.spec), hook=e.hook, offset=e.offset)
@@ -65,7 +67,9 @@ class Arena:
                     model=agent_spec.model, llm=agent_spec.llm,
                 )
                 self.runtimes[agent_spec.player_id] = build_runtime(
-                    profile, telemetry=self.telemetry, diary=self.diary)
+                    profile, telemetry=self.telemetry, diary=self.diary,
+                    on_post=(self._spend_sink(agent_spec)
+                             if agent_spec.policy == "llm" else None))
             self.sessions[agent_spec.player_id] = PlayerSession(
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
         self.checkpoints = CheckpointManager(
@@ -159,6 +163,12 @@ class Arena:
         self.log.close()
         return summary
 
+    def _spend_sink(self, agent_spec: Any) -> Any:
+        """Durable per-attempt spend record for one LLM agent."""
+        def sink() -> None:
+            self.spend.note(agent_spec.agent_id, agent_spec.player_id)
+        return sink
+
     async def _close_runtimes(self) -> None:
         for rt in self.runtimes.values():
             aclose = getattr(rt, "aclose", None)
@@ -167,12 +177,37 @@ class Arena:
                     await aclose()
 
     # -------------------------------------------------------------- resume
+    def _validate_resume_accounting(self, state: CheckpointState) -> None:
+        """Fail-closed accounting validation — runs BEFORE any mutation of
+        the run dir (a refusal must never truncate the event log)."""
+        if not any(a.policy == "llm" for a in self.spec.agents):
+            return
+        posts = state.coordinator_state.get("llm_posts")
+        if "telemetry" not in state.coordinator_state \
+                or not isinstance(posts, dict) or not posts:
+            raise ValueError(
+                f"checkpoint from turn {state.turn} predates cross-leg "
+                "accounting (telemetry/llm_posts) and cannot resume an "
+                "llm-policy match — restart the match instead"
+            )
+        expected = {str(a.player_id) for a in self.spec.agents if a.policy == "llm"}
+        if not expected <= set(posts):
+            # e.g. an intermediate-version checkpoint keyed by agent_id
+            raise ValueError(
+                f"checkpoint llm_posts keys {sorted(posts)} do not cover "
+                f"llm players {sorted(expected)} — mismatched checkpoint "
+                "version; refusing to resume"
+            )
+
     async def _resume_from(self, state: CheckpointState) -> None:
         if state.match_id != self.spec.match_id:
             raise ValueError(
                 f"checkpoint is for match {state.match_id!r}, config is "
                 f"{self.spec.match_id!r} — refusing to resume"
             )
+        # validation before ANY mutation: a refusal must leave the run dir
+        # exactly as it was (including a completed run's MATCH_END)
+        self._validate_resume_accounting(state)
         # CheckpointState.from_doc already verified the content hash; verify
         # it against THIS config too (the hash covers sim+rng+coordinator,
         # and match identity above covers the config's match).
@@ -194,27 +229,22 @@ class Arena:
             if hasattr(rt, "diary"):
                 rt.diary = self.diary
         # cumulative accounting across legs (spend budget, tokens)
-        if any(a.policy == "llm" for a in self.spec.agents):
-            # fail closed: a checkpoint written before cross-leg accounting
-            # would silently resume an LLM match with reset spend/tokens
-            for field in ("telemetry", "llm_posts"):
-                if field not in state.coordinator_state:
-                    raise ValueError(
-                        f"checkpoint from turn {state.turn} predates "
-                        f"{field} accounting and cannot resume an llm-policy "
-                        "match — restart the match instead"
-                    )
         telemetry_doc = state.coordinator_state.get("telemetry")
         if telemetry_doc:
             self.telemetry.merge_snapshot(telemetry_doc)
         posts = state.coordinator_state.get("llm_posts") or {}
+        spend_counts = self.spend.counts()
         for pid, rt in self.runtimes.items():
             client = getattr(rt, "client", None)
-            if getattr(client, "posts_sent", None) is not None \
-                    and str(pid) in posts:
-                # monotonic: an in-process resume must never rewind a client
-                # that already sent more than the checkpoint saw
-                client.posts_sent = max(client.posts_sent, int(posts[str(pid)]))
+            if getattr(client, "posts_sent", None) is not None:
+                # monotonic over three sources: the live counter, the
+                # checkpoint, and the durable spend ledger (which survives
+                # the post-checkpoint crash window the checkpoint cannot)
+                client.posts_sent = max(
+                    client.posts_sent,
+                    int(posts.get(str(pid), 0)),
+                    spend_counts.get(str(pid), 0),
+                )
         # control-plane counters and chaos schedule must resume, not reset
         self.referee.restore_violation_counters(
             state.coordinator_state.get("violations", 0),

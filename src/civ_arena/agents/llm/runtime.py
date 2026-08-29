@@ -61,15 +61,18 @@ class LLMAgentRuntime:
 
     @classmethod
     def build(cls, profile: AgentProfile, *, telemetry: Any = None,
-              diary: Any = None, client: ModelClient | None = None
-              ) -> LLMAgentRuntime:
+              diary: Any = None, client: ModelClient | None = None,
+              on_post: Any = None) -> LLMAgentRuntime:
         if profile.llm is None:
             raise ValueError(f"agent {profile.agent_id!r}: policy 'llm' "
                              "requires an LLMSpec on the profile")
         if client is None:
             from civ_arena.agents.llm.client import MiniMaxMessagesClient
 
-            client = MiniMaxMessagesClient(profile.llm)
+            client = MiniMaxMessagesClient(profile.llm, on_post=on_post)
+        elif on_post is not None and hasattr(client, "on_post") \
+                and client.on_post is None:
+            client.on_post = on_post
         return cls(profile=profile, client=client, llm=profile.llm,
                    telemetry=telemetry, diary=diary)
 
@@ -170,6 +173,17 @@ class LLMAgentRuntime:
                 return False, self._error(
                     f"bad arguments: {key} must be {declared}, got "
                     f"{type(value).__name__}"
+                )
+            max_len = properties[key].get("maxLength")
+            if (max_len is not None and isinstance(value, str)
+                    and len(value) > max_len):
+                # bounded BEFORE any log record: an oversized diary note
+                # rejected here never reaches the referee, so no event is
+                # emitted and the model-free replay cannot diverge on it
+                self._note_error("llm_malformed_args")
+                return False, self._error(
+                    f"bad arguments: {key} exceeds maxLength {max_len} "
+                    f"(got {len(value)} chars)"
                 )
         try:
             # kwargs dispatch: no positional reordering can ever reinterpret

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -58,11 +59,16 @@ class ModelClient(Protocol):
 
 
 class MiniMaxMessagesClient:
-    """One shared AsyncClient, lazily created; close via ``aclose``."""
+    """One shared AsyncClient, lazily created; close via ``aclose``.
 
-    def __init__(self, spec: LLMSpec, auth_style: str = "x-api-key") -> None:
+    ``on_post`` (set by the coordinator) fires on EVERY counted attempt —
+    the durable spend ledger depends on it (see coordinator spend.jsonl)."""
+
+    def __init__(self, spec: LLMSpec, auth_style: str = "x-api-key",
+                 on_post: Callable[[], None] | None = None) -> None:
         self.spec = spec
         self.auth_style = auth_style
+        self.on_post = on_post
         self.posts_sent = 0  # every POST, retries included (budget authority)
         self._http: httpx.AsyncClient | None = None
 
@@ -146,6 +152,8 @@ class MiniMaxMessagesClient:
             # resolution): a missing key burns nothing, a transport failure
             # mid-flight still consumed a slot (the server may have received it)
             self.posts_sent += 1
+            if self.on_post is not None:
+                self.on_post()  # durable spend ledger (per attempt)
             try:
                 resp = await self._http.post(
                     url, json=body,
@@ -190,13 +198,16 @@ class MiniMaxMessagesClient:
     @staticmethod
     def _snippet(redacted_text: str, limit: int = 300) -> str:
         """Truncate REDACTED text without leaving a half-written marker at
-        the cut: if the limit lands inside '<redacted…', close the marker
-        so the snippet still SHOWS where a secret was removed."""
+        the cut. Only a tail that actually matches a '<redacted…' prefix
+        (>= 4 chars — a bare '<' is ordinary text) is closed; anything
+        else is left exactly as sliced."""
+        marker = "<redacted>"
         snippet = redacted_text[:limit]
-        if len(redacted_text) > limit and "<" in snippet:
-            cut = snippet.rindex("<")
-            if not snippet[cut:].endswith(">"):
-                snippet = snippet[:cut] + "<redacted>"
+        if len(redacted_text) > limit:
+            for k in range(len(marker) - 1, 3, -1):
+                if snippet.endswith(marker[:k]):
+                    snippet = snippet[:-k] + marker
+                    break
         return snippet
 
     async def aclose(self) -> None:

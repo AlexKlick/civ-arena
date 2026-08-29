@@ -166,7 +166,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "text": {"type": "string",
-                         "description": "the note to remember"},
+                         "description": "the note to remember",
+                         "maxLength": 2000},
             },
             "required": ["text"],
         },

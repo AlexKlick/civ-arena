@@ -95,6 +95,7 @@ class TelemetryRegistry:
                 stats.total_calls += int(n)
             for tool, n in (doc.get("tool_errors") or {}).items():
                 stats.tool_errors[tool] = stats.tool_errors.get(tool, 0) + int(n)
+                stats.total_errors += int(n)  # rejected calls are errors
+            # model_errors are NOT tool calls: they never touch the totals
             for key, n in (doc.get("model_errors") or {}).items():
                 stats.model_errors[key] = stats.model_errors.get(key, 0) + int(n)
-                stats.total_errors += int(n)

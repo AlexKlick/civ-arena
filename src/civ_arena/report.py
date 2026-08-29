@@ -83,6 +83,8 @@ def _latest_diaries(records: list[dict]) -> dict[str, str]:
                 and nxt.get("player_id") == rec.get("player_id")
                 and nxt.get("agent_id") == rec.get("agent_id")
                 and nxt.get("turn") == rec.get("turn")
+                and nxt.get("match_id") == rec.get("match_id")
+                and nxt.get("game_instance_id") == rec.get("game_instance_id")
                 and rec.get("agent_id")):
             text = (rec.get("args") or {}).get("text")
             if isinstance(text, str):

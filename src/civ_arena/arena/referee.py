@@ -221,18 +221,14 @@ class Referee:
         nothing here can trip the watchdog."""
         t0 = time.perf_counter()
         phase = await self._phase()
+        # args are logged RAW — exactly what the caller sent. Any transform
+        # here would change args_digest on replay and diverge the model-free
+        # replay; oversized input is bounded upstream (the LLM runtime
+        # rejects it as malformed arguments before reaching this method).
         log_args: dict[str, Any] = (
             {"text": text} if isinstance(text, str)
             else {"text": None, "bad_type": type(text).__name__}
         )
-        if isinstance(log_args["text"], str) \
-                and len(log_args["text"]) > MAX_DIARY_CHARS:
-            # cap what gets serialized+fsynced: the rejection record needs
-            # the story, not megabytes of payload
-            log_args["text"] = (log_args["text"][:MAX_DIARY_CHARS]
-                                + f"...[truncated, full "
-                                  f"{len(text)} chars]")
-            log_args["oversized"] = True
         reason = self._lease_reason(ctx, phase, tool="write_diary", args=log_args)
         if reason is not None:
             self.telemetry.note_call(ctx.agent_id, "write_diary",

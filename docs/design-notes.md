@@ -59,12 +59,15 @@ that were subsequently rolled back, so resume matches live forget-semantics.
 
 ## LLM-lane accounting semantics
 
-- **Spend budget spans resume**: checkpoints carry per-player post counts
-  (`llm_posts`) and the client's counter is restored monotonically, so a
-  resumed match continues against the SAME budget. Known bound: posts sent
-  after the last turn-boundary checkpoint and lost to a crash are
-  uncountable (nothing durable records individual model requests); with
-  `checkpoint_every: 1` the loss is at most one turn's requests per crash.
+- **Spend budget spans resume, including the crash window**: every counted
+  model attempt appends one fsync'd line to `spend.jsonl` in the run dir
+  (the coordinator wires the client's `on_post` hook to it). That ledger
+  lives OUTSIDE the event log on purpose — resume truncates the log to the
+  checkpoint prefix to roll back incomplete turns, and spend must survive
+  the rewind (money spent is not game state). On resume the client's
+  counter is restored monotonically as the max over the live counter, the
+  checkpointed `llm_posts`, and the ledger count, so repeated crash-resume
+  cannot resurrect budget.
 - **Tokens/telemetry are cumulative across legs** (checkpointed snapshot
   folded back in), EXCEPT `total_ms`: durations are wall-clock envelope
   data and are stripped from checkpoints to preserve the
