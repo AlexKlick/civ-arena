@@ -95,21 +95,15 @@ never dropped, only item-truncated. `get_strategy` returns the same shapes
   `bind_services` opt-in hook (construction and resume), never by probing
   attributes a runtime happens to expose.
 
-## Graphiti projection (M12) — shape only, no dependency, no infra
+## Graphiti projection — shipped as M12 (`docs/graph-lane.md`)
 
-When cross-game retrieval justifies a graph DB, event-logged claims and
-digests project deterministically (no LLM extraction — the claims are
-already structured):
-
-- `group_id = f"{match_id}:main"` (`timeline_id = "main"` everywhere in
-  M11; the keys are branch-aware from day one);
-- nodes: claims `f"{match_id}:main:claim:p{player_id}:{claim_id}"`,
-  entities `f"{match_id}:main:entity:{entity_id}"` (sim entity ids are
-  match-unique);
-- edges: `AUTHORED` (player→claim), `SUPERSEDES` (revision n → n−1, from
-  the history lists), `REFERENCES` (claim→entity via subject/about),
-  `OBSERVED` (player→entity, effective turn = last_seen_turn), `VERDICT`
-  (claim→derived outcome, recomputed).
+The sketch below landed, refined in one place: claim nodes are
+per-**revision** (`f"{match_id}:main:claim:p{player_id}:{claim_id}:r{rev}"`)
+so SUPERSEDES connects distinct nodes, and an agent/match spine
+(`cross_match` group, `agent:{agent_id}` uuids stable across matches) makes
+retrieval cross-game. Artifacts under `runs/<id>/graph/` are the portable
+truth; the Neo4j instance is a derived, rebuildable index. The full contract,
+loader, runbook, and live validation record: `docs/graph-lane.md`.
 
 ## Live validation
 

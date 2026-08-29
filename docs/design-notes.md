@@ -153,11 +153,19 @@ outside the checkpoint content hash — plus observation digests: an additive
 rebuildable without logging payloads and without touching the replay
 projection. Verdicts are derived at render time, never stored.
 
+## The graph lane (M12 — shipped)
+
+`docs/graph-lane.md`: the event log projects deterministically into a
+Graphiti-shaped graph (no LLM extraction — claims are already structured);
+artifacts are the portable truth, the Neo4j instance a derived, rebuildable
+index; cross-match queries run over the agent/match spine.
+
 ## Out of scope (post-spike backlog, by decision)
 
 - LLM AgentRuntime implementations; `model:` in config parses but is
   ignored (round-trip tested).
 - Diplomacy bus; `bilateral` scope is a stub.
 - The live FireTuner leg itself — see `docs/live-validation.md`.
-- Cross-game graph projection (Graphiti/Neo4j) — M12; the M11 schema is
-  shaped for it (`docs/strategy-lane.md`).
+- In-game cross-match recall (`recall_lessons` riding the observed-digest
+  trick) — M13, gated on ≥3 claim-bearing matches (the graph currently
+  holds one; any M11-tools LLM match produces them cheaply).
