@@ -47,11 +47,43 @@ def main() -> None:
     for key, n in sorted(accepted.items()):
         print(f"  {key}: {n}")
 
+    telemetry = summary.get("telemetry", {}) if summary_path.exists() else {}
+    tokens = {a: d for a, d in telemetry.items() if d.get("model")}
+    if tokens:
+        print("\nmodel usage:")
+        for agent, doc in sorted(tokens.items()):
+            print(f"  {agent}: model={doc['model']} "
+                  f"tokens={doc['input_tokens']}in/{doc['output_tokens']}out")
+
+    diaries = _latest_diaries(records)
+    if diaries:
+        print("\ndiaries (last write per agent):")
+        for agent, note in sorted(diaries.items()):
+            shown = note if len(note) <= 120 else note[:117] + "..."
+            print(f"  {agent}: {shown!r}")
+
     violations = [r for r in records if r["kind"] == "VIOLATION"]
     for v in violations:
         wd = v.get("watchdog", {})
         print(f"\nVIOLATION turn {v['turn']} agent={v.get('agent_id')} "
               f"kind={wd.get('kind')} detail={wd.get('detail')}")
+
+
+def _latest_diaries(records: list[dict]) -> dict[str, str]:
+    """Last accepted write_diary text per agent, straight from the log."""
+    notes: dict[str, str] = {}
+    for i, rec in enumerate(records):
+        if rec.get("kind") != "TOOL_CALL" or rec.get("tool") != "write_diary":
+            continue
+        if i + 1 >= len(records):
+            continue
+        nxt = records[i + 1]
+        if (nxt.get("kind") == "TOOL_RESULT" and nxt.get("tool") == "write_diary"
+                and nxt.get("status") == "accepted" and rec.get("agent_id")):
+            text = (rec.get("args") or {}).get("text")
+            if isinstance(text, str):
+                notes[rec["agent_id"]] = text
+    return notes
 
 
 def _load_records(path: Path) -> list[dict]:

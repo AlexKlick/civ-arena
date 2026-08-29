@@ -58,8 +58,12 @@ def _print_summary(summary: dict) -> None:
         print(f"  {civ}: {score}")
     print("telemetry:")
     for agent, doc in sorted(summary.get("telemetry", {}).items()):
-        print(f"  {agent}: calls={doc['total_calls']} errors={doc['total_errors']} "
-              f"ms={doc['total_ms']}")
+        line = (f"  {agent}: calls={doc['total_calls']} "
+                f"errors={doc['total_errors']} ms={doc['total_ms']}")
+        if doc.get("model"):
+            line += (f" model={doc['model']} tokens={doc['input_tokens']}in"
+                     f"/{doc['output_tokens']}out")
+        print(line)
 
 
 def main() -> None:
