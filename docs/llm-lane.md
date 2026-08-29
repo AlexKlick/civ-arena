@@ -68,3 +68,10 @@ bookkeeping — its final note tracks per-unit combat damage from the turn's
 fights. The first shakedown verdict: the harness works end-to-end, and the
 model neither stalled, nor leaked, nor tripped the watchdog.
 
+### Post-review-fix smokes
+
+2-turn smokes were re-run live after each review-fix commit; at HEAD
+(`b9901d0`, after review round 3): 0 violations, `spend.jsonl` recorded all
+15 model attempts durably, and **REPLAY OK: 126 comparable events
+identical**.
+
