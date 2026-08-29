@@ -17,18 +17,31 @@ from civ_arena.graph.projection import project
 
 
 def load_records(path: Path) -> list[dict]:
-    """Torn-tail tolerant JSONL load (the report.py discipline: a crash mid-
-    write leaves a partial final line, which is not a record)."""
+    """The EventLog._load discipline (arena/events.py): only the FINAL line
+    may be torn (a crash mid-write leaves a partial line, which is not a
+    record); mid-file corruption and a stored seq that does not equal its
+    position fail closed. The projector feeds a graph — a silent truncation
+    to a valid-looking prefix would be worse than an error."""
     if not path.exists():
         return []
-    out = []
-    for line in path.read_text().splitlines():
+    raw = path.read_text(encoding="utf-8").splitlines()
+    out: list[dict] = []
+    for i, line in enumerate(raw):
         if not line.strip():
             continue
         try:
-            out.append(json.loads(line))
+            rec = json.loads(line)
         except json.JSONDecodeError:
-            break
+            if i == len(raw) - 1:
+                return out  # torn tail from a crash mid-write
+            raise ValueError(
+                f"corrupt event log line {i}: {line[:80]!r}") from None
+        if not isinstance(rec, dict) or rec.get("seq") != len(out):
+            raise ValueError(
+                f"event log seq broken at line {i}: expected {len(out)}, "
+                f"got {rec.get('seq') if isinstance(rec, dict) else type(rec)}"
+            )
+        out.append(rec)
     return out
 
 
@@ -40,10 +53,10 @@ def main(argv: list[str] | None = None) -> None:
                          "optional graph dependency group + a running DB)")
     opts = ap.parse_args(argv)
 
-    records = load_records(opts.run_dir / "events.jsonl")
-    if not records:
-        raise SystemExit(f"error: no event records under {opts.run_dir}")
     try:
+        records = load_records(opts.run_dir / "events.jsonl")
+        if not records:
+            raise SystemExit(f"error: no event records under {opts.run_dir}")
         proj = project(records)
     except ValueError as exc:
         raise SystemExit(f"error: {exc}") from exc

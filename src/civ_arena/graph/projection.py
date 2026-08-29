@@ -28,6 +28,7 @@ per-REVISION so SUPERSEDES connects distinct nodes):
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -62,6 +63,17 @@ def _jdump(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _edge_uuid(source: str, rel: str, target: str) -> str:
+    """Injective edge uuid: ``e:<sha256-40>`` over the canonical [source,
+    rel, target] tuple. Ids from config (match_id, agent_id) and belief
+    digests are legal arbitrary strings and may contain '|' — a plain
+    pipe-join is not injective and can collide two DIFFERENT edges (found by
+    adversarial review; node uuids keep their readable template because
+    template-level collisions raise loudly instead of corrupting)."""
+    payload = _jdump([source, rel, target]).encode("utf-8")
+    return "e:" + hashlib.sha256(payload).hexdigest()[:40]
+
+
 def _revision_at(history: list[Any], created_seq: int) -> Any:
     """The revision of one claim id that was the authority when the
     referencing claim was WRITTEN: the last revision authored at or before
@@ -78,10 +90,16 @@ def _revision_at(history: list[Any], created_seq: int) -> Any:
 
 
 def _meta(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Roster, horizon and scores from the log envelope records."""
+    """Roster, horizon and scores from the log envelope records. Lifecycle
+    records must agree on ONE match: concatenated or mismatched logs fail
+    loudly rather than mixing one match's envelope with another's claims."""
     starts = [r for r in records if r.get("kind") == "MATCH_START"]
     if not starts or not isinstance(starts[0].get("match_id"), str):
         raise ValueError("no MATCH_START record — not a civ-arena event log")
+    match_ids = {s.get("match_id") for s in starts}
+    if len(match_ids) > 1:
+        raise ValueError(f"multiple MATCH_START records disagree on "
+                         f"match_id: {sorted(str(m) for m in match_ids)}")
     start = starts[0]
     config = start.get("config") if isinstance(start.get("config"), dict) else {}
     agents = [
@@ -91,7 +109,13 @@ def _meta(records: list[dict[str, Any]]) -> dict[str, Any]:
         and isinstance(entry[0], str) and isinstance(entry[1], int)
         and not isinstance(entry[1], bool) and isinstance(entry[2], str)
     ]
+    match_id = start["match_id"]
     ends = [r for r in records if r.get("kind") == "MATCH_END"]
+    strays = sorted({str(e.get("match_id")) for e in ends
+                     if e.get("match_id") != match_id})
+    if strays:
+        raise ValueError(f"MATCH_END match_id {strays} does not match the "
+                         f"MATCH_START match_id {match_id!r}")
     summary: dict[str, Any] = {}
     if ends and isinstance(ends[-1].get("summary"), dict):
         summary = ends[-1]["summary"]
@@ -126,6 +150,9 @@ def project(records: list[dict[str, Any]]) -> Projection:
     meta = _meta(records)
     match_id = meta["match_id"]
     group = f"{match_id}:main"
+    # bind every record to the selected match: a concatenated log must not
+    # leak another match's claims/digests into this match's graph
+    records = [r for r in records if r.get("match_id") == match_id]
     store = StrategyStore.from_log(records)
     final_turn: int = meta["final_turn"]
 
@@ -144,12 +171,16 @@ def project(records: list[dict[str, Any]]) -> Projection:
 
     def add_edge(source: str, rel: str, target: str,
                  **props: Any) -> None:
-        uuid = f"{source}|{rel}|{target}"
+        uuid = _edge_uuid(source, rel, target)
         if uuid in edges:
             raise ValueError(f"duplicate edge {uuid!r}")
+        # every edge carries a group_id so the loader can reconcile one
+        # match's graph without touching another match's (spine edges are
+        # cross_match and never reconciled away)
+        group_id = props.pop("edge_group", group)
         edges[uuid] = {
             "uuid": uuid, "source": source, "target": target, "rel": rel,
-            **props,
+            "group_id": group_id, **props,
         }
 
     def claim_uuid(pid: int, cid: str, revision: int) -> str:
@@ -165,9 +196,8 @@ def project(records: list[dict[str, Any]]) -> Projection:
     policy_by_agent = {agent: policy for agent, _, policy in meta["roster"]}
     for agent in sorted(policy_by_agent):
         agent_uuid = add_node(
-            f"agent:{agent}", CROSS_GROUP, ["Agent"], agent,
-            agent_id=agent, policy=policy_by_agent[agent])
-        add_edge(agent_uuid, "PLAYED_IN", match_uuid)
+            f"agent:{agent}", CROSS_GROUP, ["Agent"], agent, agent_id=agent)
+        add_edge(agent_uuid, "PLAYED_IN", match_uuid, edge_group=CROSS_GROUP)
 
     player_ids = sorted(
         set(agent_by_pid)
@@ -184,7 +214,12 @@ def project(records: list[dict[str, Any]]) -> Projection:
             policy=policy_by_agent.get(agent_id, ""))
         player_uuids[pid] = puuid
         if agent_id:
-            add_edge(f"agent:{agent_id}", "PLAYED_AS", puuid)
+            # policy is a PER-MATCH fact: same agent_id may play different
+            # policies in different matches, so it lives on the
+            # match-scoped participation edge, never on the shared Agent
+            # node (which would make DB contents load-order dependent)
+            add_edge(f"agent:{agent_id}", "PLAYED_AS", puuid,
+                     policy=policy_by_agent.get(agent_id, ""))
 
     # the match's entity universe (ids are match-global): both the entity
     # nodes and REFERENCES resolution use the same set

@@ -91,9 +91,10 @@ def _pair(tool: str, args: dict[str, Any], *, seq: int, pid: int = 0,
 
 
 def _obs(tool: str, observed: dict[str, Any], *, seq: int, pid: int = 0,
-         turn: int = 1, agent: str = "roman") -> dict[str, Any]:
+         turn: int = 1, agent: str = "roman",
+         match_id: str = "m") -> dict[str, Any]:
     return _result(tool, seq=seq, pid=pid, turn=turn, agent=agent,
-                   observed=observed)
+                   match_id=match_id, observed=observed)
 
 
 def _rich_log() -> list[dict[str, Any]]:
@@ -284,6 +285,27 @@ def test_same_turn_amend_reference_resolves_by_seq():
     assert proj.report["dropped_references"] == []
 
 
+def test_same_turn_amended_prediction_closed_by_lesson_resolves_latest():
+    # review round-1 extra pin: amend a prediction twice within one turn,
+    # then close it with a verdict lesson in a LATER turn — the lesson
+    # references the revision it actually judged (r2), never the stale r1
+    log = [
+        _start(),
+        *_pair("record_prediction", {"text": "p v1", "review_turn": 3},
+               seq=1, pid=0, turn=1),
+        *_pair("record_prediction",
+               {"text": "p v2", "prediction_id": "p1", "review_turn": 3},
+               seq=3, pid=0, turn=1),
+        *_pair("record_lesson", {"text": "p1 verdict: held", "about": "p1"},
+               seq=5, pid=0, turn=3),
+        _end(seq=7, final_turn=4),
+    ]
+    proj = project(log)
+    assert ("m:main:claim:p0:l1:r1", "REFERENCES",
+            "m:main:claim:p0:p1:r2") in _edges(proj)
+    assert proj.report["dropped_references"] == []
+
+
 def test_verdict_lesson_reference_survives_the_closure_it_causes():
     # a lesson about a DUE prediction closes it (valid_to = lesson_turn - 1);
     # the closure must not orphan the reference the verdict embodies — the
@@ -426,8 +448,13 @@ def test_entity_kind_conflict_settled_in_player_order():
 def test_project_cli_writes_artifacts(tmp_path: Path, capsys):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
+    renumbered = []
+    for rec in _rich_log():
+        rec = dict(rec)
+        rec["seq"] = len(renumbered)  # the strict loader enforces seq==position
+        renumbered.append(rec)
     (run_dir / "events.jsonl").write_text(
-        "".join(json.dumps(r, sort_keys=True) + "\n" for r in _rich_log()))
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in renumbered))
     project_cli.main([str(run_dir)])
     out = capsys.readouterr().out
     assert "match m" in out and "nodes 12" in out
@@ -442,6 +469,85 @@ def test_load_records_tolerates_torn_tail(tmp_path: Path):
     good = json.dumps(_start(), sort_keys=True) + "\n"
     path.write_text(good + '{"kind":"TOOL_RESULT","seq":1')
     assert [r["kind"] for r in load_records(path)] == ["MATCH_START"]
+
+
+def test_load_records_rejects_midfile_corruption_and_broken_seq(tmp_path: Path):
+    # EventLog._load discipline: only the FINAL line may be torn; anything
+    # else fails closed instead of truncating to a valid-looking prefix
+    path = tmp_path / "events.jsonl"
+    good = json.dumps({"kind": "MATCH_START", "seq": 0}) + "\n"
+    path.write_text(good + '{"broken\n' + good)
+    with pytest.raises(ValueError, match="corrupt event log line 1"):
+        load_records(path)
+    path.write_text(good + json.dumps({"kind": "TURN_END", "seq": 5}) + "\n")
+    with pytest.raises(ValueError, match="seq broken"):
+        load_records(path)
+
+
+def test_pipe_bearing_ids_do_not_collide_edge_uuids():
+    # review round-1 P1: match_id/agent_id/entity ids are legal arbitrary
+    # strings and may contain '|' — a pipe-join edge uuid is not injective
+    # and crashed the projection on a legal log. Edge uuids are hashes now.
+    pipey = "q:main:player:p0|OBSERVED|agent:q:main:entity:y"
+    entity = "y|PLAYED_IN|match:agent:q"
+    log = [
+        _start(match_id="agent:q", agents=[[pipey, 0, "llm"]]),
+        _obs("get_cities",
+             {"own_cities": 1, "own_population": 1,
+              "foreign_cities": [{"city_id": entity, "name": "X",
+                                   "coord": "0,0", "owner_id": 1,
+                                   "hp": 100, "population": 1}]},
+             seq=1, pid=0, turn=1, agent=pipey, match_id="agent:q"),
+        _end(seq=2, match_id="agent:q", final_turn=1),
+    ]
+    proj = project(log)  # must not raise
+    rels = [e["rel"] for e in proj.edges]
+    assert "PLAYED_IN" in rels and "OBSERVED" in rels
+    uuids = [e["uuid"] for e in proj.edges]
+    assert len(set(uuids)) == len(uuids)
+    assert all(u.startswith("e:") and len(u) == 42 for u in uuids)
+    # every edge carries a group_id so reconciliation can scope by match
+    assert all(e["group_id"] in ("agent:q:main", "cross_match")
+               for e in proj.edges)
+
+
+def test_agent_node_carries_no_policy_but_the_edge_does():
+    # review round-1 P2: policy is a per-MATCH fact; on the shared Agent
+    # node it would make DB contents load-order dependent across matches
+    proj = project(_rich_log())
+    nodes = _nodes(proj)
+    assert "policy" not in nodes["agent:roman"]
+    edge = _edges(proj)[("agent:roman", "PLAYED_AS", "m:main:player:p0")]
+    assert edge["policy"] == "llm"
+    assert nodes["m:main:player:p0"]["policy"] == "llm"  # match-scoped copy
+
+
+def test_concatenated_or_mismatched_lifecycle_fails_loudly():
+    # review round-1 P2: a concatenated log must not mix one match's
+    # envelope with another's claims
+    with pytest.raises(ValueError, match="disagree on match_id"):
+        project([_start(match_id="m1"), _start(match_id="m2")])
+    with pytest.raises(ValueError, match="does not match"):
+        project([_start(match_id="m1"), _end(seq=1, match_id="m2")])
+
+
+def test_foreign_match_records_never_leak_into_the_graph():
+    log = [_start(match_id="m1")]
+    for rec in _pair("set_goal", {"text": "foreign"}, seq=1, pid=0, turn=1):
+        rec = dict(rec, match_id="m2")
+        log.append(rec)
+    log += [_end(seq=3, match_id="m1", final_turn=2)]
+    proj = project(log)
+    assert proj.report["claims"]["goal_revisions"] == 0
+    assert all(":claim:" not in n["uuid"] for n in proj.nodes)
+
+
+def test_resume_prefix_without_match_end_falls_back_to_turn_end():
+    log = [_start(),
+           {"kind": "TURN_END", "seq": 1, "match_id": "m", "turn": 3},
+           {"kind": "TURN_END", "seq": 2, "match_id": "m", "turn": 7}]
+    proj = project(log)
+    assert proj.report["final_turn"] == 7
 
 
 # ------------------------------------------------------------ loader (M12b)
@@ -462,8 +568,10 @@ def test_node_batches_group_validate_and_chunk():
     assert [labels for labels, _ in batches] == [
         ("Claim", "Goal"), ("Claim", "Goal"), ("Entity", "City")]
     assert [r["uuid"] for r in batches[0][1]] == ["a"]
+    # uuid rides inside props so the replacing SET keeps the MERGE key
     assert batches[0][1][0]["props"] == {
-        "group_id": "g", "name": "a", "text": "x", "current": True}
+        "group_id": "g", "name": "a", "text": "x", "current": True,
+        "uuid": "a"}
 
 
 def test_node_batches_rejects_unsafe_labels():
@@ -485,7 +593,8 @@ def test_edge_batches_group_by_rel_and_validate():
     batches = list(edge_batches(edges))
     assert [(rel, len(rows)) for rel, rows in batches] == \
         [("AUTHORED", 1), ("SUPERSEDES", 1)]
-    assert batches[1][1][0]["props"] == {"amend_turn": 3}
+    assert batches[1][1][0]["props"] == {"amend_turn": 3,
+                                         "uuid": "b|SUPERSEDES|c"}
     with pytest.raises(Exception, match="unsafe relationship"):
         list(edge_batches([{"uuid": "x", "source": "a", "target": "b",
                             "rel": "REL) DETACH DELETE n"}]))
@@ -558,6 +667,82 @@ def test_query_cli_requires_subcommand():
         query_mod.main([])
 
 
+def test_token_rejects_trailing_newline():
+    # review round-1 P3: Python's `$` matches before a final newline —
+    # fullmatch closes it
+    from civ_arena.graph.load import LoadError, _token
+    with pytest.raises(LoadError, match="unsafe label"):
+        _token("label", "Safe\n")
+    assert _token("label", "Safe") == "Safe"
+
+
+def test_node_query_replaces_props_and_removes_stale_labels():
+    from civ_arena.graph.load import node_query
+    query = node_query(("Entity", "City"))
+    assert "SET n = row.props" in query  # replace: omitted props clear
+    assert " SET n :City" in query
+    assert " REMOVE n:Unit" in query and " REMOVE n:Claim" in query
+    assert " REMOVE n:City" not in query and " REMOVE n:Entity" not in query
+
+
+class _RecordingSession:
+    """Session double: counts transactions, records queries/params."""
+
+    def __init__(self):
+        self.calls = 0
+        self.queries: list[tuple[str, dict]] = []
+
+    def execute_write(self, work):
+        self.calls += 1
+        session = self
+
+        class _Tx:
+            def run(self, query, **params):
+                session.queries.append((query, params))
+                return self
+
+            def consume(self):
+                return None
+        work(_Tx())
+
+
+class _ExplodingSession:
+    def execute_write(self, work):  # pragma: no cover - must never run
+        raise AssertionError("write attempted before prevalidation")
+
+
+def test_load_plan_is_one_transaction_with_reconcile():
+    from civ_arena.graph.load import load_into_db
+    nodes = [
+        {"uuid": "agent:roman", "group_id": "cross_match",
+         "labels": ["Agent"], "name": "roman", "agent_id": "roman"},
+        {"uuid": "m:main:player:p0", "group_id": "m:main",
+         "labels": ["Player"], "name": "p0", "player_id": 0},
+    ]
+    edges = [
+        {"uuid": "e:1", "source": "agent:roman", "target": "m:main:player:p0",
+         "rel": "PLAYED_AS", "group_id": "m:main", "policy": "llm"},
+    ]
+    session = _RecordingSession()
+    counts = load_into_db(nodes, edges, session=session)
+    # agent nodes, player nodes, PLAYED_AS, reconcile nodes, reconcile edges
+    assert counts["queries"] == 5
+    assert session.calls == 1  # ONE transaction: all-or-nothing
+    assert any("DETACH DELETE" in q for q, _ in session.queries)
+    reconcile = [p for q, p in session.queries if "DETACH DELETE" in q][0]
+    assert reconcile["group"] == "m:main"
+    assert reconcile["keep_nodes"] == [n["uuid"] for n in nodes]
+    assert reconcile["keep_edges"] == ["e:1"]
+
+
+def test_unsafe_tokens_fail_before_any_write():
+    from civ_arena.graph.load import load_into_db
+    bad = [{"uuid": "x", "group_id": "g", "labels": ["X); DETACH DELETE n"],
+            "name": "x"}]
+    with pytest.raises(Exception, match="unsafe label"):
+        load_into_db(bad, [], session=_ExplodingSession())
+
+
 def test_loader_module_imports_without_driver():
     # the core must stay importable when the optional graph group is absent
     import civ_arena.graph.load as loader  # noqa: F401  (import is the test)
@@ -593,17 +778,43 @@ def test_live_db_round_trip_idempotent():
 
     nodes = [
         {"uuid": "agent:roman", "group_id": "cross_match",
-         "labels": ["Agent"], "name": "roman", "agent_id": "roman",
-         "policy": "llm"},
+         "labels": ["Agent"], "name": "roman", "agent_id": "roman"},
         {"uuid": "match:live-1", "group_id": "cross_match",
          "labels": ["Match"], "name": "live-1", "seed": 1},
+        {"uuid": "live-1:main:player:p0", "group_id": "live-1:main",
+         "labels": ["Player"], "name": "p0", "player_id": 0},
+        {"uuid": "live-1:main:claim:p0:g1:r1", "group_id": "live-1:main",
+         "labels": ["Claim", "Goal"], "name": "g1:r1", "kind": "goal"},
+        {"uuid": "live-1:main:outcome:p0:g1:r1", "group_id": "live-1:main",
+         "labels": ["Outcome"], "name": "g1:r1", "verdict": "missed"},
     ]
-    edges = [{"uuid": "agent:roman|PLAYED_IN|match:live-1",
-              "source": "agent:roman", "target": "match:live-1",
-              "rel": "PLAYED_IN"}]
+    edges = [
+        {"uuid": "agent:roman|PLAYED_IN|match:live-1",
+         "source": "agent:roman", "target": "match:live-1",
+         "rel": "PLAYED_IN", "group_id": "cross_match"},
+        {"uuid": "agent:roman|PLAYED_AS|live-1:main:player:p0",
+         "source": "agent:roman", "target": "live-1:main:player:p0",
+         "rel": "PLAYED_AS", "group_id": "live-1:main", "policy": "llm"},
+        {"uuid": "live-1:main:player:p0|AUTHORED|live-1:main:claim:p0:g1:r1",
+         "source": "live-1:main:player:p0",
+         "target": "live-1:main:claim:p0:g1:r1", "rel": "AUTHORED",
+         "group_id": "live-1:main"},
+        {"uuid": "live-1:main:claim:p0:g1:r1|VERDICT|"
+                 "live-1:main:outcome:p0:g1:r1",
+         "source": "live-1:main:claim:p0:g1:r1",
+         "target": "live-1:main:outcome:p0:g1:r1", "rel": "VERDICT",
+         "group_id": "live-1:main"},
+    ]
     first = load_into_db(nodes, edges)
     second = load_into_db(nodes, edges)  # MERGE by uuid: a no-op
     assert first == second
+
+    # review round-1 P2 pin: re-loading a CHANGED projection reconciles —
+    # the outcome and its VERDICT edge disappear, the spine survives
+    slimmer_nodes = [n for n in nodes
+                     if ":outcome:" not in n["uuid"]]
+    slimmer_edges = [e for e in edges if e["rel"] != "VERDICT"]
+    load_into_db(slimmer_nodes, slimmer_edges)
 
     from civ_arena.graph.load import config_from_env
     cfg = config_from_env()
@@ -617,8 +828,20 @@ def test_live_db_round_trip_idempotent():
             e = session.run("MATCH ()-[r:PLAYED_IN "
                             "{uuid: 'agent:roman|PLAYED_IN|match:live-1'}]->()"
                             " RETURN count(r) AS c").single()["c"]
-            session.run("MATCH (n:GraphNode) WHERE n.uuid IN "
-                        "['agent:roman', 'match:live-1'] DETACH DELETE n")
+            outcome = session.run(
+                "MATCH (n:Outcome) WHERE n.group_id = 'live-1:main' "
+                "RETURN count(n) AS c").single()["c"]
+            verdict = session.run(
+                "MATCH ()-[r:VERDICT]->() WHERE r.group_id = 'live-1:main' "
+                "RETURN count(r) AS c").single()["c"]
+            claim = session.run(
+                "MATCH (n:Claim {uuid: 'live-1:main:claim:p0:g1:r1'}) "
+                "RETURN count(n) AS c").single()["c"]
+            session.run("MATCH (n:GraphNode) WHERE n.uuid STARTS WITH "
+                        "'live-1:' OR n.uuid IN ['agent:roman', "
+                        "'match:live-1'] DETACH DELETE n")
     finally:
         driver.close()
     assert n == 1 and e == 1
+    assert outcome == 0 and verdict == 0  # reconciled away
+    assert claim == 1  # kept: still in the artifacts
