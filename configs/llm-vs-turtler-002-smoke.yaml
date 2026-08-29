@@ -1,0 +1,32 @@
+# M11 strategy-plane validation smoke: 2 turns on the same seed as the
+# 40-turn run, to gate the paid long run.
+match:
+  match_id: llm-vs-turtler-002-smoke
+  seed: 947381
+  max_turns: 2
+  checkpoint_every: 1
+  adapter: simulator
+  watchdog_mode: flag_and_continue
+  violation_limit: 5
+
+agents:
+  - agent_id: minimax-m3
+    player_id: 0
+    policy: llm
+    seed: 1101
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: korean-turtler
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []
