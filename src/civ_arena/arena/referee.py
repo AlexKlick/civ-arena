@@ -29,7 +29,7 @@ from civ_arena.arena.idempotency import DedupeIndex
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.turn_lease import TurnLease, validate_lease
 from civ_arena.arena.visibility import Scope, VisibilityPolicy
-from civ_arena.canonical import args_digest
+from civ_arena.canonical import args_digest, canonical
 from civ_arena.game.adapter import (
     ActionCommand,
     MutationRecord,
@@ -37,6 +37,7 @@ from civ_arena.game.adapter import (
     ObserveRequest,
     RejectionReason,
 )
+from civ_arena.recall import RecallCorpus
 from civ_arena.session import legality
 from civ_arena.session.tools import SessionCtx
 from civ_arena.strategy.digest import observation_digest
@@ -85,6 +86,7 @@ class Referee:
         dedupe: DedupeIndex | None = None,
         diary: DiaryStore | None = None,
         strategy: StrategyStore | None = None,
+        recall: RecallCorpus | None = None,
     ) -> None:
         self.adapter = adapter
         self.policy = policy
@@ -96,6 +98,7 @@ class Referee:
         self.dedupe = dedupe or DedupeIndex()
         self.diary = diary or DiaryStore()
         self.strategy = strategy or StrategyStore()
+        self.recall = recall
         self._lease: TurnLease | None = None
         self._ls = _LeaseState()
         self.violations_total = 0
@@ -352,6 +355,50 @@ class Referee:
                "strategy": self.strategy.view_for(ctx.player_id)}
         self._emit_pair(ctx, phase, "get_strategy", {}, None, doc)
         self.telemetry.note_call(ctx.agent_id, "get_strategy",
+                                 int((time.perf_counter() - t0) * 1000),
+                                 ok=True)
+        return doc
+
+    async def recall_lessons(self, ctx: SessionCtx, query: str) -> dict[str, Any]:
+        """Read this agent's OWN durable lessons from prior matches, by
+        topic query — the cross-match memory (M13). The get_strategy shape
+        plus one additive lift: the digest of exactly what was returned
+        rides the TOOL_RESULT as ``recalled`` (the observed-digest
+        discipline — replay's projection ignores additive fields, so
+        model-free replay cannot diverge, and the log carries what the model
+        was fed). No corpus configured -> an honest tool_unavailable
+        rejection (accepted-empty would lie about what exists)."""
+        t0 = time.perf_counter()
+        log_args = {"query": _log_safe(query)}
+        phase = await self._phase()
+        reason = self._lease_reason(ctx, phase, tool="recall_lessons",
+                                    args=log_args)
+        if reason is not None:
+            self.telemetry.note_call(ctx.agent_id, "recall_lessons",
+                                     int((time.perf_counter() - t0) * 1000),
+                                     ok=False)
+            self._emit_pair(ctx, phase, "recall_lessons", log_args, None,
+                            {"status": "rejected", "rejection": reason.value})
+            return {"status": "rejected", "rejection": reason.value}
+        if self.recall is None:
+            doc: dict[str, Any] = {
+                "status": "rejected", "rejection": "tool_unavailable",
+                "reason": "recall is not configured for this match "
+                          "(no recall_runs in the config)",
+            }
+            self._emit_pair(ctx, phase, "recall_lessons", log_args, None, doc)
+            self.telemetry.note_call(ctx.agent_id, "recall_lessons",
+                                     int((time.perf_counter() - t0) * 1000),
+                                     ok=False)
+            return doc
+        lessons = (self.recall.query(ctx.agent_id, query)
+                   if isinstance(query, str) else [])
+        digest = {"query": query, "lessons": lessons}
+        canonical(digest)  # non-canonical fails BEFORE any record is written
+        doc = {"status": "accepted", "tool": "recall_lessons",
+               "recalled": digest}
+        self._emit_pair(ctx, phase, "recall_lessons", log_args, None, doc)
+        self.telemetry.note_call(ctx.agent_id, "recall_lessons",
                                  int((time.perf_counter() - t0) * 1000),
                                  ok=True)
         return doc
@@ -644,4 +691,6 @@ class Referee:
             payload["mutations"] = result_doc["mutations"]
         if result_doc.get("observed") is not None:
             payload["observed"] = result_doc["observed"]
+        if result_doc.get("recalled") is not None:
+            payload["recalled"] = result_doc["recalled"]
         return self.log.write("TOOL_RESULT", **payload, **common)

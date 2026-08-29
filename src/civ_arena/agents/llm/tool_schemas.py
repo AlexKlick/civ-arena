@@ -66,6 +66,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "recall_lessons",
+        "description": "Durable lessons YOU recorded in earlier matches "
+            "(engine mechanics, city placement, combat takeaways), retrieved "
+            "by topic. Ask a few times early — e.g. query \"hex neighbor "
+            "coordinates\", \"city placement\", \"combat archers warriors\", "
+            "\"research order\" — and act on what comes back.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                           "description": "topic keywords to search your "
+                               "prior-match lessons for",
+                           "maxLength": 280},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "move_unit",
         "description": "Move one of your units to an adjacent tile.",
         "input_schema": {

@@ -112,6 +112,10 @@ class MatchSpec:
     checkpoint_every: int
     agents: list[AgentSpec] = field(default_factory=list)
     chaos: list[ChaosSpec] = field(default_factory=list)
+    # M13 cross-match recall: prior match_ids whose logs form the corpus.
+    # Absent/empty => the recall_lessons tool is unavailable (existing
+    # configs behave identically).
+    recall_runs: list[str] = field(default_factory=list)
 
     def agent_for_player(self, player_id: int) -> AgentSpec:
         for agent in self.agents:
@@ -193,10 +197,21 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             offset=int(entry.get("offset", 0)),
         ))
 
+    recall_runs_raw = match.get("recall_runs", [])
+    if not isinstance(recall_runs_raw, list) or any(
+            not isinstance(r, str) or not r for r in recall_runs_raw):
+        raise ConfigError("match.recall_runs must be a list of match_id "
+                          "strings when present")
+    recall_runs: list[str] = []
+    for prior in recall_runs_raw:
+        if prior not in recall_runs:
+            recall_runs.append(prior)
+
     return MatchSpec(
         match_id=match_id, seed=seed, max_turns=max_turns, adapter=adapter,
         watchdog_mode=watchdog_mode, violation_limit=violation_limit,
         checkpoint_every=checkpoint_every, agents=agents, chaos=chaos,
+        recall_runs=recall_runs,
     )
 
 

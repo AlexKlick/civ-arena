@@ -1,4 +1,4 @@
-"""The 19 agent-visible tools. NO tool takes a player/owner identity parameter.
+"""The 20 agent-visible tools. NO tool takes a player/owner identity parameter.
 
 Identity is bound server-side: each function receives an opaque SessionCtx
 whose player the referee injected at lease grant. An LLM AgentRuntime later
@@ -146,6 +146,12 @@ async def record_lesson(ctx: SessionCtx, text: str, about: str = "") -> dict:
     return await ctx.referee.record_lesson(ctx, text, about=about)
 
 
+async def recall_lessons(ctx: SessionCtx, query: str) -> dict:
+    """Read the agent's OWN durable lessons from prior matches that match a
+    topic query. Not a game action — cross-match memory retrieval."""
+    return await ctx.referee.recall_lessons(ctx, query)
+
+
 TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "get_overview": get_overview,
     "get_units": get_units,
@@ -166,6 +172,7 @@ TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "set_goal": set_goal,
     "record_prediction": record_prediction,
     "record_lesson": record_lesson,
+    "recall_lessons": recall_lessons,
 }
 
 

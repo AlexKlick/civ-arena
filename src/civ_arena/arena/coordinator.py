@@ -22,6 +22,7 @@ from civ_arena.canonical import checkpoint_hash, log_prefix_hash, rng_to_doc, st
 from civ_arena.config import MatchSpec
 from civ_arena.game.sim.chaos import ChaosDirector, ChaosEvent, MutationSpec
 from civ_arena.game.sim.simulator import SimulatorAdapter
+from civ_arena.recall import RecallCorpus
 from civ_arena.session.player_session import PlayerSession
 from civ_arena.strategy.store import StrategyStore
 
@@ -72,6 +73,13 @@ class Arena:
         self.telemetry = TelemetryRegistry()
         self.diary = DiaryStore()
         self.strategy = StrategyStore()
+        # cross-match recall corpus (M13): prior runs' lessons, read from
+        # their logs — built BEFORE any spend so a bad corpus config fails
+        # at startup, not mid-match. Absent recall_runs => tool unavailable.
+        self.recall: RecallCorpus | None = None
+        if spec.recall_runs:
+            self.recall = RecallCorpus.from_runs(
+                self.run_dir.parent, spec.match_id, spec.recall_runs)
         self.spend = SpendLedger(self.run_dir / "spend.jsonl")
         self.adapter = SimulatorAdapter()
         self.chaos = ChaosDirector([
@@ -85,6 +93,7 @@ class Arena:
                           violation_limit=spec.violation_limit),
             diary=self.diary,
             strategy=self.strategy,
+            recall=self.recall,
         )
         self.runtimes: dict[int, Any] = {}
         self.sessions: dict[int, PlayerSession] = {}
@@ -262,6 +271,13 @@ class Arena:
         # paired TOOL_CALLs, beliefs/facts from the observation digests)
         self.strategy = StrategyStore.from_log(self.log.records())
         self.referee.strategy = self.strategy
+        # the recall corpus is derived state too: prior logs are immutable
+        # so this rebuilds to the identical corpus — uniform with the other
+        # derived stores rather than special-cased as "kept"
+        self.recall = (RecallCorpus.from_runs(
+            self.run_dir.parent, self.spec.match_id, self.spec.recall_runs)
+            if self.spec.recall_runs else None)
+        self.referee.recall = self.recall
         # the runtimes hold their OWN store references from construction —
         # point the opted-in ones at the rebuilt stores or every resumed
         # prompt reads empty and resumed writes land in a store nobody

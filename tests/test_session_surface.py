@@ -11,7 +11,7 @@ FORBIDDEN_PARAM_NAMES = {"player_id", "owner_id", "player", "owner", "civilizati
 
 
 def test_no_tool_parameter_is_player_id():
-    assert len(TOOL_REGISTRY) == 19
+    assert len(TOOL_REGISTRY) == 20
     for name, fn in TOOL_REGISTRY.items():
         sig = inspect.signature(fn)
         for param_name in sig.parameters:

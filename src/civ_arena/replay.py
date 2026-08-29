@@ -45,6 +45,7 @@ ARG_ORDER: dict[str, list[str]] = {
     "record_prediction": ["text", "review_turn", "prediction_id", "subject_id",
                           "metric", "target", "confidence"],
     "record_lesson": ["text", "about"],
+    "recall_lessons": ["query"],
 }
 
 

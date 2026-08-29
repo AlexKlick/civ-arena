@@ -34,6 +34,10 @@ How to play a turn:
    asks you for a lesson. Foreign entities you have seen stay in your
    strategy record after they leave your sight, labeled with the last turn
    you saw them.
+   recall_lessons retrieves the durable lessons YOU recorded in EARLIER
+   matches, by topic query — engine mechanics, city placement, combat
+   takeaways. Ask it a few times in your first turns and act on what comes
+   back; it is read-only cross-match memory, not this match's state.
 4. Finish: call end_turn. You have a bounded number of tool rounds per turn.
 
 Facts about the world:

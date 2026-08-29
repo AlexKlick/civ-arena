@@ -147,3 +147,158 @@ def test_query_is_deterministic_and_capped():
         assert first == second
         assert len(corpus.query("roman", "lesson warriors archers cities "
                                         "grassland hex stacks")) <= LESSON_LIMIT
+
+
+# ------------------------------------------------------------ referee tool
+
+
+def _referee(tmp_path: Path, corpus: RecallCorpus | None):
+    from civ_arena.arena.events import EventLog
+    from civ_arena.arena.referee import Referee, RefereeConfig
+    from civ_arena.arena.telemetry import TelemetryRegistry
+    from civ_arena.arena.visibility import VisibilityPolicy
+    from civ_arena.game.sim.simulator import SimulatorAdapter
+    from civ_arena.session.tools import SessionCtx
+
+    adapter = SimulatorAdapter()
+
+    async def setup() -> tuple:
+        await adapter.setup({"seed": 4})
+        log = EventLog(tmp_path / "events.jsonl")
+        referee = Referee(adapter, VisibilityPolicy(), log,
+                          TelemetryRegistry(), "m", "g1", RefereeConfig(),
+                          recall=corpus)
+        lease = referee.grant_lease(0, "roman", 1)
+        await referee.begin_turn(0, "roman", 1)
+        ctx = SessionCtx(referee=referee, player_id=0, agent_id="roman",
+                         lease=lease, turn=1)
+        return referee, log, ctx
+    return setup
+
+
+async def test_recall_accepted_logged_raw_and_lifted(tmp_path: Path):
+    from civ_arena.recall import RecallCorpus as RC
+
+    corpus = RC([{"agent_id": "roman", "match_id": "prior-a", "turn": 4,
+                  "lesson_id": "l1", "text": "grassland cities grow",
+                  "about": ""}])
+    referee, log, ctx = await _referee(tmp_path, corpus)()
+    doc = await referee.recall_lessons(ctx, "city grassland placement")
+    assert doc["status"] == "accepted"
+    assert doc["recalled"]["lessons"][0]["lesson_id"] == "l1"
+    assert doc["recalled"]["query"] == "city grassland placement"
+    records = log.records()
+    call = [r for r in records if r["kind"] == "TOOL_CALL"
+            and r["tool"] == "recall_lessons"][-1]
+    result = [r for r in records if r["kind"] == "TOOL_RESULT"
+              and r["tool"] == "recall_lessons"][-1]
+    assert call["args"] == {"query": "city grassland placement"}  # RAW
+    assert result["recalled"] == doc["recalled"]  # the log carries the feed
+    assert result["result_doc"] is None  # payload rides only the lift
+    assert "before_state_hash" not in result and "mutations" not in result \
+        and "receipts" not in result  # a validated non-action
+
+
+async def test_recall_requires_the_lease(tmp_path: Path):
+    from civ_arena.session.tools import SessionCtx
+
+    referee, log, ctx = await _referee(tmp_path, None)()
+    foreign = SessionCtx(referee=referee, player_id=0, agent_id="roman",
+                         lease=None, turn=1)
+    doc = await referee.recall_lessons(foreign, "anything")
+    assert doc["status"] == "rejected"
+    assert doc["rejection"] == "lease_foreign"
+    assert any(r.get("rejection") == "lease_foreign" for r in log.records()
+               if r["kind"] == "TOOL_RESULT")
+
+
+async def test_recall_without_corpus_is_tool_unavailable(tmp_path: Path):
+    referee, log, ctx = await _referee(tmp_path, None)()
+    doc = await referee.recall_lessons(ctx, "city placement")
+    assert doc["status"] == "rejected"
+    assert doc["rejection"] == "tool_unavailable"
+    assert "recall_runs" in doc["reason"]
+    assert any(r.get("rejection") == "tool_unavailable" for r in log.records()
+               if r["kind"] == "TOOL_RESULT")
+
+
+async def test_recall_non_string_query_returns_empty(tmp_path: Path):
+    # a DIRECT caller smuggling a non-str: logged canonically, no crash,
+    # no matches — the runtime's schema enforces str for model calls
+    from civ_arena.recall import RecallCorpus as RC
+
+    corpus = RC([{"agent_id": "roman", "match_id": "prior-a", "turn": 4,
+                  "lesson_id": "l1", "text": "grassland cities grow",
+                  "about": ""}])
+    referee, _log, ctx = await _referee(tmp_path, corpus)()
+    doc = await referee.recall_lessons(ctx, 42)  # type: ignore[arg-type]
+    assert doc["status"] == "accepted"
+    assert doc["recalled"]["lessons"] == []
+
+
+def test_recall_schema_bounds_the_query():
+    from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
+
+    entry = next(s for s in TOOL_SCHEMAS if s["name"] == "recall_lessons")
+    query = entry["input_schema"]["properties"]["query"]
+    assert query["maxLength"] == 280
+    assert entry["input_schema"]["required"] == ["query"]
+
+
+# ------------------------------------------------- integration + replay
+
+
+async def test_match_with_recall_replays_model_free(tmp_path: Path):
+    from civ_arena.agents.llm.runtime import LLMAgentRuntime
+    from civ_arena.agents.runtime import AgentProfile
+    from civ_arena.arena.coordinator import Arena
+    from civ_arena.config import AgentSpec, MatchSpec
+    from civ_arena.replay import replay_run
+    from fakes import FakeModel, use
+    from test_llm_runtime import FAKE_LLM
+
+    runs = tmp_path / "runs"
+    _write_run(runs, "prior-a")
+    ms = MatchSpec(
+        match_id="recall-match", seed=424242, max_turns=1,
+        adapter="simulator", watchdog_mode="flag_and_continue",
+        violation_limit=5, checkpoint_every=1,
+        agents=[
+            AgentSpec(agent_id="roman", player_id=0, policy="llm", seed=11,
+                      llm=FAKE_LLM),
+            AgentSpec(agent_id="korea", player_id=1, policy="turtler",
+                      seed=22),
+        ],
+        recall_runs=["prior-a"],
+    )
+    fake = FakeModel(script=[[use("recall_lessons",
+                                  {"query": "grassland city growth"})],
+                             [use("end_turn")]])
+    profile = AgentProfile(agent_id="roman", player_id=0, policy="llm",
+                           seed=11, llm=FAKE_LLM)
+    rt = LLMAgentRuntime.build(profile, client=fake)
+    arena = Arena(runs / "recall-match", ms, runtimes={0: rt})
+    rt.telemetry = arena.telemetry
+    rt.diary = arena.diary
+    rt.strategy = arena.referee.strategy
+    await arena.run()
+
+    records = arena.log.records()
+    recall_results = [r for r in records if r["kind"] == "TOOL_RESULT"
+                      and r["tool"] == "recall_lessons"]
+    assert len(recall_results) == 1
+    assert recall_results[0]["status"] == "accepted"
+    assert recall_results[0]["recalled"]["lessons"][0]["match_id"] == "prior-a"
+    # the model saw exactly what the log recorded: the second request's
+    # final message is the tool_result batch carrying the stringified doc
+    fed = fake.requests[1]["messages"][-1]["content"]
+    lesson_text = recall_results[0]["recalled"]["lessons"][0]["text"]
+    assert any(lesson_text in str(b) for b in fed
+               if isinstance(b, dict))
+
+    # model-free replay: the replay Arena rebuilds the SAME corpus from the
+    # config, so the recorded accepted recall replays identically — the
+    # `recalled` field is invisible to the comparison by construction
+    out = await replay_run(runs / "recall-match", ms,
+                           runs / "recall-match-replay")
+    assert out["identical"], out.get("first_divergence")
