@@ -81,12 +81,13 @@ def _result(tool: str, *, seq: int, pid: int = 0, turn: int = 1,
 
 
 def _pair(tool: str, args: dict[str, Any], *, seq: int, pid: int = 0,
-          turn: int = 1, agent: str = "roman",
+          turn: int = 1, agent: str = "roman", match_id: str = "m",
           status: str = "accepted") -> list[dict[str, Any]]:
     return [
-        _call(tool, args, seq=seq, pid=pid, turn=turn, agent=agent),
+        _call(tool, args, seq=seq, pid=pid, turn=turn, agent=agent,
+              match_id=match_id),
         _result(tool, seq=seq + 1, pid=pid, turn=turn, agent=agent,
-                status=status),
+                match_id=match_id, status=status),
     ]
 
 
@@ -484,31 +485,72 @@ def test_load_records_rejects_midfile_corruption_and_broken_seq(tmp_path: Path):
         load_records(path)
 
 
-def test_pipe_bearing_ids_do_not_collide_edge_uuids():
-    # review round-1 P1: match_id/agent_id/entity ids are legal arbitrary
-    # strings and may contain '|' — a pipe-join edge uuid is not injective
-    # and crashed the projection on a legal log. Edge uuids are hashes now.
-    pipey = "q:main:player:p0|OBSERVED|agent:q:main:entity:y"
-    entity = "y|PLAYED_IN|match:agent:q"
+def test_unsafe_match_and_agent_ids_fail_loudly():
+    # review round-2 P1: an operator-chosen match_id containing ':' could
+    # mint a match-scoped uuid identical to another match's SPINE uuid
+    # (agent:/match:), and reconciliation would then delete spine data. The
+    # charset makes cross-namespace collisions structurally impossible.
+    with pytest.raises(ValueError, match="unsafe match_id 'agent:q'"):
+        project([_start(match_id="agent:q")])
+    with pytest.raises(ValueError, match="unsafe agent_id"):
+        project([_start(agents=[["roman:main:player:p0", 0, "llm"]])])
+    with pytest.raises(ValueError, match="unsafe match_id"):
+        project([_start(match_id="m|PLAYED_IN|match:m")])
+
+
+def test_pipe_bearing_entity_ids_keep_edge_uuids_distinct():
+    # entity ids ride behind a fixed "…:entity:" prefix, so they cannot
+    # cross namespaces — but they may contain '|', and the hashed edge
+    # uuids stay distinct for any two different edges
     log = [
-        _start(match_id="agent:q", agents=[[pipey, 0, "llm"]]),
-        _obs("get_cities",
-             {"own_cities": 1, "own_population": 1,
-              "foreign_cities": [{"city_id": entity, "name": "X",
-                                   "coord": "0,0", "owner_id": 1,
-                                   "hp": 100, "population": 1}]},
-             seq=1, pid=0, turn=1, agent=pipey, match_id="agent:q"),
-        _end(seq=2, match_id="agent:q", final_turn=1),
+        _start(),
+        _obs("get_units",
+             {"own_units": 1, "foreign_units": [
+                 {"unit_id": "u1|OBSERVED|x", "type": "WARRIOR",
+                  "coord": "0,0", "owner_id": 1, "hp_bucket": 2},
+                 {"unit_id": "u2|OBSERVED|x", "type": "ARCHER",
+                  "coord": "1,0", "owner_id": 1, "hp_bucket": 2}]},
+             seq=1, pid=0, turn=1),
+        _end(seq=2, final_turn=1),
     ]
-    proj = project(log)  # must not raise
-    rels = [e["rel"] for e in proj.edges]
-    assert "PLAYED_IN" in rels and "OBSERVED" in rels
+    proj = project(log)
     uuids = [e["uuid"] for e in proj.edges]
     assert len(set(uuids)) == len(uuids)
-    assert all(u.startswith("e:") and len(u) == 42 for u in uuids)
-    # every edge carries a group_id so reconciliation can scope by match
-    assert all(e["group_id"] in ("agent:q:main", "cross_match")
-               for e in proj.edges)
+    assert all(u.startswith("e:") and len(u) == 42 and "|" not in u
+               for u in uuids)
+
+
+def test_foreign_turn_end_never_inflates_the_horizon():
+    # review round-2 P2: the fallback horizon is computed over MATCH-BOUND
+    # records — a foreign match's TURN_END cannot create premature outcomes
+    log = [_start(match_id="m1"),
+           {"kind": "TURN_END", "seq": 1, "match_id": "m1", "turn": 3},
+           {"kind": "TURN_END", "seq": 2, "match_id": "m2", "turn": 999}]
+    proj = project(log)
+    assert proj.report["final_turn"] == 3
+
+
+def test_reference_to_a_future_claim_drops_rather_than_binding_an_entity():
+    # review round-2 P2: subject_id naming a claim that does not exist YET
+    # must drop — falling through to a same-id entity misbinds silently
+    log = [
+        _start(),
+        _obs("get_units",
+             {"own_units": 1, "foreign_units": [
+                 {"unit_id": "g1", "type": "WARRIOR", "coord": "0,0",
+                  "owner_id": 1, "hp_bucket": 2}]},
+             seq=1, pid=0, turn=1),
+        *_pair("record_prediction",
+               {"text": "about g1", "review_turn": 5, "subject_id": "g1"},
+               seq=2, pid=0, turn=1),
+        *_pair("set_goal", {"text": "the real g1", "by_turn": 9},
+               seq=4, pid=0, turn=2),
+        _end(seq=6, final_turn=3),
+    ]
+    proj = project(log)
+    assert not any(e["rel"] == "REFERENCES" for e in proj.edges)
+    assert any("'g1'" in d and "subject_id" in d
+               for d in proj.report["dropped_references"])
 
 
 def test_agent_node_carries_no_policy_but_the_edge_does():
@@ -725,9 +767,12 @@ def test_load_plan_is_one_transaction_with_reconcile():
     ]
     session = _RecordingSession()
     counts = load_into_db(nodes, edges, session=session)
-    # agent nodes, player nodes, PLAYED_AS, reconcile nodes, reconcile edges
-    assert counts["queries"] == 5
+    # legacy cleanup, agent nodes, player nodes, PLAYED_AS,
+    # reconcile nodes, reconcile edges
+    assert counts["queries"] == 6
     assert session.calls == 1  # ONE transaction: all-or-nothing
+    # the legacy pipe-uuid sweep runs FIRST, before any other statement
+    assert "CONTAINS '|'" in session.queries[0][0]
     assert any("DETACH DELETE" in q for q, _ in session.queries)
     reconcile = [p for q, p in session.queries if "DETACH DELETE" in q][0]
     assert reconcile["group"] == "m:main"
@@ -768,80 +813,101 @@ def test_load_artifacts_missing(tmp_path: Path):
 def test_live_db_round_trip_idempotent():
     """Opt-in live test: set CIV_ARENA_NEO4J_TEST=1 with the container up and
     the graph group synced (`uv run --group graph pytest ...`). Skipped in
-    every normal gate — local tests never require a running DB."""
+    every normal gate — local tests never require a running DB. This is the
+    only place cypher actually executes — it caught the GraphNode
+    anchor-label bug, so fixtures go through project(), never hand-built."""
     pytest.importorskip("neo4j")
     if os.environ.get("CIV_ARENA_NEO4J_TEST") != "1":
         pytest.skip("live DB test: set CIV_ARENA_NEO4J_TEST=1 to enable")
     from neo4j import GraphDatabase
 
-    from civ_arena.graph.load import load_into_db
+    from civ_arena.graph.load import config_from_env, load_into_db
 
-    nodes = [
-        {"uuid": "agent:roman", "group_id": "cross_match",
-         "labels": ["Agent"], "name": "roman", "agent_id": "roman"},
-        {"uuid": "match:live-1", "group_id": "cross_match",
-         "labels": ["Match"], "name": "live-1", "seed": 1},
-        {"uuid": "live-1:main:player:p0", "group_id": "live-1:main",
-         "labels": ["Player"], "name": "p0", "player_id": 0},
-        {"uuid": "live-1:main:claim:p0:g1:r1", "group_id": "live-1:main",
-         "labels": ["Claim", "Goal"], "name": "g1:r1", "kind": "goal"},
-        {"uuid": "live-1:main:outcome:p0:g1:r1", "group_id": "live-1:main",
-         "labels": ["Outcome"], "name": "g1:r1", "verdict": "missed"},
-    ]
-    edges = [
-        {"uuid": "agent:roman|PLAYED_IN|match:live-1",
-         "source": "agent:roman", "target": "match:live-1",
-         "rel": "PLAYED_IN", "group_id": "cross_match"},
-        {"uuid": "agent:roman|PLAYED_AS|live-1:main:player:p0",
-         "source": "agent:roman", "target": "live-1:main:player:p0",
-         "rel": "PLAYED_AS", "group_id": "live-1:main", "policy": "llm"},
-        {"uuid": "live-1:main:player:p0|AUTHORED|live-1:main:claim:p0:g1:r1",
-         "source": "live-1:main:player:p0",
-         "target": "live-1:main:claim:p0:g1:r1", "rel": "AUTHORED",
-         "group_id": "live-1:main"},
-        {"uuid": "live-1:main:claim:p0:g1:r1|VERDICT|"
-                 "live-1:main:outcome:p0:g1:r1",
-         "source": "live-1:main:claim:p0:g1:r1",
-         "target": "live-1:main:outcome:p0:g1:r1", "rel": "VERDICT",
-         "group_id": "live-1:main"},
-    ]
-    first = load_into_db(nodes, edges)
-    second = load_into_db(nodes, edges)  # MERGE by uuid: a no-op
+    def _live_log(with_goal: bool = True) -> list[dict[str, Any]]:
+        recs = [_start(match_id="live-1",
+                       agents=[["roman-live", 0, "llm"],
+                               ["cart-live", 1, "turtler"]])]
+        if with_goal:
+            recs += _pair("set_goal", {"text": "3 cities", "by_turn": 2,
+                                       "metric": "cities", "target": 3},
+                          seq=1, pid=0, turn=1, agent="roman-live",
+                          match_id="live-1")
+        recs += [_obs("get_cities",
+                      {"own_cities": 2, "own_population": 4,
+                       "foreign_cities": [{"city_id": "c9", "name": "Y",
+                                           "coord": "0,0", "owner_id": 1,
+                                           "hp": 100, "population": 1}]},
+                      seq=3, pid=0, turn=1, agent="roman-live",
+                      match_id="live-1")]
+        recs += [_end(seq=9, match_id="live-1", final_turn=2)]
+        return recs
+
+    proj = project(_live_log())
+    first = load_into_db(proj.nodes, proj.edges)
+    second = load_into_db(proj.nodes, proj.edges)  # MERGE by uuid: a no-op
     assert first == second
 
-    # review round-1 P2 pin: re-loading a CHANGED projection reconciles —
-    # the outcome and its VERDICT edge disappear, the spine survives
-    slimmer_nodes = [n for n in nodes
-                     if ":outcome:" not in n["uuid"]]
-    slimmer_edges = [e for e in edges if e["rel"] != "VERDICT"]
-    load_into_db(slimmer_nodes, slimmer_edges)
-
-    from civ_arena.graph.load import config_from_env
     cfg = config_from_env()
     driver = GraphDatabase.driver(
         cfg["uri"], auth=(cfg["user"], cfg["password"]) if cfg["password"]
         else None)
+
+    def _count(session: Any, query: str) -> int:
+        return session.run(query).single()["c"]
+
     try:
         with driver.session() as session:
-            n = session.run("MATCH (n:Agent {uuid: 'agent:roman'}) "
-                            "RETURN count(n) AS c").single()["c"]
-            e = session.run("MATCH ()-[r:PLAYED_IN "
-                            "{uuid: 'agent:roman|PLAYED_IN|match:live-1'}]->()"
-                            " RETURN count(r) AS c").single()["c"]
-            outcome = session.run(
-                "MATCH (n:Outcome) WHERE n.group_id = 'live-1:main' "
-                "RETURN count(n) AS c").single()["c"]
-            verdict = session.run(
-                "MATCH ()-[r:VERDICT]->() WHERE r.group_id = 'live-1:main' "
-                "RETURN count(r) AS c").single()["c"]
-            claim = session.run(
-                "MATCH (n:Claim {uuid: 'live-1:main:claim:p0:g1:r1'}) "
-                "RETURN count(n) AS c").single()["c"]
-            session.run("MATCH (n:GraphNode) WHERE n.uuid STARTS WITH "
-                        "'live-1:' OR n.uuid IN ['agent:roman', "
-                        "'match:live-1'] DETACH DELETE n")
+            # seed a LEGACY pipe-uuid, group-less edge between two live
+            # nodes — the next load's migration sweep must remove it
+            session.run(
+                "MATCH (a {uuid: 'agent:roman-live'}) "
+                "MATCH (b {uuid: 'match:live-1'}) "
+                "MERGE (a)-[r:LEGACY {uuid: 'agent:roman-live|LEGACY|"
+                "match:live-1'}]->(b)")
+            legacy_before = _count(
+                session, "MATCH ()-[r]->() WHERE r.uuid CONTAINS '|' "
+                         "AND (r.uuid STARTS WITH 'agent:roman-live') "
+                         "RETURN count(r) AS c")
+            assert legacy_before == 1
+
+        # review round-1 P2 pin: re-loading a CHANGED projection reconciles
+        # — the goal, its outcome and every match-scoped edge disappear, the
+        # spine survives. Round-2 P1 pin: the legacy edge is swept too.
+        slim = project(_live_log(with_goal=False))
+        load_into_db(slim.nodes, slim.edges)
+
+        with driver.session() as session:
+            group_nodes = _count(
+                session, "MATCH (n) WHERE n.group_id = 'live-1:main' "
+                         "RETURN count(n) AS c")
+            group_edges = _count(
+                session, "MATCH ()-[r]->() WHERE r.group_id = 'live-1:main' "
+                         "RETURN count(r) AS c")
+            legacy_after = _count(
+                session, "MATCH ()-[r]->() WHERE r.uuid CONTAINS '|' "
+                         "AND (r.uuid STARTS WITH 'agent:roman-live') "
+                         "RETURN count(r) AS c")
+            agent = _count(session, "MATCH (n:Agent "
+                                    "{uuid: 'agent:roman-live'}) "
+                                    "RETURN count(n) AS c")
+            played_in = _count(
+                session, "MATCH ()-[r:PLAYED_IN]->(:Match "
+                         "{uuid: 'match:live-1'}) RETURN count(r) AS c")
+            dupes = session.run(
+                "MATCH (n) WITH n.uuid AS u, count(*) AS c WHERE c > 1 "
+                "RETURN count(*) AS c").single()["c"]
+            session.run(
+                "MATCH (n) WHERE n.uuid STARTS WITH 'live-1:' "
+                "OR n.uuid IN ['agent:roman-live', 'agent:cart-live', "
+                "'match:live-1'] DETACH DELETE n")
     finally:
         driver.close()
-    assert n == 1 and e == 1
-    assert outcome == 0 and verdict == 0  # reconciled away
-    assert claim == 1  # kept: still in the artifacts
+    # slim projection keeps the players, the observed entity and their
+    # edges — the goal/claim/outcome are reconciled away
+    assert group_nodes == 3  # 2 players + entity c9
+    assert group_edges == 3  # 2 PLAYED_AS + 1 OBSERVED
+    assert legacy_after == 0  # migrated away
+    # spine intact: the agent exists exactly once, and BOTH roster agents
+    # still play in the match — exactly one PLAYED_IN edge each
+    assert agent == 1 and played_in == 2
+    assert dupes == 0  # no duplicate uuids anywhere in the DB

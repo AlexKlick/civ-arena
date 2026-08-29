@@ -130,6 +130,15 @@ def edge_query(rel: str) -> str:
             "SET e = row.props")
 
 
+def legacy_edge_cleanup_query() -> str:
+    """Pre-rework loads wrote pipe-join edge uuids with no group_id; those
+    rows are invisible to reconciliation and would silently duplicate every
+    relationship on the next load. Current uuids are ``e:<hex>`` and never
+    contain '|' — this sweep is a no-op on any current DB and self-heals an
+    upgraded one."""
+    return "MATCH ()-[e]->() WHERE e.uuid CONTAINS '|' DELETE e"
+
+
 def reconcile_nodes_query() -> str:
     """Delete match-scoped nodes absent from the artifacts (DETACH removes
     their edges). The cross_match spine carries a different group_id and is
@@ -159,11 +168,11 @@ def load_plan(
     """Fully validate and materialize the write plan BEFORE any write: a
     token problem must never surface after node batches have committed."""
     plan: list[tuple[str, dict[str, Any]]] = [
-        (node_query(labels), {"rows": rows})
-        for labels, rows in node_batches(nodes, batch)
-    ] + [
-        (edge_query(rel), {"rows": rows})
-        for rel, rows in edge_batches(edges, batch)
+        (legacy_edge_cleanup_query(), {}),
+        *[(node_query(labels), {"rows": rows})
+          for labels, rows in node_batches(nodes, batch)],
+        *[(edge_query(rel), {"rows": rows})
+          for rel, rows in edge_batches(edges, batch)],
     ]
     group = _match_group(nodes)
     if group is not None:

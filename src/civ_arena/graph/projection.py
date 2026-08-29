@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,17 @@ from civ_arena.strategy.claims import Goal, Lesson, Prediction
 from civ_arena.strategy.store import StrategyStore
 
 CROSS_GROUP = "cross_match"
+
+# match_id and agent_id are operator-chosen strings that land INSIDE the
+# node uuid templates. The templates stay readable (the chains query matches
+# by prefix) only if these ids cannot smuggle the spine namespaces into a
+# match-scoped uuid — a match_id containing ':' could mint an outcome uuid
+# identical to another match's agent uuid, and reconciliation would then
+# delete spine data. The charset makes that structurally impossible; claim
+# ids (g/p/l + digits) and player ids (ints) are store-generated and safe;
+# entity ids sit behind a fixed "…:entity:" prefix, so they cannot cross
+# namespaces either.
+_SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 # structural keys (everything else on the doc is a graph property)
 NODE_KEYS = ("uuid", "group_id", "labels", "name")
@@ -64,12 +76,12 @@ def _jdump(value: Any) -> str:
 
 
 def _edge_uuid(source: str, rel: str, target: str) -> str:
-    """Injective edge uuid: ``e:<sha256-40>`` over the canonical [source,
-    rel, target] tuple. Ids from config (match_id, agent_id) and belief
-    digests are legal arbitrary strings and may contain '|' — a plain
-    pipe-join is not injective and can collide two DIFFERENT edges (found by
-    adversarial review; node uuids keep their readable template because
-    template-level collisions raise loudly instead of corrupting)."""
+    """Edge uuid: ``e:<sha256-40>`` over the canonical [source, rel, target]
+    tuple. Ids from belief digests are legal arbitrary strings and may
+    contain '|' — a pipe-join could collide two DIFFERENT edges (found by
+    adversarial review). 160 bits of SHA-256 is collision-resistant, not
+    injective in the mathematical sense: a collision would surface as the
+    same loud duplicate-uuid ValueError as a true duplicate."""
     payload = _jdump([source, rel, target]).encode("utf-8")
     return "e:" + hashlib.sha256(payload).hexdigest()[:40]
 
@@ -110,6 +122,13 @@ def _meta(records: list[dict[str, Any]]) -> dict[str, Any]:
         and not isinstance(entry[1], bool) and isinstance(entry[2], str)
     ]
     match_id = start["match_id"]
+    for kind, value in [("match_id", match_id)] + [
+            ("agent_id", agent) for agent, _, _ in agents]:
+        if not _SAFE_ID_RE.fullmatch(value):
+            raise ValueError(
+                f"unsafe {kind} {value!r}: must match "
+                "[A-Za-z0-9][A-Za-z0-9._-]{0,63} — it lands inside node "
+                "uuid templates and could collide with another namespace")
     ends = [r for r in records if r.get("kind") == "MATCH_END"]
     strays = sorted({str(e.get("match_id")) for e in ends
                      if e.get("match_id") != match_id})
@@ -121,9 +140,7 @@ def _meta(records: list[dict[str, Any]]) -> dict[str, Any]:
         summary = ends[-1]["summary"]
     final_turn = summary.get("final_turn")
     if not isinstance(final_turn, int) or isinstance(final_turn, bool):
-        turns = [r.get("turn") for r in records
-                 if r.get("kind") == "TURN_END" and isinstance(r.get("turn"), int)]
-        final_turn = max(turns, default=0)
+        final_turn = None  # project() falls back over MATCH-BOUND records
     civ_by_pid: dict[int, str] = {}
     for civ, doc in (summary.get("scores") or {}).items():
         if isinstance(doc, dict) and isinstance(doc.get("player_id"), int) \
@@ -154,7 +171,11 @@ def project(records: list[dict[str, Any]]) -> Projection:
     # leak another match's claims/digests into this match's graph
     records = [r for r in records if r.get("match_id") == match_id]
     store = StrategyStore.from_log(records)
-    final_turn: int = meta["final_turn"]
+    final_turn: int = meta["final_turn"] if meta["final_turn"] is not None else max(
+        (r.get("turn") for r in records
+         if r.get("kind") == "TURN_END" and isinstance(r.get("turn"), int)
+         and not isinstance(r.get("turn"), bool)),
+        default=0)
 
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
@@ -396,13 +417,18 @@ def _add_reference(
     are dropped and reported, never guessed."""
     src = f"{group}:claim:p{pid}:{cid}:r{revision}"
     target = ""
+    claim_namespace = False
     for by_id in (store.goals.get(pid) or {}, store.predictions.get(pid) or {}):
         if ref in by_id:
+            # the id names a CLAIM: if no revision was authoritative yet
+            # (the reference predates the claim), it must DROP — falling
+            # through to a same-id entity would silently misbind it
+            claim_namespace = True
             resolved = _revision_at(by_id[ref], created_seq)
             if resolved is not None:
                 target = f"{group}:claim:p{pid}:{ref}:r{resolved.revision}"
             break
-    if not target and ref in entity_ids:
+    if not target and not claim_namespace and ref in entity_ids:
         target = f"{group}:entity:{ref}"
     if not target:
         dropped.append(f"p{pid}:{cid} -> {ref!r} ({via})")
