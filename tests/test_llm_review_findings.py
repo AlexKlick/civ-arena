@@ -89,7 +89,7 @@ async def test_malformed_args_cannot_reposition(tmp_path):
     arena, _ = build_arena(tmp_path, "f2-reposition", 1, fake)
     summary = await arena.run()
     tel = summary["telemetry"]["roman"]
-    assert tel["tool_errors"].get("llm_malformed_args") == 1
+    assert tel["model_errors"].get("llm_malformed_args") == 1
     called = [r["tool"] for r in arena.log.records()
               if r["kind"] == "TOOL_CALL" and r.get("agent_id") == "roman"]
     assert "found_city" not in called, "a repositioned arg reached the referee"
@@ -106,7 +106,7 @@ async def test_type_mismatch_is_an_error_result(tmp_path):
     arena, _ = build_arena(tmp_path, "f2-type", 1, fake)
     summary = await arena.run()
     tel = summary["telemetry"]["roman"]
-    assert tel["tool_errors"].get("llm_malformed_args") == 1
+    assert tel["model_errors"].get("llm_malformed_args") == 1
     assert arena.diary.get(0) == ""
     result_block = fake.requests[1]["messages"][-1]["content"][0]
     assert result_block["is_error"] is True
@@ -118,7 +118,7 @@ async def test_facade_attribute_name_degrades_to_unknown_tool(tmp_path):
     arena, _ = build_arena(tmp_path, "f3-names", 1, fake)
     summary = await arena.run()
     assert summary["aborted"] is None
-    assert summary["telemetry"]["roman"]["tool_errors"]["llm_unknown_tool"] == 1
+    assert summary["telemetry"]["roman"]["model_errors"]["llm_unknown_tool"] == 1
 
 
 # Finding 4: malformed 200 bodies degrade to ModelUnavailable.
@@ -140,6 +140,7 @@ def test_client_parse_armor():
 
 # Finding 5: transport-failed attempts consume budget.
 async def test_transport_failures_consume_budget(monkeypatch):
+    monkeypatch.setenv("FAKE_UNUSED_KEY", "fake-key-for-budget-test")
     spec = llm_spec(max_retries=1, max_requests_per_match=1,
                     request_timeout_s=5)
     client = MiniMaxMessagesClient(spec)
@@ -289,3 +290,146 @@ def test_from_log_requires_namespace_identity():
     assert DiaryStore.from_log(records).get(0) == ""
     records[1].update(player_id=0, agent_id="a")
     assert DiaryStore.from_log(records).get(0) == "steal me"
+
+
+# ------------------------------------------------------------------ round 2
+
+# R2-1: a JSON infinity in usage must degrade, not OverflowError the arena.
+def test_parse_infinity_degrades():
+    client = MiniMaxMessagesClient(FAKE_LLM)
+    with pytest.raises(ModelUnavailable, match="malformed"):
+        client._parse({"content": [{"type": "text", "text": "hi"}],
+                       "usage": {"input_tokens": 1e309}})
+
+
+# R2-2: redaction covers the sent key even when it straddles the slice
+# boundary or the env var rotates mid-flight.
+async def test_redaction_covers_boundary_and_rotation(monkeypatch):
+    monkeypatch.setenv("ROTATE_KEY_ENV", "sk-old-key-value")
+    spec = LLMSpec(base_url="http://fake.local", api_key_env="ROTATE_KEY_ENV",
+                   model_id="fake", max_retries=0)
+    client = MiniMaxMessagesClient(spec)
+    key = "sk-old-key-value"
+
+    class _Reflect:
+        async def post(self, *a, **k):
+            # the env var rotates AFTER the request was sent with the old key
+            monkeypatch.setenv("ROTATE_KEY_ENV", "sk-new-key-value")
+            padding = "x" * 295  # push the key across the 300-char cut
+            return httpx.Response(
+                401, text=f"{padding} {key} rejected")
+
+    client._http = _Reflect()  # type: ignore[assignment]
+    with pytest.raises(ModelUnavailable) as excinfo:
+        await client.create(system="s", messages=[], tools=[])
+    message = str(excinfo.value)
+    assert key not in message, "rotated-away sent key leaked"
+    assert key[:8] not in message, "a straddling prefix leaked past the cut"
+    assert "<redacted" in message
+
+
+# R2-3: a missing api key burns no budget (no POST happened).
+async def test_missing_key_consumes_no_budget(monkeypatch):
+    monkeypatch.delenv("FAKE_UNUSED_KEY", raising=False)
+    spec = llm_spec(max_requests_per_match=5)
+    client = MiniMaxMessagesClient(spec)
+
+    class _Counting:
+        def __init__(self):
+            self.posts = 0
+
+        async def post(self, *a, **k):
+            self.posts += 1
+            raise httpx.TransportError("unreachable")
+
+    dead = _Counting()
+    client._http = dead  # type: ignore[assignment]
+    with pytest.raises(ModelUnavailable, match="is not set"):
+        await client.create(system="s", messages=[], tools=[])
+    assert client.posts_sent == 0
+
+
+# R2-4: an llm-policy match refuses to resume from a checkpoint written
+# before cross-leg accounting existed (reset spend is not silent).
+async def test_resume_refuses_pre_accounting_checkpoint(tmp_path):
+    import json
+
+    fake = FakeModel(script=[[use("end_turn")]])
+    arena1, _ = build_arena(tmp_path / "run", "r24-refuse", 2, fake)
+    await arena1.run()
+    path = tmp_path / "run" / "checkpoints" / "ckpt-turn-0002.json"
+    doc = json.loads(path.read_text())
+    del doc["coordinator_state"]["llm_posts"]  # simulate a pre-fix checkpoint
+    # recompute the content hash over the edited body (same formula as
+    # CheckpointState.compute_content_hash)
+    from civ_arena.canonical import checkpoint_hash
+
+    doc["content_hash"] = checkpoint_hash(
+        doc["sim_doc"], doc["rng_states"],
+        {**doc["coordinator_state"], "_turn": doc["turn"],
+         "_match_id": doc["match_id"], "_seq": doc["seq"]})
+    path.write_text(json.dumps(doc, sort_keys=True))
+
+    arena2, _ = build_arena(tmp_path / "run", "r24-refuse", 4, FakeModel(
+        script=[[use("end_turn")]]))
+    ckpt = CheckpointState.from_doc(json.loads(path.read_text()))
+    with pytest.raises(ValueError, match="predates"):
+        await arena2.run(resume_state=ckpt)
+
+
+# R2-5: duplicate agent_id is refused at config parse (attribution key).
+def test_duplicate_agent_id_rejected():
+    from civ_arena.config import parse_config
+
+    doc = {
+        "match": {"match_id": "m", "seed": 1},
+        "agents": [
+            {"agent_id": "same", "player_id": 0, "policy": "turtler"},
+            {"agent_id": "same", "player_id": 1, "policy": "turtler"},
+        ],
+    }
+    with pytest.raises(ConfigError, match="duplicate agent_id"):
+        parse_config(doc)
+
+
+# R2-6: model-side dispatch errors never break the telemetry-vs-log
+# recount parity (they live in model_errors, not tool_calls).
+async def test_model_errors_do_not_break_recount_parity(tmp_path):
+
+    from fakes import garbage_model
+
+    arena, _ = build_arena(tmp_path, "r26-parity", 1, garbage_model())
+    summary = await arena.run()
+    tel = summary["telemetry"]["roman"]
+    recount = sum(1 for r in arena.log.records()
+                  if r["kind"] == "TOOL_RESULT" and r.get("agent_id") == "roman")
+    assert tel["total_calls"] == recount
+    assert tel["model_errors"], "the garbage model must have produced some"
+    assert "llm_unknown_tool" not in tel["tool_calls"]
+
+
+# R2-8: an oversized diary write caps what is serialized into the log.
+async def test_oversized_diary_log_args_capped(tmp_path):
+    from test_hostile_agent import hostile_setup
+
+    _a, log, referee, _s, ctx, _l = await hostile_setup(tmp_path)
+    await referee.write_diary(ctx, "x" + " " * 5000)
+    call = [r for r in log.records()
+            if r["kind"] == "TOOL_CALL" and r.get("tool") == "write_diary"][-1]
+    logged = call["args"]["text"]
+    assert len(logged) <= 2100, f"raw oversized text hit the log ({len(logged)})"
+    assert "[truncated, full" in logged
+
+
+# R2-9: from_log requires match identity within the pair.
+def test_from_log_requires_match_identity():
+    records = [
+        {"kind": "TOOL_CALL", "tool": "write_diary", "player_id": 0,
+         "agent_id": "a", "turn": 1, "match_id": "m1",
+         "args": {"text": "cross"}},
+        {"kind": "TOOL_RESULT", "tool": "write_diary", "status": "accepted",
+         "player_id": 0, "agent_id": "a", "turn": 1, "match_id": "m2"},
+    ]
+    assert DiaryStore.from_log(records).get(0) == ""
+    records[1]["match_id"] = "m1"
+    assert DiaryStore.from_log(records).get(0) == "cross"

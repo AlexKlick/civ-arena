@@ -121,8 +121,8 @@ async def test_begin_turn_required_before_take_turn():
 async def test_unknown_tool_and_bad_args_recover(tmp_path):
     arena, fake = await _run(make_arena(tmp_path, garbage_model()))
     tel = arena.telemetry.snapshot()["roman"]
-    assert tel["tool_errors"].get("llm_unknown_tool") == 1
-    assert tel["tool_errors"].get("llm_malformed_args") == 1
+    assert tel["model_errors"].get("llm_unknown_tool") == 1
+    assert tel["model_errors"].get("llm_malformed_args") == 1
     # neither attempt reached the referee as a tool call
     called = {r["tool"] for r in arena.log.records()
               if r["kind"] == "TOOL_CALL" and r.get("agent_id") == "roman"}

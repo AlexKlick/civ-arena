@@ -46,11 +46,13 @@ class DiaryStore:
                     or nxt.get("tool") != "write_diary"
                     or nxt.get("status") != "accepted"
                     # namespace identity: the result must belong to the same
-                    # player/agent/turn as the call (adjacency alone would
-                    # let a foreign record authorize the preceding text)
+                    # player/agent/turn/match as the call (adjacency alone
+                    # would let a foreign record authorize the preceding
+                    # text — e.g. in a concatenated or tampered log)
                     or nxt.get("player_id") != rec.get("player_id")
                     or nxt.get("agent_id") != rec.get("agent_id")
-                    or nxt.get("turn") != rec.get("turn")):
+                    or nxt.get("turn") != rec.get("turn")
+                    or nxt.get("match_id") != rec.get("match_id")):
                 continue
             text = (rec.get("args") or {}).get("text")
             pid = rec.get("player_id")

@@ -60,7 +60,7 @@ turtler as KOREA/pid 1), preceded by a 2-turn smoke on the same seed:
 | Run | Result |
 |---|---|
 | `llm-smoke` (2 turns) | finished, 0 violations, 29 LLM tool calls, 0 errors; diary preview: *"Turn 2: Founded ANTIUM at (-5,0) on plains. u3 warrior escorting+fortifying there…"*; REPLAY OK (110 comparable events) |
-| `llm-vs-turtler-001` (40 turns) | finished, **0 violations**, 838 LLM tool calls (162 rejections = fog-of-war noise), tokens 410,477 in / 108,671 out; final score ROME 2 cities / 24 units / 8 techs vs KOREA 2 / 19 / 8 — the model played the turtler to a draw |
+| `llm-vs-turtler-001` (40 turns) | finished, **0 violations**, 838 LLM tool calls — 836 referee-visible results (160 rejections, fog-of-war noise) + 2 model-side malformed-argument errors (now reported separately as `model_errors`; they are not tool calls and emit no events, preserving telemetry/log recount parity and the model-free replay); tokens 410,477 in / 108,671 out; final score ROME 2 cities / 24 units / 8 techs vs KOREA 2 / 19 / 8 — the model played the turtler to a draw |
 | replay of the 40-turn run | **REPLAY OK: 2,580 comparable events identical**, final hash `49914109…`, zero network — the model-free replay seam holds on a real LLM match |
 
 The model wrote 38 diary entries across 40 turns and used them as genuine

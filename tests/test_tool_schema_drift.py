@@ -65,6 +65,25 @@ def test_manifest_property_order_matches_signature_order():
         )
 
 
+def test_replay_arg_order_pins_the_registry():
+    """ReplayRuntime dispatches positionally via ARG_ORDER — it must cover
+    exactly the registry, in signature order, or replayed calls misbind."""
+    from civ_arena.replay import ARG_ORDER
+
+    assert set(ARG_ORDER) == set(TOOL_REGISTRY), (
+        f"ARG_ORDER drift: missing={sorted(set(TOOL_REGISTRY) - set(ARG_ORDER))} "
+        f"extra={sorted(set(ARG_ORDER) - set(TOOL_REGISTRY))}"
+    )
+    for name, fn in TOOL_REGISTRY.items():
+        sig = inspect.signature(fn)
+        order = [p.name for pname, p in sig.parameters.items()
+                 if pname != "ctx"
+                 and p.kind not in (p.KEYWORD_ONLY, p.POSITIONAL_ONLY)]
+        assert ARG_ORDER[name] == order, (
+            f"{name}: ARG_ORDER {ARG_ORDER[name]} != signature order {order}"
+        )
+
+
 def test_every_tool_and_property_is_documented():
     for schema in TOOL_SCHEMAS:
         assert schema.get("description", "").strip(), f"{schema['name']}: no docs"

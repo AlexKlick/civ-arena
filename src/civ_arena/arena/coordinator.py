@@ -194,16 +194,27 @@ class Arena:
             if hasattr(rt, "diary"):
                 rt.diary = self.diary
         # cumulative accounting across legs (spend budget, tokens)
+        if any(a.policy == "llm" for a in self.spec.agents):
+            # fail closed: a checkpoint written before cross-leg accounting
+            # would silently resume an LLM match with reset spend/tokens
+            for field in ("telemetry", "llm_posts"):
+                if field not in state.coordinator_state:
+                    raise ValueError(
+                        f"checkpoint from turn {state.turn} predates "
+                        f"{field} accounting and cannot resume an llm-policy "
+                        "match — restart the match instead"
+                    )
         telemetry_doc = state.coordinator_state.get("telemetry")
         if telemetry_doc:
             self.telemetry.merge_snapshot(telemetry_doc)
         posts = state.coordinator_state.get("llm_posts") or {}
         for pid, rt in self.runtimes.items():
             client = getattr(rt, "client", None)
-            if getattr(client, "posts_sent", None) is not None:
-                agent_id = self.spec.agent_for_player(pid).agent_id
-                if agent_id in posts:
-                    client.posts_sent = int(posts[agent_id])
+            if getattr(client, "posts_sent", None) is not None \
+                    and str(pid) in posts:
+                # monotonic: an in-process resume must never rewind a client
+                # that already sent more than the checkpoint saw
+                client.posts_sent = max(client.posts_sent, int(posts[str(pid)]))
         # control-plane counters and chaos schedule must resume, not reset
         self.referee.restore_violation_counters(
             state.coordinator_state.get("violations", 0),
@@ -226,13 +237,14 @@ class Arena:
             self.adapter.state.rng = rng_from_doc(state.rng_states["sim"])
 
     def _llm_posts(self) -> dict[str, int]:
+        """Spend counters keyed by PLAYER id — agent ids need not be unique
+        across players, but player ids are (config-enforced)."""
         posts: dict[str, int] = {}
         for pid, rt in self.runtimes.items():
             client = getattr(rt, "client", None)
             count = getattr(client, "posts_sent", None)
             if isinstance(count, int):
-                agent_id = self.spec.agent_for_player(pid).agent_id
-                posts[agent_id] = count
+                posts[str(pid)] = count
         return posts
 
     def _checkpoint_state(self, turn: int) -> CheckpointState:

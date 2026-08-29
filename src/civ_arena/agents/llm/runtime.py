@@ -192,7 +192,7 @@ class LLMAgentRuntime:
 
     def _note_error(self, key: str) -> None:
         if self.telemetry is not None:
-            self.telemetry.note_call(self.profile.agent_id, key, 0, ok=False)
+            self.telemetry.note_model_error(self.profile.agent_id, key)
 
     def _report_usage(self, reply: ModelReply) -> None:
         if self.telemetry is not None:

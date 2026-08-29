@@ -15,6 +15,11 @@ from typing import Any
 class AgentStats:
     tool_calls: dict[str, int] = field(default_factory=dict)
     tool_errors: dict[str, int] = field(default_factory=dict)
+    # model-side protocol failures (unknown tool name, malformed arguments)
+    # live OUTSIDE tool_calls: nothing executed, no event was emitted, so
+    # counting them as calls would break the telemetry-vs-log recount parity
+    # (and event-ifying them would diverge the model-free replay)
+    model_errors: dict[str, int] = field(default_factory=dict)
     total_calls: int = 0
     total_errors: int = 0
     total_ms: int = 0
@@ -30,10 +35,14 @@ class AgentStats:
             self.tool_errors[tool] = self.tool_errors.get(tool, 0) + 1
             self.total_errors += 1
 
+    def note_model_error(self, key: str) -> None:
+        self.model_errors[key] = self.model_errors.get(key, 0) + 1
+
     def to_doc(self) -> dict[str, Any]:
         return {
             "tool_calls": dict(self.tool_calls),
             "tool_errors": dict(self.tool_errors),
+            "model_errors": dict(self.model_errors),
             "total_calls": self.total_calls,
             "total_errors": self.total_errors,
             "total_ms": self.total_ms,
@@ -54,6 +63,9 @@ class TelemetryRegistry:
 
     def note_call(self, agent_id: str, tool: str, ms: int, ok: bool) -> None:
         self.stats_for(agent_id).note_call(tool, ms, ok)
+
+    def note_model_error(self, agent_id: str, key: str) -> None:
+        self.stats_for(agent_id).note_model_error(key)
 
     def note_model_usage(self, agent_id: str, model: str,
                          input_tokens: int, output_tokens: int) -> None:
@@ -83,4 +95,6 @@ class TelemetryRegistry:
                 stats.total_calls += int(n)
             for tool, n in (doc.get("tool_errors") or {}).items():
                 stats.tool_errors[tool] = stats.tool_errors.get(tool, 0) + int(n)
+            for key, n in (doc.get("model_errors") or {}).items():
+                stats.model_errors[key] = stats.model_errors.get(key, 0) + int(n)
                 stats.total_errors += int(n)

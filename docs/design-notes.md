@@ -57,6 +57,27 @@ the whole match through the same referee machinery (same watchdog config),
 so rollbacks reproduce deterministically. `DedupeIndex.from_log` skips keys
 that were subsequently rolled back, so resume matches live forget-semantics.
 
+## LLM-lane accounting semantics
+
+- **Spend budget spans resume**: checkpoints carry per-player post counts
+  (`llm_posts`) and the client's counter is restored monotonically, so a
+  resumed match continues against the SAME budget. Known bound: posts sent
+  after the last turn-boundary checkpoint and lost to a crash are
+  uncountable (nothing durable records individual model requests); with
+  `checkpoint_every: 1` the loss is at most one turn's requests per crash.
+- **Tokens/telemetry are cumulative across legs** (checkpointed snapshot
+  folded back in), EXCEPT `total_ms`: durations are wall-clock envelope
+  data and are stripped from checkpoints to preserve the
+  same-seed-same-checkpoint determinism pin, so a resumed summary's
+  `total_ms` covers the post-resume leg only.
+- **Model-side protocol failures** (unknown tool name, malformed arguments,
+  type mismatches) are counted in `telemetry.model_errors`, never in
+  `tool_calls` and never as event records: nothing executed, and
+  event-ifying them would diverge the model-free replay (a replayed match
+  consults no model, so it produces none).
+- An llm-policy match **refuses to resume** from a checkpoint that predates
+  this accounting rather than silently resetting spend.
+
 ## LLM determinism
 
 An LLM match **replays model-free by construction**: replay re-executes the

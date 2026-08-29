@@ -76,15 +76,6 @@ class MiniMaxMessagesClient:
             )
         return key
 
-    def _headers(self) -> dict[str, str]:
-        key = self._api_key()
-        headers = {"anthropic-version": ANTHROPIC_VERSION}
-        if self.auth_style == "bearer":
-            headers["Authorization"] = f"Bearer {key}"
-        else:
-            headers["x-api-key"] = key
-        return headers
-
     def _budget_check(self) -> None:
         if self.posts_sent >= self.spec.max_requests_per_match:
             raise ModelUnavailable(
@@ -97,10 +88,12 @@ class MiniMaxMessagesClient:
             return self._parse_inner(doc)
         except ModelUnavailable:
             raise
-        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        except (ValueError, TypeError, KeyError, AttributeError,
+                ArithmeticError) as exc:
             # any shape surprise (bad JSON top level, non-mapping blocks,
-            # non-numeric usage) degrades to ModelUnavailable — the runtime
-            # turns it into MatchAborted and a summary is still written
+            # non-numeric usage, 1e309-style infinities) degrades to
+            # ModelUnavailable — the runtime turns it into MatchAborted and
+            # a summary is still written
             raise ModelUnavailable(f"malformed response: {exc}") from exc
 
     def _parse_inner(self, doc: Any) -> ModelReply:
@@ -146,12 +139,20 @@ class MiniMaxMessagesClient:
         last_error = "no attempt made"
         for attempt in range(self.spec.max_retries + 1):
             self._budget_check()
-            # count the attempt BEFORE posting: a transport failure mid-flight
-            # still consumed a request slot (the server may have received it)
+            # capture the key BEFORE posting: redaction must target the
+            # credential actually sent, even if the env var rotates mid-flight
+            sent_key = self._api_key()
+            # count the attempt immediately before the POST itself (after key
+            # resolution): a missing key burns nothing, a transport failure
+            # mid-flight still consumed a slot (the server may have received it)
             self.posts_sent += 1
             try:
-                resp = await self._http.post(url, json=body,
-                                             headers=self._headers())
+                resp = await self._http.post(
+                    url, json=body,
+                    headers={"anthropic-version": ANTHROPIC_VERSION,
+                             **({"Authorization": f"Bearer {sent_key}"}
+                                if self.auth_style == "bearer"
+                                else {"x-api-key": sent_key})})
             except httpx.TransportError as exc:
                 last_error = f"transport error: {exc}"
                 if attempt < self.spec.max_retries:
@@ -171,16 +172,32 @@ class MiniMaxMessagesClient:
                 continue
             # 4xx and unretryable 5xx: fail immediately, carry a REDACTED body
             # (a reflecting proxy can echo the key back; it must never reach
-            # the durable log via MatchAborted)
+            # the durable log via MatchAborted). Redact BEFORE slicing: a key
+            # straddling the cut would leak its prefix.
             raise ModelUnavailable(
                 f"HTTP {resp.status_code} from {self.spec.model_id}: "
-                f"{self._redact(resp.text[:300])}"
+                f"{self._snippet(self._redact(resp.text, sent_key))}"
             )
         raise ModelUnavailable(last_error)
 
-    def _redact(self, text: str) -> str:
-        key = os.environ.get(self.spec.api_key_env, "")
-        return text.replace(key, "<redacted>") if key else text
+    @staticmethod
+    def _redact(text: str, *keys: str) -> str:
+        for key in keys:
+            if key:
+                text = text.replace(key, "<redacted>")
+        return text
+
+    @staticmethod
+    def _snippet(redacted_text: str, limit: int = 300) -> str:
+        """Truncate REDACTED text without leaving a half-written marker at
+        the cut: if the limit lands inside '<redacted…', close the marker
+        so the snippet still SHOWS where a secret was removed."""
+        snippet = redacted_text[:limit]
+        if len(redacted_text) > limit and "<" in snippet:
+            cut = snippet.rindex("<")
+            if not snippet[cut:].endswith(">"):
+                snippet = snippet[:cut] + "<redacted>"
+        return snippet
 
     async def aclose(self) -> None:
         if self._http is not None:

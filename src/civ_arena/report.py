@@ -80,7 +80,9 @@ def _latest_diaries(records: list[dict]) -> dict[str, str]:
         nxt = records[i + 1]
         if (nxt.get("kind") == "TOOL_RESULT" and nxt.get("tool") == "write_diary"
                 and nxt.get("status") == "accepted"
+                and nxt.get("player_id") == rec.get("player_id")
                 and nxt.get("agent_id") == rec.get("agent_id")
+                and nxt.get("turn") == rec.get("turn")
                 and rec.get("agent_id")):
             text = (rec.get("args") or {}).get("text")
             if isinstance(text, str):

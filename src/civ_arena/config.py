@@ -150,6 +150,7 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
 
     agents: list[AgentSpec] = []
     seen_players: set[int] = set()
+    seen_agent_ids: set[str] = set()
     for i, entry in enumerate(doc.get("agents", [])):
         where = f"agents[{i}]"
         agent = AgentSpec(
@@ -171,7 +172,15 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             )
         if agent.player_id in seen_players:
             raise ConfigError(f"{where}: duplicate player_id {agent.player_id}")
+        if agent.agent_id in seen_agent_ids:
+            # agent_id is the log's attribution key: a duplicate collapses
+            # telemetry, llm_posts, and replay's call bucketing
+            raise ConfigError(
+                f"{where}: duplicate agent_id {agent.agent_id!r} — "
+                "attribution (log, telemetry, replay) requires uniqueness"
+            )
         seen_players.add(agent.player_id)
+        seen_agent_ids.add(agent.agent_id)
         agents.append(agent)
     if not agents:
         raise ConfigError("at least one agent is required")
