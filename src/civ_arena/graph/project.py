@@ -64,8 +64,11 @@ def main(argv: list[str] | None = None) -> None:
     print("wrote " + ", ".join(str(p) for p in paths.values()))
 
     if opts.load:
-        from civ_arena.graph.load import load_artifacts_into_db
-        counts = load_artifacts_into_db(opts.run_dir)
+        from civ_arena.graph.load import LoadError, load_artifacts_into_db
+        try:
+            counts = load_artifacts_into_db(opts.run_dir)
+        except LoadError as exc:
+            raise SystemExit(f"error: {exc}") from exc
         print(f"loaded into Neo4j: {counts}")
 
 

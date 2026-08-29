@@ -1,0 +1,26 @@
+# Loopback-only Neo4j for the M12 graph lane (docs/graph-lane.md).
+#
+# NEO4J_AUTH=none: this is a single-user dev graph bound to 127.0.0.1 only —
+# no secrets to manage. The graph artifacts (runs/<id>/graph/*.jsonl) are the
+# portable truth; this DB is a derived, rebuildable index: drop the volume,
+# re-project, re-load.
+#
+#   docker compose -f infra/neo4j/docker-compose.yaml up -d
+#   bolt://127.0.0.1:7687  |  browser http://127.0.0.1:7474
+services:
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: civ-arena-neo4j
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=none
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    volumes:
+      - civ-arena-neo4j-data:/data
+      - civ-arena-neo4j-logs:/logs
+
+volumes:
+  civ-arena-neo4j-data:
+  civ-arena-neo4j-logs:
