@@ -255,3 +255,25 @@ Deferred because the graph holds ONE claim-bearing match today; a recall
 tool over a near-empty graph buys tokens for nothing. Gate for M13: ≥3
 claim-bearing matches, which the arena now produces cheaply (any LLM match
 with the M11 tools).
+
+### 2026-08-29 — seeding runs 003/004: the gate is OPEN and the M11 result replicates
+
+Two fresh-seed 40-turn runs (operator-approved spend), both gated clean
+(0 violations; model-free replay OK: 2,914 and 2,816 events) and loaded:
+
+| match | seed | memory tools | ROME (LLM) | KOREA (turtler) | result |
+|---|---|---|---|---|---|
+| 001 | 947381 | — | 2 cities / 13 pop / 86 gold / 24 units | 2 / 15 / 81 / 19 | **draw** |
+| 002 | 947381 | M11 | 4 / 21 / 509 / 24 | 2 / 15 / 81 / 20 | **win** |
+| 003 | 628331 | M11 | 3 / 15 / 248 / 21 | 2 / 14 / 114 / 18 | **win** |
+| 004 | 914753 | M11 | 4 / 20 / 14 / 33 | 2 / 15 / 86 / 20 | **win** |
+
+3/3 memory-enabled wins on fresh seeds (the n=1 of M11 is now n=3), while
+the only no-memory run played to a draw. Honest caveat: 001 pairs by seed
+with 002 only — 003/004 have no no-memory twins (the M11 tools are always
+wired; a true baseline needs a disable flag nobody has needed). Claim
+adoption held on every seed (66 lessons, 121 goal revisions, 16 prediction
+revisions across the three matches; tokens 550k–586k in, ~141–151k out,
+~9–16 self-corrected malformed args each). The cross-match spine holds:
+2 Agent nodes, 4 Match nodes, 8 PLAYED_AS edges — and `query lessons
+--agent minimax-m3` now returns all 66 lessons across matches.

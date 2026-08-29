@@ -1,0 +1,33 @@
+# M13 seeding run 2 of 2: same duel shape as llm-vs-turtler-002 on a FRESH
+# seed — replication for the M11 memory-plane result (n=1 -> n=3) and graph
+# history for the recall gate. The api key is NEVER inline — env name only.
+match:
+  match_id: llm-vs-turtler-004
+  seed: 914753
+  max_turns: 40
+  checkpoint_every: 1        # paid inference: lose at most one turn on resume
+  adapter: simulator
+  watchdog_mode: flag_and_continue
+  violation_limit: 5
+
+agents:
+  - agent_id: minimax-m3
+    player_id: 0
+    policy: llm
+    seed: 1101
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: korean-turtler
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []
