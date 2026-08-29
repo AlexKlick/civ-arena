@@ -20,6 +20,7 @@ from civ_arena.arena.coordinator import Arena
 from civ_arena.canonical import rng_from_doc
 from civ_arena.config import AgentSpec, LLMSpec, MatchSpec
 from civ_arena.replay import replay_run
+from civ_arena.strategy.view import render_memory
 from fakes import FakeModel, garbage_model, never_ends_model, text, use
 
 FAKE_LLM = LLMSpec(base_url="http://fake.local/anthropic/v1",
@@ -53,6 +54,7 @@ def make_arena(tmp_path: Path, fake: FakeModel, *, match_id: str = "llm-run",
     # path does this for non-injected ones)
     rt.telemetry = arena.telemetry
     rt.diary = arena.diary
+    rt.strategy = arena.referee.strategy
     return arena, fake
 
 
@@ -234,7 +236,13 @@ async def test_prompts_are_template_rendered_only(tmp_path):
         agent_id="llm-probe-x7q"))
     for i, req in enumerate(fake.requests):
         assert req["system"] == SYSTEM_PROMPT
-        expected_header = turn_header(i + 1, "note" if i else "")
+        # the pin now CONSTRUCTS through the memory renderer too: any future
+        # identity leak via the strategy view fails here, not on the wire.
+        # (This store stays empty for this script, so memory renders "" —
+        # the construction coverage is the point.)
+        expected_header = turn_header(
+            i + 1, "note" if i else "",
+            render_memory(arena.referee.strategy, 0, i + 1))
         assert req["messages"][0] == {"role": "user", "content": expected_header}
         blob = json.dumps([req["system"], req["messages"]])
         for secret in ("llm-probe-x7q", "probe-match-x7q"):

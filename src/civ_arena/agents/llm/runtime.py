@@ -10,9 +10,11 @@ Contract notes (the whole lane in one docstring):
   arguments die at the call — both become error tool_results with FIXED
   telemetry keys ("llm_unknown_tool" / "llm_malformed_args"; never a
   model-supplied dict key) and the loop moves on. No re-prompt repair.
-- Per-turn conversation is discarded at end of turn; the diary is the only
-  cross-turn memory. Assistant content is echoed back VERBATIM (thinking
-  blocks included) — proven on the wire in docs/llm-lane.md.
+- Per-turn conversation is discarded at end of turn; cross-turn memory is
+  the diary plus the rendered strategy view (goals/predictions/beliefs —
+  identity-free, injected through the same template-pure header). Assistant
+  content is echoed back VERBATIM (thinking blocks included) — proven on
+  the wire in docs/llm-lane.md.
 - Budget: the runtime checks BEFORE each request and the client counts
   EVERY post (retries included); either side tripping ends the match via
   MatchAborted, so a summary is still written. A ModelUnavailable
@@ -41,6 +43,7 @@ from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.runtime import AgentProfile
 from civ_arena.arena.referee import MatchAborted
 from civ_arena.config import LLMSpec
+from civ_arena.strategy.view import render_memory
 
 _SCHEMA_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
@@ -52,6 +55,7 @@ class LLMAgentRuntime:
     llm: LLMSpec
     telemetry: Any = None
     diary: Any = None
+    strategy: Any = None  # StrategyStore; the memory view renders when set
     rng: random.Random = field(default=None)  # type: ignore[assignment]
     _turn: int = field(default=0, init=False)
 
@@ -61,7 +65,8 @@ class LLMAgentRuntime:
 
     @classmethod
     def build(cls, profile: AgentProfile, *, telemetry: Any = None,
-              diary: Any = None, client: ModelClient | None = None,
+              diary: Any = None, strategy: Any = None,
+              client: ModelClient | None = None,
               on_post: Any = None) -> LLMAgentRuntime:
         if profile.llm is None:
             raise ValueError(f"agent {profile.agent_id!r}: policy 'llm' "
@@ -74,7 +79,7 @@ class LLMAgentRuntime:
                 and client.on_post is None:
             client.on_post = on_post
         return cls(profile=profile, client=client, llm=profile.llm,
-                   telemetry=telemetry, diary=diary)
+                   telemetry=telemetry, diary=diary, strategy=strategy)
 
     # ------------------------------------------------------------- hooks
     def begin_turn(self, turn: int) -> None:
@@ -93,8 +98,12 @@ class LLMAgentRuntime:
             )
         diary_text = (self.diary.get(self.profile.player_id)
                       if self.diary is not None else "")
+        memory = (render_memory(self.strategy, self.profile.player_id,
+                                self._turn)
+                  if self.strategy is not None else "")
         messages: list[dict[str, Any]] = [
-            {"role": "user", "content": turn_header(self._turn, diary_text)}
+            {"role": "user",
+             "content": turn_header(self._turn, diary_text, memory)}
         ]
         try:
             for _round in range(self.llm.max_tool_rounds):

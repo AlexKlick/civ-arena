@@ -554,3 +554,157 @@ async def test_oversized_model_claim_is_malformed_and_replay_stable(tmp_path):
     assert tel["model_errors"] == {"llm_malformed_args": 1}
     result = await replay_run(tmp_path / "run", arena.spec, tmp_path / "replay")
     assert result["identical"]
+
+
+# ------------------------------------------------------------- scoring
+
+
+def _scored_store() -> StrategyStore:
+    store = StrategyStore()
+    store.facts.note(0, 3, {"own_cities": 2, "gold": 40})
+    store.facts.note(0, 5, {"own_cities": 3, "gold": 55})
+    store.apply_goal(0, {"text": "hold 3 cities", "by_turn": 5,
+                         "metric": "cities", "target": 3}, 1, 1)
+    store.apply_goal(0, {"text": "save 500 gold", "by_turn": 5,
+                         "metric": "gold", "target": 500}, 1, 2)
+    store.apply_goal(0, {"text": "vague intention", "by_turn": 5}, 1, 3)
+    store.apply_prediction(0, {"text": "rival walls soon", "review_turn": 5,
+                               "subject_id": "c4"}, 1, 4)
+    store.apply_prediction(0, {"text": "3 cities by t5", "review_turn": 5,
+                               "metric": "cities", "target": 3}, 1, 5)
+    store.apply_prediction(0, {"text": "not due yet", "review_turn": 9}, 1, 6)
+    return store
+
+
+def test_verdicts_met_missed_self_assess():
+    from civ_arena.strategy import scoring
+
+    store = _scored_store()
+    facts = store.facts
+    met, missed, vague = store.current_goals(0)
+    assert scoring.verdict(met, facts, 0, 5) == "met"       # cities 3 >= 3
+    assert scoring.verdict(missed, facts, 0, 5) == "missed"  # gold 55 < 500
+    assert scoring.verdict(vague, facts, 0, 5) == "self_assess"  # no metric
+    # a subject the arena cannot see is never auto-scored
+    rival, scored, _later = store.current_predictions(0)
+    assert scoring.verdict(rival, facts, 0, 5) == "self_assess"
+    assert scoring.verdict(scored, facts, 0, 5) == "met"
+    # metric value resolves through the facts key mapping, latest <= turn
+    assert scoring.metric_value(facts, 0, "cities", 4) == 2
+    assert scoring.metric_value(facts, 0, "cities", 5) == 3
+    assert scoring.metric_value(facts, 0, "cities", 2) is None
+
+
+def test_due_selection_overdue_and_open():
+    from civ_arena.strategy import scoring
+
+    store = _scored_store()
+    assert {g.goal_id for g in scoring.due_goals(store, 0, 5)} == {"g1", "g2", "g3"}
+    # overdue stays visible: a skipped review does not silently resolve
+    assert {g.goal_id for g in scoring.due_goals(store, 0, 7)} == {"g1", "g2", "g3"}
+    assert {p.prediction_id
+            for p in scoring.due_predictions(store, 0, 5)} == {"p1", "p2"}
+    # nothing due before the deadlines
+    assert scoring.due_goals(store, 0, 4) == []
+    assert scoring.due_predictions(store, 0, 4) == []
+
+
+def test_metrics_follow_observation_not_ambient():
+    """A captured own city drops out of the next observation digest, so the
+    metric drops — the store never folds referee-scope AMBIENT economy."""
+    store = StrategyStore()
+    store.apply_goal(0, {"text": "hold 2 cities", "by_turn": 6,
+                         "metric": "cities", "target": 2}, 1, 1)
+    store.note_observation(0, 4, 10, "get_cities",
+                           {"own_cities": 2, "own_population": 5,
+                            "foreign_cities": []})
+    store.note_observation(0, 6, 20, "get_cities",
+                           {"own_cities": 1, "own_population": 3,
+                            "foreign_cities": []})
+    from civ_arena.strategy import scoring
+
+    assert scoring.verdict(store.current_goals(0)[0], store.facts, 0, 6) \
+        == "missed"
+
+
+# ------------------------------------------------------------- renderer
+
+
+def test_render_memory_sections_and_identity_freedom():
+    from civ_arena.strategy.view import render_memory
+
+    store = _scored_store()
+    store.apply_lesson(0, {"text": "check production every turn",
+                           "about": "g1"}, 4, 30)
+    store.beliefs.see(0, 3, 9, foreign_units=[_fu("u8")])
+    text = render_memory(store, 0, 5)
+    assert "REVIEW DUE THIS TURN" in text
+    assert "g1" in text and "MET (cities=3)" in text
+    assert "MISSED (gold=55)" in text
+    assert "SELF-ASSESS" in text
+    assert "GOALS (active)" in text
+    assert "LAST SEEN (may be stale)" in text
+    assert "u8 WARRIOR @ 2,0 hp2 (t3)" in text
+    assert "LESSONS" in text
+    # identity-free: no agent/match/lease vocabulary ever reaches a prompt
+    low = text.lower()
+    for secret in ("player_id", "agent_id", "match_id", "lease",
+                   "game_instance"):
+        assert secret not in low
+    # empty store renders nothing — the header omits the block entirely
+    assert render_memory(StrategyStore(), 0, 5) == ""
+
+
+def test_render_memory_budget_drop_order_keeps_review():
+    from civ_arena.strategy.view import MEMORY_BUDGET, render_memory
+
+    store = StrategyStore()
+    # maximal noise: resolved goals + lessons + sightings + active goals,
+    # plus a due review that must survive everything
+    for i in range(1, 9):
+        store.apply_goal(0, {"text": f"resolved number {i} " + "x" * 90,
+                             "status": "done"}, 1, i)
+        store.apply_lesson(0, {"text": f"lesson number {i} " + "y" * 90},
+                           2, 20 + i)
+        store.beliefs.see(0, 2, 20 + i, foreign_units=[_fu(f"u{i}")])
+    for i in range(10, 16):
+        store.apply_goal(0, {"text": f"active goal {i} " + "z" * 80},
+                         1, 30 + i)
+    store.apply_goal(0, {"text": "the review that must survive",
+                         "by_turn": 3, "metric": "cities", "target": 1}, 1, 40)
+    store.facts.note(0, 2, {"own_cities": 2})
+
+    text = render_memory(store, 0, 3)
+    assert len(text) <= MEMORY_BUDGET
+    assert "the review that must survive" in text  # REVIEW DUE never dropped
+    assert "MISSED" not in text  # met: cities 2 >= 1
+    assert "MET (cities=2)" in text
+    # the drop order claims the noisiest sections first
+    assert "RESOLVED" not in text or "LESSONS" not in text or len(text) < 2000
+    every_line_clipped = all(
+        len(line) <= 120 for line in text.splitlines())
+    assert every_line_clipped
+
+
+# --------------------------------------------- memory view through the model
+
+
+async def test_memory_view_flows_into_turn_header(tmp_path):
+    from fakes import FakeModel, use
+    from test_llm_runtime import _run, make_arena
+
+    fake = FakeModel(script=[
+        [use("get_cities"), use("set_goal", {
+            "text": "have a city", "by_turn": 1, "metric": "cities",
+            "target": 1}), use("end_turn")],
+        [use("end_turn")],
+    ])
+    arena, _fake = await _run(make_arena(tmp_path, fake, max_turns=2))
+    header2 = fake.requests[1]["messages"][0]["content"]
+    assert "REVIEW DUE THIS TURN" in header2
+    assert "g1" in header2
+    assert "cities=0" in header2  # no city founded turn 1: honest verdict
+    assert "Your diary:" in header2  # the diary still rides the header
+    # and the match still replays model-free with claims in the log
+    result = await replay_run(tmp_path / "run", arena.spec, tmp_path / "replay")
+    assert result["identical"]
