@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -420,3 +421,183 @@ def test_load_records_tolerates_torn_tail(tmp_path: Path):
     good = json.dumps(_start(), sort_keys=True) + "\n"
     path.write_text(good + '{"kind":"TOOL_RESULT","seq":1')
     assert [r["kind"] for r in load_records(path)] == ["MATCH_START"]
+
+
+# ------------------------------------------------------------ loader (M12b)
+
+
+def test_node_batches_group_validate_and_chunk():
+    from civ_arena.graph.load import node_batches
+    nodes = [
+        {"uuid": "a", "group_id": "g", "labels": ["Claim", "Goal"],
+         "name": "a", "text": "x", "current": True},
+        {"uuid": "b", "group_id": "g", "labels": ["Claim", "Goal"],
+         "name": "b", "text": "y", "current": False},
+        {"uuid": "c", "group_id": "g", "labels": ["Entity", "City"],
+         "name": "c", "kind": "city"},
+    ]
+    batches = list(node_batches(nodes, batch=1))
+    # grouped by label tuple, sorted, chunked at 1
+    assert [labels for labels, _ in batches] == [
+        ("Claim", "Goal"), ("Claim", "Goal"), ("Entity", "City")]
+    assert [r["uuid"] for r in batches[0][1]] == ["a"]
+    assert batches[0][1][0]["props"] == {
+        "group_id": "g", "name": "a", "text": "x", "current": True}
+
+
+def test_node_batches_rejects_unsafe_labels():
+    from civ_arena.graph.load import node_batches
+    nodes = [{"uuid": "a", "group_id": "g", "labels": ["Claim); MATCH (x)"],
+              "name": "a"}]
+    with pytest.raises(Exception, match="unsafe label"):
+        list(node_batches(nodes))
+
+
+def test_edge_batches_group_by_rel_and_validate():
+    from civ_arena.graph.load import edge_batches
+    edges = [
+        {"uuid": "a|AUTHORED|b", "source": "a", "target": "b",
+         "rel": "AUTHORED"},
+        {"uuid": "b|SUPERSEDES|c", "source": "b", "target": "c",
+         "rel": "SUPERSEDES", "amend_turn": 3},
+    ]
+    batches = list(edge_batches(edges))
+    assert [(rel, len(rows)) for rel, rows in batches] == \
+        [("AUTHORED", 1), ("SUPERSEDES", 1)]
+    assert batches[1][1][0]["props"] == {"amend_turn": 3}
+    with pytest.raises(Exception, match="unsafe relationship"):
+        list(edge_batches([{"uuid": "x", "source": "a", "target": "b",
+                            "rel": "REL) DETACH DELETE n"}]))
+
+
+# ------------------------------------------------------------ queries (M12c)
+
+
+class _FakeSession:
+    """Duck-typed session: run() returns canned mappings."""
+
+    def __init__(self, rows_by_fragment: dict[str, list[dict]]):
+        self.rows_by_fragment = rows_by_fragment
+        self.queries: list[str] = []
+
+    def run(self, cypher: str, **params: Any):
+        self.queries.append(cypher)
+        for fragment, rows in self.rows_by_fragment.items():
+            if fragment in cypher:
+                return list(rows)
+        return []
+
+
+def test_match_of_strips_group_suffix():
+    from civ_arena.graph.query import match_of
+    assert match_of("llm-vs-turtler-002:main") == "llm-vs-turtler-002"
+    assert match_of("plain") == "plain"
+
+
+def test_lessons_query_joins_agent_through_players():
+    from civ_arena.graph.query import lessons
+    session = _FakeSession({"-[:AUTHORED]->(l:Claim:Lesson)": [
+        {"group_id": "m1:main", "lesson_id": "l1", "text": "g6 MET",
+         "about": "g6", "turn": 12, "about_id": "g6",
+         "about_verdict": "met"},
+        {"group_id": "m2:main", "lesson_id": "l1", "text": "note",
+         "about": "", "turn": 3, "about_id": None, "about_verdict": None},
+    ]})
+    rows = lessons(session, "roman")
+    assert len(rows) == 2 and rows[0]["about_verdict"] == "met"
+    assert "$agent" in session.queries[0]  # parameterized, never interpolated
+
+
+def test_goal_outcomes_filter_and_tally():
+    from civ_arena.graph.query import tally
+    rows = [
+        {"metric": "cities", "verdict": "met", "status": "active"},
+        {"metric": "cities", "verdict": "missed", "status": "active"},
+        {"metric": "cities", "verdict": None, "status": "done"},
+        {"metric": "", "verdict": None, "status": "dropped"},
+    ]
+    assert tally(rows) == {
+        "cities": {"met": 1, "missed": 1, "done": 1},
+        "(none)": {"dropped": 1},
+    }
+
+
+def test_chains_prefix_pins_the_claim_not_its_neighbors():
+    from civ_arena.graph.query import chains
+    session = _FakeSession({})
+    chains(session, "m", 0, "g1")
+    # STARTS WITH $prefix with the trailing colon: g1's revisions, never g10's
+    assert "$prefix" in session.queries[0]
+    assert "m:main:claim:p0:g1:" not in session.queries[0].split("$prefix")[0]
+
+
+def test_query_cli_requires_subcommand():
+    from civ_arena.graph import query as query_mod
+    with pytest.raises(SystemExit):
+        query_mod.main([])
+
+
+def test_loader_module_imports_without_driver():
+    # the core must stay importable when the optional graph group is absent
+    import civ_arena.graph.load as loader  # noqa: F401  (import is the test)
+    assert loader.config_from_env()["uri"].startswith("bolt://")
+
+
+def test_load_error_mentions_remedies():
+    from civ_arena.graph.load import LoadError, load_into_db
+    with pytest.raises(LoadError) as excinfo:
+        load_into_db([{"uuid": "a", "labels": ["X"], "group_id": "g",
+                       "name": "a"}], [], uri="bolt://127.0.0.1:1")
+    # driver missing OR dead port — either way the message must carry the fix
+    assert ("uv sync --group graph" in str(excinfo.value)
+            or "docker compose" in str(excinfo.value))
+
+
+def test_load_artifacts_missing(tmp_path: Path):
+    from civ_arena.graph.load import LoadError, load_artifacts_into_db
+    with pytest.raises(LoadError, match="no graph artifacts"):
+        load_artifacts_into_db(tmp_path)
+
+
+def test_live_db_round_trip_idempotent():
+    """Opt-in live test: set CIV_ARENA_NEO4J_TEST=1 with the container up and
+    the graph group synced (`uv run --group graph pytest ...`). Skipped in
+    every normal gate — local tests never require a running DB."""
+    pytest.importorskip("neo4j")
+    if os.environ.get("CIV_ARENA_NEO4J_TEST") != "1":
+        pytest.skip("live DB test: set CIV_ARENA_NEO4J_TEST=1 to enable")
+    from neo4j import GraphDatabase
+
+    from civ_arena.graph.load import load_into_db
+
+    nodes = [
+        {"uuid": "agent:roman", "group_id": "cross_match",
+         "labels": ["Agent"], "name": "roman", "agent_id": "roman",
+         "policy": "llm"},
+        {"uuid": "match:live-1", "group_id": "cross_match",
+         "labels": ["Match"], "name": "live-1", "seed": 1},
+    ]
+    edges = [{"uuid": "agent:roman|PLAYED_IN|match:live-1",
+              "source": "agent:roman", "target": "match:live-1",
+              "rel": "PLAYED_IN"}]
+    first = load_into_db(nodes, edges)
+    second = load_into_db(nodes, edges)  # MERGE by uuid: a no-op
+    assert first == second
+
+    from civ_arena.graph.load import config_from_env
+    cfg = config_from_env()
+    driver = GraphDatabase.driver(
+        cfg["uri"], auth=(cfg["user"], cfg["password"]) if cfg["password"]
+        else None)
+    try:
+        with driver.session() as session:
+            n = session.run("MATCH (n:Agent {uuid: 'agent:roman'}) "
+                            "RETURN count(n) AS c").single()["c"]
+            e = session.run("MATCH ()-[r:PLAYED_IN "
+                            "{uuid: 'agent:roman|PLAYED_IN|match:live-1'}]->()"
+                            " RETURN count(r) AS c").single()["c"]
+            session.run("MATCH (n:GraphNode) WHERE n.uuid IN "
+                        "['agent:roman', 'match:live-1'] DETACH DELETE n")
+    finally:
+        driver.close()
+    assert n == 1 and e == 1
