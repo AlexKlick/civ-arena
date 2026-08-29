@@ -38,6 +38,7 @@ ARG_ORDER: dict[str, list[str]] = {
     "set_city_production": ["city_id", "item_id"],
     "purchase": ["city_id", "item_id"],
     "end_turn": [],
+    "write_diary": ["text"],
 }
 
 

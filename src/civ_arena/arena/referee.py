@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from civ_arena.arena.diary import MAX_DIARY_CHARS, DiaryStore
 from civ_arena.arena.events import EventLog
 from civ_arena.arena.idempotency import DedupeIndex
 from civ_arena.arena.telemetry import TelemetryRegistry
@@ -71,6 +72,7 @@ class Referee:
         game_instance_id: str,
         cfg: RefereeConfig | None = None,
         dedupe: DedupeIndex | None = None,
+        diary: DiaryStore | None = None,
     ) -> None:
         self.adapter = adapter
         self.policy = policy
@@ -80,6 +82,7 @@ class Referee:
         self.game_instance_id = game_instance_id
         self.cfg = cfg or RefereeConfig()
         self.dedupe = dedupe or DedupeIndex()
+        self.diary = diary or DiaryStore()
         self._lease: TurnLease | None = None
         self._ls = _LeaseState()
         self.violations_total = 0
@@ -209,6 +212,39 @@ class Referee:
         # docstring for why rollback does not apply past the phase boundary).
         await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
         return {"status": "accepted", "turn": turn}
+
+    # -------------------------------------------------------------- diary
+    async def write_diary(self, ctx: SessionCtx, text: str) -> dict[str, Any]:
+        """Store this player's cross-turn note. Validated like every tool
+        (lease, then shape) and logged as a TOOL_CALL/TOOL_RESULT pair — but
+        NOT a game action: no adapter call, no state hash, no mutations, so
+        nothing here can trip the watchdog."""
+        t0 = time.perf_counter()
+        phase = await self._phase()
+        log_args: dict[str, Any] = (
+            {"text": text} if isinstance(text, str)
+            else {"text": None, "bad_type": type(text).__name__}
+        )
+        reason = self._lease_reason(ctx, phase, tool="write_diary", args=log_args)
+        if reason is not None:
+            self.telemetry.note_call(ctx.agent_id, "write_diary",
+                                     int((time.perf_counter() - t0) * 1000), ok=False)
+            self._emit_pair(ctx, phase, "write_diary", log_args, None,
+                            {"status": "rejected", "rejection": reason.value})
+            return {"status": "rejected", "rejection": reason.value}
+        if not isinstance(text, str) or not 1 <= len(text.strip()) <= MAX_DIARY_CHARS:
+            doc = {"status": "rejected", "rejection": RejectionReason.ARGS_INVALID.value,
+                   "tool": "write_diary"}
+            self._emit_pair(ctx, phase, "write_diary", log_args, None, doc)
+            self.telemetry.note_call(ctx.agent_id, "write_diary",
+                                     int((time.perf_counter() - t0) * 1000), ok=False)
+            return doc
+        self.diary.write(ctx.player_id, text)
+        doc = {"status": "accepted", "tool": "write_diary", "chars": len(text)}
+        self._emit_pair(ctx, phase, "write_diary", log_args, None, doc)
+        self.telemetry.note_call(ctx.agent_id, "write_diary",
+                                 int((time.perf_counter() - t0) * 1000), ok=True)
+        return doc
 
     # -------------------------------------------------------------- observe
     async def observe(

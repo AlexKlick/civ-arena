@@ -81,6 +81,20 @@ nonce key — a deliberate tradeoff documented in
 `arena/idempotency.py`. The event log is the only durable store; the dedupe
 index, resume, and replay all rebuild from it.
 
+## The diary (LLM-lane memory, smallest rung)
+
+`write_diary` is a validated tool (lease, then shape: str, 1–2000 chars
+after strip) that stores one per-player note, last write wins within a turn.
+It is NOT a game action: no adapter call, no MutationRecords, no
+before/after state hash — a tampered diary cannot move a game outcome, only
+what a model reads next turn. For exactly that reason the diary sits
+DELIBERATELY OUTSIDE the checkpoint content hash: the event log is its only
+durable store, and resume rebuilds it with `DiaryStore.from_log` over the
+truncated prefix — the same trust root and the same rebuild pattern as the
+dedupe index (no schema bump, no new event kinds). Replay re-issues recorded
+`write_diary` calls through the normal facade path, so replayed diary state
+is verified for free by the existing comparable-event projection.
+
 ## Event log
 
 Append-only fsync'd JSONL, strictly increasing `seq` (the only ordering

@@ -1,4 +1,4 @@
-"""The 14 agent-visible tools. NO tool takes a player/owner identity parameter.
+"""The 15 agent-visible tools. NO tool takes a player/owner identity parameter.
 
 Identity is bound server-side: each function receives an opaque SessionCtx
 whose player the referee injected at lease grant. An LLM AgentRuntime later
@@ -108,6 +108,13 @@ async def end_turn(ctx: SessionCtx) -> dict:
     return await ctx.referee.end_turn(ctx)
 
 
+async def write_diary(ctx: SessionCtx, text: str) -> dict:
+    """Cross-turn memory note. Not a game action: no state change, no
+    mutations — the referee stores it per-player and it is fed back to this
+    agent (and only this agent) at the next turn's start."""
+    return await ctx.referee.write_diary(ctx, text)
+
+
 TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "get_overview": get_overview,
     "get_units": get_units,
@@ -123,6 +130,7 @@ TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "set_city_production": set_city_production,
     "purchase": purchase,
     "end_turn": end_turn,
+    "write_diary": write_diary,
 }
 
 

@@ -10,6 +10,7 @@ from typing import Any
 
 from civ_arena.agents.runtime import AgentProfile, build_runtime
 from civ_arena.arena.checkpoints import CheckpointManager, CheckpointState
+from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
 from civ_arena.arena.referee import MatchAborted, Referee, RefereeConfig
 from civ_arena.arena.telemetry import TelemetryRegistry
@@ -38,6 +39,7 @@ class Arena:
         self.game_instance_id = f"{spec.match_id}-i{os.getpid()}"
         self.log = EventLog(self.run_dir / "events.jsonl")
         self.telemetry = TelemetryRegistry()
+        self.diary = DiaryStore()
         self.adapter = SimulatorAdapter()
         self.chaos = ChaosDirector([
             ChaosEvent(MutationSpec(e.spec), hook=e.hook, offset=e.offset)
@@ -48,6 +50,7 @@ class Arena:
             spec.match_id, self.game_instance_id,
             RefereeConfig(watchdog_mode=spec.watchdog_mode,
                           violation_limit=spec.violation_limit),
+            diary=self.diary,
         )
         self.runtimes: dict[int, Any] = {}
         self.sessions: dict[int, PlayerSession] = {}
@@ -162,6 +165,9 @@ class Arena:
         from civ_arena.arena.idempotency import DedupeIndex
 
         self.referee.dedupe = DedupeIndex.from_log(self.log.records())
+        # the diary is derived state: rebuild it from the truncated prefix
+        self.diary = DiaryStore.from_log(self.log.records())
+        self.referee.diary = self.diary
         # control-plane counters and chaos schedule must resume, not reset
         self.referee.restore_violation_counters(
             state.coordinator_state.get("violations", 0),
