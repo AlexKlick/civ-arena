@@ -24,11 +24,14 @@ from civ_arena.strategy.store import StrategyStore
 def call_rec(
     tool: str, args: dict[str, Any], *, player_id: int = 0, turn: int = 1,
     agent_id: str = "roman", match_id: str = "m", gi: str = "g1", seq: int = 0,
+    **extra: Any,
 ) -> dict[str, Any]:
     return {
         "kind": "TOOL_CALL", "tool": tool, "args": args, "seq": seq,
         "player_id": player_id, "agent_id": agent_id, "turn": turn,
         "match_id": match_id, "game_instance_id": gi,
+        "phase_player_id": player_id, "visibility_scope": "private_player",
+        **extra,
     }
 
 
@@ -40,7 +43,9 @@ def result_rec(
     return {
         "kind": "TOOL_RESULT", "tool": tool, "seq": seq, "status": status,
         "player_id": player_id, "agent_id": agent_id, "turn": turn,
-        "match_id": match_id, "game_instance_id": gi, **extra,
+        "match_id": match_id, "game_instance_id": gi,
+        "phase_player_id": player_id, "visibility_scope": "private_player",
+        **extra,
     }
 
 
@@ -568,7 +573,7 @@ def _scored_store() -> StrategyStore:
                          "metric": "cities", "target": 3}, 1, 1)
     store.apply_goal(0, {"text": "save 500 gold", "by_turn": 5,
                          "metric": "gold", "target": 500}, 1, 2)
-    store.apply_goal(0, {"text": "vague intention", "by_turn": 5}, 1, 3)
+    store.apply_goal(0, {"text": "vague intention"}, 1, 3)  # no deadline
     store.apply_prediction(0, {"text": "rival walls soon", "review_turn": 5,
                                "subject_id": "c4"}, 1, 4)
     store.apply_prediction(0, {"text": "3 cities by t5", "review_turn": 5,
@@ -600,9 +605,9 @@ def test_due_selection_overdue_and_open():
     from civ_arena.strategy import scoring
 
     store = _scored_store()
-    assert {g.goal_id for g in scoring.due_goals(store, 0, 5)} == {"g1", "g2", "g3"}
+    assert {g.goal_id for g in scoring.due_goals(store, 0, 5)} == {"g1", "g2"}
     # overdue stays visible: a skipped review does not silently resolve
-    assert {g.goal_id for g in scoring.due_goals(store, 0, 7)} == {"g1", "g2", "g3"}
+    assert {g.goal_id for g in scoring.due_goals(store, 0, 7)} == {"g1", "g2"}
     assert {p.prediction_id
             for p in scoring.due_predictions(store, 0, 5)} == {"p1", "p2"}
     # nothing due before the deadlines
@@ -654,37 +659,6 @@ def test_render_memory_sections_and_identity_freedom():
         assert secret not in low
     # empty store renders nothing — the header omits the block entirely
     assert render_memory(StrategyStore(), 0, 5) == ""
-
-
-def test_render_memory_budget_drop_order_keeps_review():
-    from civ_arena.strategy.view import MEMORY_BUDGET, render_memory
-
-    store = StrategyStore()
-    # maximal noise: resolved goals + lessons + sightings + active goals,
-    # plus a due review that must survive everything
-    for i in range(1, 9):
-        store.apply_goal(0, {"text": f"resolved number {i} " + "x" * 90,
-                             "status": "done"}, 1, i)
-        store.apply_lesson(0, {"text": f"lesson number {i} " + "y" * 90},
-                           2, 20 + i)
-        store.beliefs.see(0, 2, 20 + i, foreign_units=[_fu(f"u{i}")])
-    for i in range(10, 16):
-        store.apply_goal(0, {"text": f"active goal {i} " + "z" * 80},
-                         1, 30 + i)
-    store.apply_goal(0, {"text": "the review that must survive",
-                         "by_turn": 3, "metric": "cities", "target": 1}, 1, 40)
-    store.facts.note(0, 2, {"own_cities": 2})
-
-    text = render_memory(store, 0, 3)
-    assert len(text) <= MEMORY_BUDGET
-    assert "the review that must survive" in text  # REVIEW DUE never dropped
-    assert "MISSED" not in text  # met: cities 2 >= 1
-    assert "MET (cities=2)" in text
-    # the drop order claims the noisiest sections first
-    assert "RESOLVED" not in text or "LESSONS" not in text or len(text) < 2000
-    every_line_clipped = all(
-        len(line) <= 120 for line in text.splitlines())
-    assert every_line_clipped
 
 
 # --------------------------------------------- memory view through the model
@@ -848,3 +822,238 @@ async def test_resume_equals_uninterrupted_memory_view(tmp_path):
     await resumed.run(resume_state=ckpt)
     resumed_header3 = header_of(resumed_fake, 3)
     assert resumed_header3 == clean_header3
+
+
+# ------------------------------------------- Codex round 1 pins (11 findings)
+
+
+async def test_own_city_digest_is_own_not_foreign(tmp_path):
+    """Codex R1 #1: own-city projections carry `owner` (deep-copied raw
+    doc), foreign ones carry `owner_id` — the split must normalize both, or
+    every own city lands in the foreign list with FULL fields (allowlist
+    violation) and own_cities/own_population read 0."""
+    from test_hostile_agent import hostile_setup
+
+    _adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    doc = await ctx.referee.execute(ctx, "found_city", {"unit_id": "u1"})
+    assert doc["status"] == "accepted", doc
+    cities = await referee.observe(ctx, ObserveKind.CITIES)
+    assert any(c.get("owner", c.get("owner_id")) == 0 for c in cities)
+    result = next(r for r in log.records()
+                  if r["kind"] == "TOOL_RESULT" and r.get("tool") ==
+                  "get_cities" and r.get("status") == "accepted")
+    digest = result["observed"]
+    assert digest["own_cities"] == 1
+    assert digest["own_population"] >= 1
+    assert digest["foreign_cities"] == []  # the own city is NOT a belief
+    assert referee.strategy.beliefs.entries.get(0, {}) == {}
+    assert referee.strategy.facts.value(0, "own_cities", 1) == 1
+    assert StrategyStore.from_log(log.records()) == referee.strategy
+
+
+async def test_digest_rejects_non_canonical_values():
+    """Codex R1 #8: a non-canonical digest value (a float from a hostile
+    adapter on the live leg) must fail at BUILD time — before any log
+    record is fsync'd, not at the next checkpoint prefix hash. Only FOREIGN
+    entries embed fields, so the poison rides a foreign entity."""
+    import pytest
+
+    from civ_arena.canonical import CanonicalError
+    from civ_arena.strategy.digest import observation_digest
+
+    poisoned = [{"unit_id": "u9", "owner_id": 1, "hp": 1.5}]
+    with pytest.raises(CanonicalError):
+        observation_digest("units", poisoned, 0)
+
+
+def test_from_log_requires_typed_namespace():
+    """Codex R1 #2: equal-None identity pairs must not authorize a claim,
+    and an untyped/referee-scope observation result must not inject facts."""
+    records = _log_records()
+    # strip identity to None on BOTH sides of the set_goal pair
+    stripped = []
+    for rec in records:
+        if rec.get("tool") == "set_goal":
+            rec = {**rec, "agent_id": None, "match_id": None,
+                   "game_instance_id": None}
+        stripped.append(rec)
+    assert StrategyStore.from_log(stripped).goals == {}
+
+    injected = _log_records() + [
+        result_rec("get_overview", seq=20, observed={"gold": 999},
+                   visibility_scope="referee"),
+        result_rec("get_overview", seq=21, observed={"gold": 999},
+                   agent_id=None),
+    ]
+    store = StrategyStore.from_log(injected)
+    # the legitimate turn-1 sample survived; the injected 999 did not land
+    assert store.facts.value(0, "gold", 9) == 60
+    assert 999 not in {v for t in store.facts.samples.get(0, {}).values()
+                       for v in t.values()}
+
+
+def test_verdict_is_scored_as_of_the_deadline():
+    """Codex R1 #3: later observations must never flip a verdict
+    retroactively — a goal missed at its deadline stays missed."""
+    from civ_arena.strategy import scoring
+
+    store = StrategyStore()
+    store.apply_goal(0, {"text": "save gold", "by_turn": 5,
+                         "metric": "gold", "target": 100}, 1, 1)
+    store.facts.note(0, 5, {"gold": 50})
+    store.facts.note(0, 6, {"gold": 150})
+    goal = store.current_goals(0)[0]
+    assert scoring.verdict(goal, store.facts, 0, 5) == "missed"
+    assert scoring.verdict(goal, store.facts, 0, 6) == "missed"  # sticky
+
+
+def test_lesson_about_due_prediction_resolves_it():
+    """Codex R1 #4: recording the instructed lesson IS the verdict — it
+    closes the due prediction's review; amending re-opens it."""
+    from civ_arena.strategy import scoring
+
+    store = StrategyStore()
+    store.apply_prediction(0, {"text": "walls by t5", "review_turn": 3}, 1, 1)
+    assert scoring.due_predictions(store, 0, 3)
+    doc = store.apply_lesson(0, {"text": "no walls seen", "about": "p1"},
+                             3, 2)
+    assert doc == {"status": "accepted", "tool": "record_lesson",
+                   "lesson_id": "l1", "resolved": "p1"}
+    assert scoring.due_predictions(store, 0, 3) == []
+    assert scoring.due_predictions(store, 0, 9) == []  # stays closed
+    # a lesson about a NOT-yet-due prediction resolves nothing
+    store.apply_prediction(0, {"text": "later claim", "review_turn": 8}, 3, 3)
+    doc = store.apply_lesson(0, {"text": "too early", "about": "p2"}, 3, 4)
+    assert "resolved" not in doc
+    assert scoring.due_predictions(store, 0, 8)  # still due when it lands
+    # amend re-opens with the new revision (review_turn can only move
+    # forward: a past review turn is rejected at authorship)
+    store.apply_prediction(0, {"text": "revised", "review_turn": 5,
+                               "prediction_id": "p1"}, 4, 5)
+    assert scoring.due_predictions(store, 0, 4) == []  # not due until t5
+    assert scoring.due_predictions(store, 0, 5)
+
+
+def test_rejected_amend_creates_no_bucket():
+    """Codex R1 #5: a rejected amendment must not mutate derived state —
+    live {0:{}} vs rebuilt {} would break structural equality."""
+    store = StrategyStore()
+    assert store.apply_goal(0, {"text": "ok", "goal_id": "g9"},
+                            1, 1)["status"] == "rejected"
+    assert store.apply_prediction(0, {"text": "ok", "review_turn": 2,
+                                      "prediction_id": "p9"},
+                                  1, 2)["status"] == "rejected"
+    assert store.apply_lesson(0, {"text": "ok", "about": "g9"},
+                              1, 3)["status"] == "rejected"
+    assert store.goals == {} and store.predictions == {}
+    assert store.lessons == {}
+
+
+def test_dropped_goal_frees_a_cap_slot():
+    """Codex R1 #6: the cap counts undropped goals — dropping one frees its
+    slot (the id is never reused), exactly as the error text promises."""
+    store = StrategyStore()
+    for i in range(MAX_GOALS_PER_PLAYER):
+        store.apply_goal(0, {"text": f"g{i}"}, 1, i)
+    assert store.apply_goal(
+        0, {"text": "full"}, 1, 99)["status"] == "rejected"
+    assert store.apply_goal(
+        0, {"text": "bye", "goal_id": "g1", "status": "dropped"},
+        1, 100)["status"] == "accepted"
+    assert store.apply_goal(
+        0, {"text": "new slot"}, 1, 101)["goal_id"] == "g33"  # ids monotone
+
+
+def test_subject_annotation_does_not_block_scoring():
+    """Codex R1 #7: a metric measures the player's own state regardless of
+    the subject annotation — subject_id is a label, not a scoring veto."""
+    from civ_arena.strategy import scoring
+
+    store = StrategyStore()
+    store.apply_prediction(0, {"text": "about g1: gold grows",
+                               "review_turn": 4, "subject_id": "g1",
+                               "metric": "gold", "target": 10}, 1, 1)
+    store.facts.note(0, 4, {"gold": 20})
+    assert scoring.verdict(store.current_predictions(0)[0],
+                           store.facts, 0, 4) == "met"
+
+
+async def test_oversized_reference_field_is_malformed_zero_events(tmp_path):
+    """Codex R1 #9: the 16-char bound on reference fields is enforced at
+    the runtime, BEFORE any hash/fsync/record."""
+    from fakes import FakeModel, use
+    from test_llm_runtime import _run, make_arena
+
+    fake = FakeModel(script=[
+        [use("record_lesson", {"text": "ok", "about": "x" * 17})],
+        [use("end_turn")],
+    ])
+    arena, _ = await _run(make_arena(tmp_path, fake, max_turns=1))
+    kinds = [(r["kind"], r.get("tool")) for r in arena.log.records()]
+    assert ("TOOL_CALL", "record_lesson") not in kinds
+    assert arena.telemetry.snapshot()["roman"]["model_errors"] == {
+        "llm_malformed_args": 1}
+
+
+async def test_injected_runtime_gets_memory_without_manual_wiring(tmp_path):
+    """Codex R1 #10: arena-owned services reach injected runtimes too — a
+    goal written turn 1 must surface in turn 2's header with NO post-hoc
+    rt.strategy patch."""
+    from fakes import FakeModel, use
+    from test_llm_runtime import _run, make_arena
+
+    fake = FakeModel(script=[
+        [use("set_goal", {"text": "grow", "by_turn": 9}),
+         use("end_turn")],
+        [use("end_turn")],
+    ])
+    # deliberately DO NOT patch rt.strategy — the arena must wire it
+    arena, fake = await _run(make_arena(tmp_path, fake, max_turns=2))
+    header2 = fake.requests[1]["messages"][0]["content"]
+    assert "grow" in header2
+
+
+def test_render_memory_budget_drops_stages_in_order():
+    """Codex R1 #11: the drop order is exercised for real — each fixture
+    renders OVER budget pre-drop (6 due reviews + maxed sections) and
+    asserts exactly which stage went."""
+    from civ_arena.strategy.view import MEMORY_BUDGET, render_memory
+
+    def noisy(resolved: int, lessons: int, seen_len: int) -> StrategyStore:
+        store = StrategyStore()
+        store.facts.note(0, 3, {"own_cities": 2, "gold": 5})
+        # 6 due goals (REVIEW DUE fills to its item cap, every line clipped)
+        for i in range(6):
+            store.apply_goal(
+                0, {"text": f"due {i} " + "d" * 200, "by_turn": 3,
+                    "metric": "cities", "target": 1}, 1, i)
+        for i in range(resolved):
+            store.apply_goal(0, {"text": f"done {i} " + "r" * 100,
+                                 "status": "done"}, 1, 10 + i)
+        for i in range(lessons):
+            store.apply_lesson(0, {"text": f"lesson {i} " + "l" * 100},
+                               2, 30 + i)
+        for i in range(6):
+            unit = {**_fu(f"u{i}"), "type": "S" * seen_len}
+            store.beliefs.see(0, 2, 30 + i, foreign_units=[unit])
+        for i in range(6):
+            store.apply_goal(0, {"text": f"active {i} " + "a" * 100},
+                             1, 60 + i)
+        return store
+
+    # stage 1: RESOLVED is dropped, everything else survives (the long due
+    # texts clip their verdict suffix — the verdict rendering itself is
+    # pinned in test_render_memory_sections_and_identity_freedom)
+    text = render_memory(noisy(3, 3, seen_len=40), 0, 3)
+    assert len(text) <= MEMORY_BUDGET
+    assert "RESOLVED" not in text
+    assert "LESSONS" in text and "LAST SEEN" in text
+    assert text.count("\n- goal g") == 6
+
+    # stage 2: still over without RESOLVED — LESSONS goes too
+    text = render_memory(noisy(0, 3, seen_len=90), 0, 3)
+    assert len(text) <= MEMORY_BUDGET
+    assert "LESSONS" not in text
+    assert "LAST SEEN" in text
+    # REVIEW DUE never drops: six clipped items survive both stages
+    assert text.count("\n- goal g") == 6

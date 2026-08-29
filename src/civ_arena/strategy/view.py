@@ -64,11 +64,10 @@ def _review_due(store: Any, player_id: int, turn: int) -> list[str]:
     return [_clip(line) for line in lines[:REVIEW_ITEM_CAP]]
 
 
-def _goals(store: Any, player_id: int) -> list[str]:
-    goals = sorted(
-        store.active_goals(player_id),
-        key=lambda g: (g.by_turn == 0, g.by_turn, g.goal_id),
-    )
+def _goals(store: Any, player_id: int, exclude: set[str]) -> list[str]:
+    goals = [g for g in store.active_goals(player_id)
+             if g.goal_id not in exclude]
+    goals = sorted(goals, key=lambda g: (g.by_turn == 0, g.by_turn, g.goal_id))
     lines = []
     for goal in goals[:GOAL_CAP]:
         head = f"- {goal.goal_id} {_quote(goal.text)}"
@@ -126,8 +125,11 @@ def render_memory(store: Any, player_id: int, turn: int) -> str:
     """The memory view for one player's turn header ('' when the store has
     nothing to say). Identity-free by construction: claim texts are the
     model's own words, ids are claim/entity ids."""
-    review = ("REVIEW DUE THIS TURN", _review_due(store, player_id, turn))
-    goals = ("GOALS (active)", _goals(store, player_id))
+    review_lines = _review_due(store, player_id, turn)
+    # due goals render once, in REVIEW DUE — not again in GOALS
+    due_ids = {g.goal_id for g in scoring.due_goals(store, player_id, turn)}
+    review = ("REVIEW DUE THIS TURN", review_lines)
+    goals = ("GOALS (active)", _goals(store, player_id, due_ids))
     seen = ("LAST SEEN (may be stale)", _last_seen(store, player_id))
     lessons = ("LESSONS", _lessons(store, player_id))
     resolved = ("RESOLVED", _resolved(store, player_id))
@@ -138,7 +140,9 @@ def render_memory(store: Any, player_id: int, turn: int) -> str:
 
     # fixed drop order when over budget: RESOLVED, LESSONS, LAST SEEN, then
     # GOALS trimmed to 3. REVIEW DUE is never dropped — only item-truncated
-    # as the last resort.
+    # as the last resort. (With the current per-section caps the worst
+    # assembly is ~2840 chars, so only the first two stages can ever fire;
+    # the deeper stages are defense-in-depth for future cap changes.)
     drop_order = [resolved, lessons, seen]
     for victim in drop_order:
         if len(_assemble(blocks)) <= MEMORY_BUDGET:

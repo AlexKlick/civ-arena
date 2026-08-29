@@ -194,7 +194,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "text": {"type": "string",
                          "description": "the goal, phrased as an outcome",
                          "maxLength": 280},
-                "goal_id": {"type": "string",
+                "goal_id": {"type": "string", "maxLength": 16,
                             "description": "id of the goal to revise, e.g. "
                                            "\"g1\"; empty to create"},
                 "by_turn": {"type": "integer",
@@ -220,8 +220,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "description": "Record a testable claim about the future with the "
             "turn it should be judged on. With a metric the arena scores it "
             "at review_turn; otherwise you self-assess when it comes due — "
-            "record a lesson with your verdict. Pass prediction_id to "
-            "revise.",
+            "record a lesson about it to close its review. Pass "
+            "prediction_id to revise (revising re-opens it).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -231,10 +231,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "review_turn": {"type": "integer",
                                 "description": "turn to judge the prediction "
                                                "on"},
-                "prediction_id": {"type": "string",
+                "prediction_id": {"type": "string", "maxLength": 16,
                                   "description": "id of the prediction to "
                                                  "revise; empty to create"},
-                "subject_id": {"type": "string",
+                "subject_id": {"type": "string", "maxLength": 16,
                                "description": "optional entity or claim id "
                                               "this is about, e.g. \"u8\", "
                                               "\"c4\", \"g2\""},
@@ -254,8 +254,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "record_lesson",
         "description": "Record a durable takeaway — what worked, what "
-            "didn't, what to watch for. Optionally attach it to one of your "
-            "goals or predictions. Lessons persist across turns and are "
+            "didn't, what to watch for. Attach it to one of your goals or "
+            "predictions: a lesson about a due prediction is its verdict "
+            "and closes that review. Lessons persist across turns and are "
             "summarized in your header.",
         "input_schema": {
             "type": "object",
@@ -263,7 +264,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "text": {"type": "string",
                          "description": "the lesson",
                          "maxLength": 280},
-                "about": {"type": "string",
+                "about": {"type": "string", "maxLength": 16,
                           "description": "optional goal/prediction id this "
                                          "lesson is about"},
             },

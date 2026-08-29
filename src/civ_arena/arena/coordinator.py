@@ -76,6 +76,16 @@ class Arena:
                              if agent_spec.policy == "llm" else None))
             self.sessions[agent_spec.player_id] = PlayerSession(
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
+        # Arena-owned services reach EVERY runtime, injected ones included:
+        # a runtime holding its own store reference from construction would
+        # read empty memory after resume (the exact trap the resume repoint
+        # exists to undo — close it at construction too). Idempotent for
+        # runtimes the build path already wired.
+        for rt in self.runtimes.values():
+            if hasattr(rt, "diary"):
+                rt.diary = self.diary
+            if hasattr(rt, "strategy"):
+                rt.strategy = self.strategy
         self.checkpoints = CheckpointManager(
             self.run_dir / "checkpoints", every_n_turns=spec.checkpoint_every)
 

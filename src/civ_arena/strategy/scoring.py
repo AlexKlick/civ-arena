@@ -9,6 +9,7 @@ in the text and is scored self_assess (a cmp field is additive later).
 Facts come from the player's own observation digests only — never AMBIENT —
 so scoring under fog is correct by construction: an own city captured by the
 enemy drops out of the next get_cities digest and the metric follows.
+Verdicts are evaluated as of the claim's deadline, never the render turn.
 """
 
 from __future__ import annotations
@@ -55,15 +56,18 @@ def due_predictions(store: Any, player_id: int, turn: int) -> list[Prediction]:
 def verdict(
     claim: Goal | Prediction, facts: Facts, player_id: int, turn: int,
 ) -> str:
-    """met | missed | self_assess. Vision can only falsify claims about the
-    player's OWN observable metrics: no metric, a subject the arena cannot
-    see, or no sample at or before the review turn all degrade to
-    self_assess — the model judges those and records a lesson."""
+    """met | missed | self_assess, evaluated AS OF the claim's deadline
+    (by_turn / review_turn): later observations must never flip a verdict
+    retroactively — a goal missed at its deadline stays missed. Vision can
+    only score the player's OWN observable metrics: no metric or no sample
+    at or before the deadline degrades to self_assess (subject annotations
+    do not block scoring — the metric always measures the player's own
+    state, and the model owns that labeling)."""
     if claim.metric == "":
         return SELF_ASSESS
-    if getattr(claim, "subject_id", "") != "":
-        return SELF_ASSESS
-    value = metric_value(facts, player_id, claim.metric, turn)
+    deadline = getattr(claim, "by_turn", 0) or getattr(
+        claim, "review_turn", 0) or turn
+    value = metric_value(facts, player_id, claim.metric, min(turn, deadline))
     if value is None:
         return SELF_ASSESS
     return MET if value >= claim.target else MISSED

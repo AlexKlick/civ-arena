@@ -124,12 +124,16 @@ class StrategyStore:
         if not _is_int(confidence) or not 0 <= confidence <= 100:
             return self._reject("set_goal", "confidence must be an integer 0..100")
 
-        histories = self.goals.setdefault(player_id, {})
+        histories = self.goals.get(player_id)
         if goal_id == "":
-            if len(histories) >= MAX_GOALS_PER_PLAYER:
+            living = self._living_goals(histories)
+            if living >= MAX_GOALS_PER_PLAYER:
                 return self._reject(
                     "set_goal",
-                    f"at most {MAX_GOALS_PER_PLAYER} goals — amend or drop one")
+                    f"at most {MAX_GOALS_PER_PLAYER} undropped goals — "
+                    "drop or amend one")
+            if histories is None:
+                histories = self.goals[player_id] = {}
             goal_id = self._next_id(histories, "g")
             record = Goal(
                 goal_id=goal_id, text=args["text"], by_turn=by_turn,
@@ -142,7 +146,7 @@ class StrategyStore:
                 "status": "accepted", "tool": "set_goal", "goal_id": goal_id,
                 "revision": 1,
             }
-        history = histories.get(goal_id)
+        history = (histories or {}).get(goal_id)
         if not history:
             return self._reject("set_goal", f"unknown goal_id {goal_id!r}")
         prior = history[-1]
@@ -202,12 +206,15 @@ class StrategyStore:
             return self._reject("record_prediction",
                                 "confidence must be an integer 0..100")
 
-        histories = self.predictions.setdefault(player_id, {})
+        histories = self.predictions.get(player_id)
         if prediction_id == "":
-            if len(histories) >= MAX_PREDICTIONS_PER_PLAYER:
+            if histories is not None \
+                    and len(histories) >= MAX_PREDICTIONS_PER_PLAYER:
                 return self._reject(
                     "record_prediction",
                     f"at most {MAX_PREDICTIONS_PER_PLAYER} predictions")
+            if histories is None:
+                histories = self.predictions[player_id] = {}
             prediction_id = self._next_id(histories, "p")
             record = Prediction(
                 prediction_id=prediction_id, text=args["text"],
@@ -221,7 +228,7 @@ class StrategyStore:
                 "status": "accepted", "tool": "record_prediction",
                 "prediction_id": prediction_id, "revision": 1,
             }
-        history = histories.get(prediction_id)
+        history = (histories or {}).get(prediction_id)
         if not history:
             return self._reject("record_prediction",
                                 f"unknown prediction_id {prediction_id!r}")
@@ -258,19 +265,45 @@ class StrategyStore:
             return self._reject("record_lesson",
                                 f"about must be empty or one of your own "
                                 f"goal/prediction ids (got {about!r})")
-        log = self.lessons.setdefault(player_id, [])
-        if len(log) >= MAX_LESSONS_PER_PLAYER:
+        log = self.lessons.get(player_id)
+        if log is not None and len(log) >= MAX_LESSONS_PER_PLAYER:
             return self._reject(
                 "record_lesson", f"at most {MAX_LESSONS_PER_PLAYER} lessons")
+        if log is None:
+            log = self.lessons[player_id] = []
         lesson_id = self._next_flat_id(log, "l")
         log.append(Lesson(
             lesson_id=lesson_id, text=args["text"], about=about,
             created_turn=turn, created_seq=seq,
         ))
-        return {
+        doc: dict[str, Any] = {
             "status": "accepted", "tool": "record_lesson",
             "lesson_id": lesson_id,
         }
+        # A lesson about a DUE prediction is its verdict: recording it
+        # closes the review (the instructed flow — "record_lesson your
+        # verdict" — actually ends it). Amending the prediction re-opens
+        # it with the new revision.
+        resolved = self._resolve_due_prediction(player_id, about, turn)
+        if resolved is not None:
+            doc["resolved"] = resolved
+        return doc
+
+    def _resolve_due_prediction(
+        self, player_id: int, about: str, turn: int,
+    ) -> str | None:
+        histories = self.predictions.get(player_id)
+        if not about or histories is None:
+            return None
+        history = histories.get(about)
+        if not history:
+            return None
+        latest = history[-1]
+        if latest.valid_to_turn != 0 or latest.review_turn > turn:
+            return None
+        history[-1] = replace(
+            latest, valid_to_turn=max(latest.valid_from_turn, turn - 1))
+        return about
 
     def apply_claim(
         self, tool: str, player_id: int, args: dict[str, Any],
@@ -337,6 +370,23 @@ class StrategyStore:
                 self.facts.note(player_id, turn, sample)
 
     # ------------------------------------------------------------- rebuild
+    @staticmethod
+    def _namespaced(rec: dict[str, Any]) -> bool:
+        """Typed namespace check. The log writer always emits these fields
+        with these types on agent-facing records, so a record missing them —
+        or carrying None where identity belongs — is not one of ours: an
+        equal-None pair must never authorize a claim or inject a digest."""
+        return (
+            isinstance(rec.get("player_id"), int)
+            and isinstance(rec.get("turn"), int)
+            and isinstance(rec.get("seq"), int)
+            and isinstance(rec.get("agent_id"), str)
+            and isinstance(rec.get("match_id"), str)
+            and isinstance(rec.get("game_instance_id"), str)
+            and rec.get("visibility_scope") == "private_player"
+            and rec.get("phase_player_id") == rec.get("player_id")
+        )
+
     @classmethod
     def from_log(cls, records: list[dict[str, Any]]) -> StrategyStore:
         """Rebuild from the event log prefix, the DiaryStore pattern.
@@ -346,9 +396,9 @@ class StrategyStore:
         would let a foreign record authorize the preceding claim). The SAME
         ``apply_*`` path runs on the same raw args, so rebuild == live.
         Observations: the ``observed`` digest rides on the TOOL_RESULT
-        itself, so no pairing is needed — the record's own player_id/turn
-        namespaced it. Pre-M11 records have no digest and rebuild to an
-        empty-but-valid store.
+        itself, so no pairing is needed — the record's own (typed, privately
+        scoped) namespace identifies it. Pre-M11 records have no digest and
+        rebuild to an empty-but-valid store.
         """
         store = cls()
         for i, rec in enumerate(records):
@@ -356,13 +406,14 @@ class StrategyStore:
             if kind == "TOOL_RESULT" and rec.get("tool") in OBSERVATION_TOOLS \
                     and rec.get("status") == "accepted":
                 observed = rec.get("observed")
-                pid = rec.get("player_id")
-                if isinstance(observed, dict) and isinstance(pid, int):
+                if isinstance(observed, dict) and cls._namespaced(rec):
                     store.note_observation(
-                        pid, rec.get("turn", 0), rec.get("seq", 0),
+                        rec["player_id"], rec["turn"], rec["seq"],
                         rec["tool"], observed)
                 continue
             if kind != "TOOL_CALL" or rec.get("tool") not in CLAIM_TOOLS:
+                continue
+            if not cls._namespaced(rec):
                 continue
             nxt = records[i + 1] if i + 1 < len(records) else None
             if nxt is None or nxt.get("kind") != "TOOL_RESULT" \
@@ -377,8 +428,7 @@ class StrategyStore:
             pid = rec.get("player_id")
             args = rec.get("args") or {}
             turn = rec.get("turn")
-            if not isinstance(pid, int) or not isinstance(turn, int) \
-                    or not isinstance(args, dict):
+            if not isinstance(args, dict):
                 continue
             if rec["tool"] == "set_goal":
                 store.apply_goal(pid, args, turn, rec.get("seq", 0))
@@ -389,6 +439,14 @@ class StrategyStore:
         return store
 
     # ------------------------------------------------------------ internals
+    @staticmethod
+    def _living_goals(histories: dict[str, list[Goal]] | None) -> int:
+        """Goals that still consume a cap slot: everything not DROPPED (a
+        dropped goal frees its slot; its id is never reused)."""
+        if not histories:
+            return 0
+        return sum(1 for h in histories.values() if h[-1].status != "dropped")
+
     @staticmethod
     def _reject(tool: str, reason: str) -> dict[str, Any]:
         return {
