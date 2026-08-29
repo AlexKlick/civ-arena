@@ -1,8 +1,8 @@
 """Per-agent attributable telemetry.
 
-Token counters are stubbed at zero and ``model`` is None for the spike —
-no LLM is in the loop; the fields exist so the schema is stable when the
-AgentRuntime seam gets a live model.
+Token counters and the wire ``model`` label are reported by the LLM runtime
+via ``note_model_usage`` (the referee never sees tokens); scripted-only
+agents leave them at zero/None — the schema is identical either way.
 """
 
 from __future__ import annotations
@@ -54,6 +54,16 @@ class TelemetryRegistry:
 
     def note_call(self, agent_id: str, tool: str, ms: int, ok: bool) -> None:
         self.stats_for(agent_id).note_call(tool, ms, ok)
+
+    def note_model_usage(self, agent_id: str, model: str,
+                         input_tokens: int, output_tokens: int) -> None:
+        """Runtime-reported model usage (the referee never sees tokens).
+        ``model`` is the wire label from the reply — what actually served
+        the request, not a config display hint."""
+        stats = self.stats_for(agent_id)
+        stats.input_tokens += int(input_tokens)
+        stats.output_tokens += int(output_tokens)
+        stats.model = model
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return {aid: s.to_doc() for aid, s in sorted(self._agents.items())}

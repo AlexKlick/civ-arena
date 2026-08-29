@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -100,21 +101,31 @@ class Arena:
 
         aborted: str | None = None
         try:
-            for turn in range(start_turn, spec.max_turns + 1):
-                _write_heartbeat(self.run_dir, "turn", turn)
-                for agent_spec in spec.agents:
-                    pid = agent_spec.player_id
-                    lease = self.referee.grant_lease(pid, agent_spec.agent_id, turn)
-                    if (crash_after_turn is not None
-                            and turn == crash_after_turn + 1 and pid == 0):
-                        # deterministic worst-case crash point: after the
-                        # turn-(K+1) lease is granted, before any act
-                        self.log.close()
-                        os.kill(os.getpid(), signal.SIGKILL)
-                    await self.referee.begin_turn(pid, agent_spec.agent_id, turn)
-                    await self.sessions[pid].take_turn(lease, self.runtimes[pid])
-                self.checkpoints.maybe_save(turn, self._checkpoint_state(turn))
-            final_turn = spec.max_turns
+            try:
+                for turn in range(start_turn, spec.max_turns + 1):
+                    _write_heartbeat(self.run_dir, "turn", turn)
+                    for agent_spec in spec.agents:
+                        pid = agent_spec.player_id
+                        lease = self.referee.grant_lease(pid, agent_spec.agent_id, turn)
+                        if (crash_after_turn is not None
+                                and turn == crash_after_turn + 1 and pid == 0):
+                            # deterministic worst-case crash point: after the
+                            # turn-(K+1) lease is granted, before any act
+                            self.log.close()
+                            os.kill(os.getpid(), signal.SIGKILL)
+                        await self.referee.begin_turn(pid, agent_spec.agent_id, turn)
+                        # authoritative turn number for runtime-authored prompts
+                        # (resume-safe; runtimes without the hook are unaffected)
+                        begin = getattr(self.runtimes[pid], "begin_turn", None)
+                        if callable(begin):
+                            begin(turn)
+                        await self.sessions[pid].take_turn(lease, self.runtimes[pid])
+                    self.checkpoints.maybe_save(turn, self._checkpoint_state(turn))
+                final_turn = spec.max_turns
+            finally:
+                # release runtime-held resources (the LLM client's connection
+                # pool) whether the match completed or aborted
+                await self._close_runtimes()
         except MatchAborted as exc:
             aborted = str(exc)
             # Close an open phase THROUGH the referee so cleanup sweeps
@@ -147,6 +158,13 @@ class Arena:
         (self.run_dir / "summary.json").write_text(json.dumps(summary, sort_keys=True))
         self.log.close()
         return summary
+
+    async def _close_runtimes(self) -> None:
+        for rt in self.runtimes.values():
+            aclose = getattr(rt, "aclose", None)
+            if callable(aclose):
+                with contextlib.suppress(Exception):
+                    await aclose()
 
     # -------------------------------------------------------------- resume
     async def _resume_from(self, state: CheckpointState) -> None:
