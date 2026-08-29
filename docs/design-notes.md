@@ -141,10 +141,23 @@ authority), 8-tuple namespacing, before/after state hashes plus receipts
 the next append would concatenate onto it and corrupt the log mid-file.
 Mid-file corruption refuses to load.
 
+## The strategy plane (Criterion 7 — graduated in M11)
+
+Plans/commitments recall is no longer out of scope: `docs/strategy-lane.md`
+documents the typed strategy store (goals/predictions/lessons claims,
+last-known-entity beliefs, observation-derived facts). It follows the
+diary's rules exactly — validated non-actions, the event log as the only
+durable store, `from_log` rebuild over the truncated prefix, deliberately
+outside the checkpoint content hash — plus observation digests: an additive
+`observed` field on observation TOOL_RESULTs that keeps beliefs/facts
+rebuildable without logging payloads and without touching the replay
+projection. Verdicts are derived at render time, never stored.
+
 ## Out of scope (post-spike backlog, by decision)
 
-- Criterion 7 (plans/commitments recall) — memory system.
 - LLM AgentRuntime implementations; `model:` in config parses but is
   ignored (round-trip tested).
 - Diplomacy bus; `bilateral` scope is a stub.
 - The live FireTuner leg itself — see `docs/live-validation.md`.
+- Cross-game graph projection (Graphiti/Neo4j) — M12; the M11 schema is
+  shaped for it (`docs/strategy-lane.md`).
