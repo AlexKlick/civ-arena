@@ -33,27 +33,31 @@ def _write_heartbeat(run_dir: Path, phase: str, turn: int) -> None:
     os.replace(tmp, path)
 
 
-def _binds_services(rt: Any) -> bool:
-    """True only for a DELIBERATE service opt-in: a callable bind_services
-    that declares the diary and strategy keyword parameters. A runtime with
-    an unrelated same-named method (different signature) is skipped, and a
-    runtime exposing a read-only store property is never assigned behind
-    its back — the hook is the only binding path, at construction AND
-    resume."""
+def _service_binder(rt: Any) -> Any:
+    """Returns the runtime's bind_services callable, or None — proven a
+    DELIBERATE opt-in by VALIDATING the exact call this coordinator makes:
+    signature.bind(diary=..., strategy=...) must succeed. Parameter-name
+    sniffing is not enough — an extra required kwarg or positional-only
+    params would pass a name check and then raise at the call; a
+    ``**services`` wrapper is a valid opt-in a name check would skip,
+    leaving stale stores across resume. Read-only store properties are
+    never assigned behind their back — the hook is the only binding path,
+    at construction AND resume."""
     bind = getattr(rt, "bind_services", None)
     if not callable(bind):
-        return False
+        return None
     try:
-        params = inspect.signature(bind).parameters
+        inspect.signature(bind).bind(diary=None, strategy=None)
     except (TypeError, ValueError):
-        return False
-    return "diary" in params and "strategy" in params
+        return None
+    return bind
 
 
 def _wire_services(runtimes: dict[int, Any], diary: Any, strategy: Any) -> None:
     for rt in runtimes.values():
-        if _binds_services(rt):
-            rt.bind_services(diary=diary, strategy=strategy)
+        bind = _service_binder(rt)
+        if bind is not None:
+            bind(diary=diary, strategy=strategy)
 
 
 class Arena:

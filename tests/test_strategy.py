@@ -1230,48 +1230,166 @@ def test_no_deadline_metric_goal_is_self_assess():
     assert scoring.deadline_turn(store.current_goals(0)[0], 9) is None
 
 
-def test_render_memory_budget_drops_stages_in_order():
-    """Codex R1 #11: the drop order is exercised for real — each fixture
-    renders OVER budget pre-drop (6 due reviews + maxed sections) and
-    asserts exactly which stage went."""
-    from civ_arena.strategy.view import MEMORY_BUDGET, render_memory
+# ------------------------------------------- Codex round 4 pins
 
-    def noisy(resolved: int, lessons: int, seen_len: int,
-              active: int) -> StrategyStore:
-        store = StrategyStore()
-        store.facts.note(0, 3, {"own_cities": 2, "gold": 5})
-        # 6 due goals (REVIEW DUE fills to its item cap, every line clipped)
-        for i in range(6):
-            store.apply_goal(
-                0, {"text": f"due {i} " + "d" * 200, "by_turn": 3,
-                    "metric": "cities", "target": 1}, 1, i)
-        for i in range(resolved):
-            store.apply_goal(0, {"text": f"done {i} " + "r" * 100,
-                                 "status": "done"}, 1, 10 + i)
-        for i in range(lessons):
-            store.apply_lesson(0, {"text": f"lesson {i} " + "l" * 100},
-                               2, 30 + i)
-        for i in range(6):
-            unit = {**_fu(f"u{i}"), "type": "S" * seen_len}
-            store.beliefs.see(0, 2, 30 + i, foreign_units=[unit])
-        for i in range(active):
-            store.apply_goal(0, {"text": f"active {i} " + "a" * 100},
-                             1, 60 + i)
-        return store
 
-    # stage 1: over budget pre-drop, RESOLVED is dropped, all else survives
-    # (the long due texts clip their verdict suffix — verdict rendering is
-    # pinned in test_render_memory_sections_and_identity_freedom)
-    text = render_memory(noisy(3, 3, seen_len=5, active=2), 0, 3)
+def test_review_lines_are_clipped_and_render_terminates():
+    """Codex R4 #1: the R3 rework dropped per-row clipping — 280-char claim
+    texts made the budget arithmetic lie and the last-resort loop spin.
+    Every rendered line is at most LINE_CLIP, and the pathological store
+    (max-length texts everywhere) renders to a bounded view."""
+    from civ_arena.strategy.view import LINE_CLIP, MEMORY_BUDGET, render_memory
+
+    store = StrategyStore()
+    store.facts.note(0, 3, {"cities": 2})
+    for i in range(7):  # 7 due, max-length texts
+        store.apply_prediction(0, {"text": "p" * 280, "review_turn": 3},
+                               1, i + 1)
+    for i in range(6):
+        store.apply_goal(0, {"text": "g" * 280, "by_turn": 4}, 1, 20 + i)
+    for i in range(6):
+        store.beliefs.see(0, 2, 30 + i, foreign_units=[
+            {**_fu(f"u{i}"), "type": "T" * 60}])
+    text = render_memory(store, 0, 3)
     assert len(text) <= MEMORY_BUDGET
-    assert "RESOLVED" not in text
-    assert "LESSONS" in text and "LAST SEEN" in text
-    assert text.count("\n- goal g") == 6
+    assert all(len(line) <= LINE_CLIP for line in text.splitlines())
 
-    # stage 2: still over without RESOLVED — LESSONS goes too
-    text = render_memory(noisy(0, 3, seen_len=45, active=3), 0, 3)
-    assert len(text) <= MEMORY_BUDGET
-    assert "LESSONS" not in text
-    assert "LAST SEEN" in text
-    # REVIEW DUE never drops: six clipped items survive both stages
+
+def test_all_64_due_prediction_ids_stay_visible():
+    """Codex R4 #2: a single clipped summary line could not carry 64
+    overflow ids — the tail ids appeared nowhere. Summaries are chunked;
+    every due id is visible somewhere."""
+    from civ_arena.strategy.view import render_memory
+
+    store = StrategyStore()
+    store.facts.note(0, 5, {"cities": 2})
+    for i in range(64):  # the prediction cap, all due at once
+        store.apply_prediction(0, {"text": f"claim {i}", "review_turn": 3},
+                               1, i + 1)
+    text = render_memory(store, 0, 3)
+    for i in range(1, 65):
+        assert f"p{i}" in text, f"due prediction p{i} vanished"
+    assert "more due:" in text
+
+
+def test_worst_legal_assembly_fits_budget_after_stage_drops():
+    """Codex R4 #1 (the structural half): with the section caps as shipped,
+    the worst LEGAL assembly fits the budget once RESOLVED/LESSONS drop —
+    the last-resort loop is unreachable, as the in-code budget proof
+    claims. If a cap changes without re-doing the arithmetic, this fails."""
+    from civ_arena.strategy import view as V
+
+    store = StrategyStore()
+    store.facts.note(0, 3, {"cities": 2})
+    for i in range(7):
+        store.apply_prediction(0, {"text": "d" * 280, "review_turn": 3},
+                               1, i + 1)
+    for i in range(6):
+        store.apply_goal(0, {"text": "g" * 280, "by_turn": 3}, 1, 10 + i)
+    review_lines, _goal_ids, _n_full = V._review_due(store, 0, 3)
+    goals = ["x" * V.LINE_CLIP] * V.GOAL_CAP
+    seen = ["x" * V.LINE_CLIP] * V.SEEN_CAP
+    lessons = ["x" * V.LINE_CLIP] * V.LESSON_TAIL
+    resolved = ["x" * V.LINE_CLIP] * V.RESOLVED_TAIL
+    worst = V._assemble([["REVIEW DUE THIS TURN", review_lines],
+                         ["GOALS (active)", goals],
+                         ["LAST SEEN (may be stale)", seen]])
+    assert len(worst) <= V.MEMORY_BUDGET, (
+        f"cap arithmetic broken: worst post-drop assembly {len(worst)} > "
+        f"{V.MEMORY_BUDGET} — see the budget proof in view.py")
+    assert lessons and resolved  # both exist only to be dropped first
+
+
+def test_service_binder_validates_the_exact_call():
+    """Codex R4 #3: parameter-name sniffing is not opt-in proof. An extra
+    required kwarg or positional-only params are skipped (they would raise
+    at the call); a **services wrapper IS a valid opt-in (skipping it
+    would leave stale stores across resume)."""
+    from civ_arena.arena.coordinator import _service_binder
+
+    class ExtraRequired:
+        def bind_services(self, *, tenant, diary=None,
+                          strategy=None) -> None:  # extra required kwarg
+            raise AssertionError("must never be called")
+
+    class PositionalOnly:
+        def bind_services(self, diary, strategy, /) -> None:
+            raise AssertionError("must never be called")
+
+    class KwargsWrapper:
+        def __init__(self) -> None:
+            self.got: dict = {}
+
+        def bind_services(self, **services) -> None:
+            self.got = services
+
+    class Proper:
+        def __init__(self) -> None:
+            self.got: dict = {}
+
+        def bind_services(self, *, diary=None, strategy=None) -> None:
+            self.got = {"diary": diary, "strategy": strategy}
+
+    assert _service_binder(ExtraRequired()) is None
+    assert _service_binder(PositionalOnly()) is None
+    wrapper = KwargsWrapper()
+    binder = _service_binder(wrapper)
+    assert binder is not None
+    binder(diary="d", strategy="s")
+    assert wrapper.got == {"diary": "d", "strategy": "s"}
+    proper = Proper()
+    binder = _service_binder(proper)
+    assert binder is not None
+    binder(diary="d", strategy="s")
+    assert proper.got == {"diary": "d", "strategy": "s"}
+    assert _service_binder(object()) is None
+
+
+def test_render_memory_budget_drops_stages_in_order(monkeypatch):
+    """Codex R4 (superseding the R1 #11 stage fixtures): with the caps as
+    shipped, no LEGAL store can exceed the budget (that invariant is pinned
+    by test_worst_legal_assembly_fits_budget_after_stage_drops). The drop
+    machinery is therefore exercised under a SHRUNK budget — the stages and
+    their order are pinned without inventing cap-violating stores."""
+    from civ_arena.strategy import view as V
+
+    store = StrategyStore()
+    store.facts.note(0, 3, {"own_cities": 2, "gold": 5})
+    # exactly 32 living goals (the cap): 25 due + 3 done + 4 active
+    for i in range(25):
+        store.apply_goal(
+            0, {"text": f"due {i} " + "d" * 200, "by_turn": 3,
+                "metric": "cities", "target": 1}, 1, i)
+    for i in range(3):
+        store.apply_goal(0, {"text": f"done {i} " + "r" * 100,
+                             "status": "done"}, 1, 40 + i)
+    for i in range(3):
+        store.apply_lesson(0, {"text": f"lesson {i} " + "l" * 100},
+                           2, 50 + i)
+    for i in range(6):
+        store.beliefs.see(0, 2, 50 + i, foreign_units=[
+            {**_fu(f"u{i}"), "type": "S" * 90}])
+    for i in range(4):
+        store.apply_goal(0, {"text": f"active {i} " + "a" * 100},
+                         1, 60 + i)
+
+    def sections_at(budget: int) -> set[str]:
+        monkeypatch.setattr(V, "MEMORY_BUDGET", budget)
+        text = V.render_memory(store, 0, 3)
+        assert len(text) <= budget
+        return {s for s in ("REVIEW DUE THIS TURN", "GOALS (active)",
+                            "LAST SEEN", "LESSONS", "RESOLVED") if s in text}
+
+    # the fixed drop order, at empirically verified transition budgets:
+    # RESOLVED first, then LESSONS, then LAST SEEN — REVIEW and GOALS last
+    assert sections_at(2400) == {"REVIEW DUE THIS TURN", "GOALS (active)",
+                                 "LAST SEEN", "LESSONS"}
+    assert sections_at(2100) == {"REVIEW DUE THIS TURN", "GOALS (active)",
+                                 "LAST SEEN"}
+    assert sections_at(1550) == {"REVIEW DUE THIS TURN", "GOALS (active)"}
+    # REVIEW DUE survives every stage with all six full items intact
+    # (their verdict suffix clips at LINE_CLIP with 200-char texts — the
+    # verdict rendering itself is pinned in the sections test)
+    monkeypatch.setattr(V, "MEMORY_BUDGET", 1550)
+    text = V.render_memory(store, 0, 3)
     assert text.count("\n- goal g") == 6
