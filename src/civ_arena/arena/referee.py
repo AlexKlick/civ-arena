@@ -39,6 +39,8 @@ from civ_arena.game.adapter import (
 )
 from civ_arena.session import legality
 from civ_arena.session.tools import SessionCtx
+from civ_arena.strategy.digest import observation_digest
+from civ_arena.strategy.store import StrategyStore
 
 
 class MatchAborted(RuntimeError):
@@ -73,6 +75,7 @@ class Referee:
         cfg: RefereeConfig | None = None,
         dedupe: DedupeIndex | None = None,
         diary: DiaryStore | None = None,
+        strategy: StrategyStore | None = None,
     ) -> None:
         self.adapter = adapter
         self.policy = policy
@@ -83,6 +86,7 @@ class Referee:
         self.cfg = cfg or RefereeConfig()
         self.dedupe = dedupe or DedupeIndex()
         self.diary = diary or DiaryStore()
+        self.strategy = strategy or StrategyStore()
         self._lease: TurnLease | None = None
         self._ls = _LeaseState()
         self.violations_total = 0
@@ -288,7 +292,19 @@ class Referee:
         projected = self.policy.project(
             omniscient, kind.value, ctx.player_id, observable, remembered, scope
         )
-        self._emit_pair(ctx, phase, tool, args, None, {"status": "accepted"})
+        # The strategy digest rides the TOOL_RESULT (an additive field — the
+        # replay projection ignores it, so model-free replay cannot diverge
+        # on it) and feeds the live store with the RESULT record's own seq
+        # as sighting provenance: exactly what StrategyStore.from_log later
+        # derives from the same record, so live == rebuilt by construction.
+        result_doc: dict[str, Any] = {"status": "accepted"}
+        digest = observation_digest(kind.value, projected, ctx.player_id)
+        if digest is not None:
+            result_doc["observed"] = digest
+        result_seq = self._emit_pair(ctx, phase, tool, args, None, result_doc)
+        if digest is not None:
+            self.strategy.note_observation(
+                ctx.player_id, phase["turn"], result_seq, tool, digest)
         self.telemetry.note_call(ctx.agent_id, tool,
                                  int((time.perf_counter() - t0) * 1000), ok=True)
         return projected
@@ -502,7 +518,7 @@ class Referee:
         pre_hash: str | None = None,
         post_hash: str | None = None,
         receipts: list[dict[str, Any]] | None = None,
-    ) -> None:
+    ) -> int:
         common = dict(
             match_id=self.match_id, game_instance_id=self.game_instance_id,
             turn=phase.get("turn", -1), phase_player_id=phase.get("phase_player", -1),
@@ -528,4 +544,6 @@ class Referee:
             payload["receipts"] = receipts
         if result_doc.get("mutations"):
             payload["mutations"] = result_doc["mutations"]
-        self.log.write("TOOL_RESULT", **payload, **common)
+        if result_doc.get("observed") is not None:
+            payload["observed"] = result_doc["observed"]
+        return self.log.write("TOOL_RESULT", **payload, **common)

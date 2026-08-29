@@ -6,7 +6,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from civ_arena.arena.coordinator import Arena
+from civ_arena.arena.visibility import FOREIGN_UNIT_FIELDS
 from civ_arena.canonical import canonical
+from civ_arena.config import AgentSpec, MatchSpec
+from civ_arena.game.adapter import ObserveKind
+from civ_arena.replay import replay_run
 from civ_arena.strategy.beliefs import BeliefStore
 from civ_arena.strategy.claims import MAX_CLAIM_CHARS, MAX_GOALS_PER_PLAYER
 from civ_arena.strategy.facts import Facts
@@ -325,3 +330,95 @@ def test_from_log_pre_m11_records_rebuild_empty_valid():
     ]
     store = StrategyStore.from_log(records)
     assert store == StrategyStore()
+
+
+# ------------------------------------------------- referee-level digests
+
+
+async def test_observation_digest_logged_and_live_fed(tmp_path):
+    from conftest import teleport
+    from test_hostile_agent import hostile_setup
+
+    adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    # seed 4: players start far apart; walk an enemy warrior into our sight
+    teleport(adapter.state, "u8", -2, 0)
+    units = await referee.observe(ctx, ObserveKind.UNITS)
+    visible_foreign = [u for u in units if u.get("owner_id") != 0]
+    assert {u["unit_id"] for u in visible_foreign} == {"u8"}
+
+    result = next(r for r in log.records()
+                  if r["kind"] == "TOOL_RESULT" and r.get("tool") == "get_units")
+    digest = result["observed"]
+    assert digest["own_units"] == 5
+    assert [u["unit_id"] for u in digest["foreign_units"]] == ["u8"]
+    # the belief's sighting provenance IS the record carrying the digest
+    belief = referee.strategy.beliefs.entries[0]["u8"]
+    assert belief["last_seen_seq"] == result["seq"]
+    assert set(belief["fields"]) <= FOREIGN_UNIT_FIELDS  # never more than seen
+
+    await referee.observe(ctx, ObserveKind.OVERVIEW)
+    assert referee.strategy.facts.value(0, "gold", 1) is not None
+    # live store == rebuild over the same prefix, structurally
+    assert StrategyStore.from_log(log.records()) == referee.strategy
+
+
+async def test_foreign_entity_persists_after_leaving_sight(tmp_path):
+    from conftest import teleport
+    from test_hostile_agent import hostile_setup
+
+    adapter, _log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    teleport(adapter.state, "u8", -2, 0)
+    units = await referee.observe(ctx, ObserveKind.UNITS)
+    assert any(u["unit_id"] == "u8" for u in units)
+    # the enemy walks home, out of our sight: ABSENT from the projection...
+    teleport(adapter.state, "u8", 3, -2)
+    units = await referee.observe(ctx, ObserveKind.UNITS)
+    assert not any(u["unit_id"] == "u8" for u in units)
+    # ...but the last-known belief persists, staleness-labeled by turn
+    belief = referee.strategy.beliefs.entries[0]["u8"]
+    assert belief["fields"]["coord"] == "-2,0"
+    assert belief["last_seen_turn"] == 1
+
+
+async def test_untracked_observations_carry_no_digest(tmp_path):
+    from test_hostile_agent import hostile_setup
+
+    _adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    await referee.observe(ctx, ObserveKind.VISIBLE_MAP)
+    await referee.observe(ctx, ObserveKind.AVAILABLE_RESEARCH)
+    for rec in log.records():
+        if rec["kind"] == "TOOL_RESULT":
+            assert "observed" not in rec, rec.get("tool")
+
+
+async def test_replayed_observations_rebuild_identical_store(tmp_path):
+    """Live and replayed logs carry identical digests — the replay machinery
+    re-derives the same projections over the same re-executed state."""
+    spec = MatchSpec(
+        match_id="strategy-replay", seed=424242, max_turns=3, adapter="simulator",
+        watchdog_mode="flag_and_continue", violation_limit=5, checkpoint_every=1,
+        agents=[
+            AgentSpec(agent_id="roman", player_id=0, policy="expansionist",
+                      seed=11),
+            AgentSpec(agent_id="korea", player_id=1, policy="turtler", seed=22),
+        ],
+    )
+    arena = Arena(tmp_path / "run", spec)
+    await arena.run()
+    # the scripted bots observe every turn, so the store is non-trivial
+    assert arena.referee.strategy.facts.samples, "scripted bots must have observed"
+    result = await replay_run(tmp_path / "run", spec, tmp_path / "replay")
+    assert result["identical"], (
+        f"replay diverged at comparable-event {result['first_divergence']}")
+
+    import json
+
+    replay_records = [
+        json.loads(line)
+        for line in (tmp_path / "replay" / "events.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    live_store = StrategyStore.from_log(arena.log.records())
+    replay_store = StrategyStore.from_log(replay_records)
+    assert live_store == replay_store
+    assert live_store.beliefs.entries  # the comparison is over real sightings
