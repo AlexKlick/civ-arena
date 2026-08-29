@@ -38,16 +38,40 @@ def _quote(text: str) -> str:
     return '"' + text.replace('"', "'") + '"'
 
 
+def _summary_lines(ids: list[str]) -> list[str]:
+    """Pack overflow ids into lines by ACTUAL character width (ids grow
+    with churn — g101 is 4 chars, not the 2-3 of a fresh game — so a fixed
+    per-line count clips legal ids). Whole ids per line; the clip only
+    bites on an absurd single id longer than a line."""
+    first = f"...and {len(ids)} more due: "
+    cont = "...due, continued: "
+    out: list[str] = []
+    label, cur = first, ""
+    for cid in ids:
+        piece = cid if not cur else " " + cid
+        if cur and len(label) + len(cur) + len(piece) > LINE_CLIP - 8:
+            out.append(_clip(label + cur))
+            label, cur = cont, cid
+        else:
+            cur += piece
+    if cur:
+        out.append(_clip(label + cur))
+    return out
+
+
 def _review_due(
     store: Any, player_id: int, turn: int,
+    full_limit: int = REVIEW_ITEM_CAP,
 ) -> tuple[list[str], list[str | None], int]:
     """Returns (lines, goal-id-per-full-line, number of full item lines).
     Due claims are interleaved by DEADLINE (goals before predictions on
     ties) so neither kind can starve the other out of the item cap; full
-    item lines come first and chunked id-summary lines follow, so a due
-    claim is never invisible. ``goal_ids[i]`` is the goal id full line i
-    renders (None for predictions) — the caller derives the GOALS
-    exclusion from the lines that SURVIVE budget truncation."""
+    item lines come first and width-packed id-summary lines for EVERY
+    non-full due claim follow, so a due claim is never invisible.
+    ``goal_ids[i]`` is the goal id full line i renders (None for
+    predictions) — the caller derives the GOALS exclusion from the lines
+    that survive budget truncation. ``full_limit`` lets the caller's
+    defensive truncation demote full lines back into the summaries."""
     due: list[tuple[int, int, str, str, Any]] = []
     for goal in scoring.due_goals(store, player_id, turn):
         due.append((goal.by_turn, 0, goal.goal_id, "goal", goal))
@@ -58,7 +82,7 @@ def _review_due(
 
     lines: list[str] = []
     goal_ids: list[str | None] = []
-    for _deadline, _rank, claim_id, kind_word, claim in due[:REVIEW_ITEM_CAP]:
+    for _deadline, _rank, claim_id, kind_word, claim in due[:full_limit]:
         verdict = scoring.verdict(claim, store.facts, player_id, turn)
         # the DISPLAYED value is bound to the same deadline as the verdict:
         # "MISSED (gold=150)" for a goal that had 50 at its deadline would
@@ -79,15 +103,9 @@ def _review_due(
                 f"due t{as_of}: {verdict.upper()} ({claim.metric}={value})"))
         goal_ids.append(claim_id if kind_word == "goal" else None)
     n_full = len(lines)
-    if len(due) > REVIEW_ITEM_CAP:
-        # every overflow id stays visible: chunked summary lines, one line
-        # per handful of ids (ids are 2-3 chars; the claim caps bound this
-        # at ~4 lines even with every prediction due at once)
-        overflow = [entry[2] for entry in due[REVIEW_ITEM_CAP:]]
-        for i in range(0, len(overflow), 24):
-            chunk = " ".join(overflow[i:i + 24])
-            lines.append(_clip(f"...and {len(overflow)} more due: {chunk}"
-                               if i == 0 else f"...due, continued: {chunk}"))
+    if len(due) > full_limit:
+        lines.extend(_summary_lines(
+            [entry[2] for entry in due[full_limit:]]))
     return lines, goal_ids, n_full
 
 
@@ -152,39 +170,52 @@ def render_memory(store: Any, player_id: int, turn: int) -> str:
     """The memory view for one player's turn header ('' when the store has
     nothing to say). Identity-free by construction: claim texts are the
     model's own words, ids are claim/entity ids."""
-    review_lines, goal_ids, n_full = _review_due(store, player_id, turn)
-
-    def goals_for(full_lines: int) -> list[str]:
-        # due goals render once — but only the ones REVIEW DUE shows IN
-        # FULL; overflow and truncation casualties return to GOALS
-        excluded = {gid for gid in goal_ids[:full_lines] if gid is not None}
-        return _goals(store, player_id, excluded)
-
-    review = ["REVIEW DUE THIS TURN", review_lines]
-    goals = ["GOALS (active)", goals_for(n_full)]
+    review = ["REVIEW DUE THIS TURN", []]
+    goals = ["GOALS (active)", []]
     seen = ["LAST SEEN (may be stale)", _last_seen(store, player_id)]
     lessons = ["LESSONS", _lessons(store, player_id)]
     resolved = ["RESOLVED", _resolved(store, player_id)]
-
     blocks: list[list] = [review, goals, seen, lessons, resolved]
+
+    # Budget enforcement is a strictly-shrinking ladder; every rung keeps
+    # the assembly consistent (recomputed from n_full/goal_limit, never
+    # patched in place): drop RESOLVED, LESSONS, LAST SEEN; trim GOALS;
+    # then demote full REVIEW lines back into the id summaries (the
+    # summaries carry every non-full due id, so a demoted claim stays
+    # visible); then shrink GOALS; then GOALS empty. Unreachable below the
+    # last rung at the shipped constants — see the budget proof above.
+    n_full = REVIEW_ITEM_CAP
+    goal_limit = GOAL_CAP
+
+    def refresh() -> None:
+        review_lines, goal_ids, n = _review_due(
+            store, player_id, turn, full_limit=n_full)
+        review[1] = review_lines
+        excluded = {gid for gid in goal_ids[:n] if gid is not None}
+        goals[1] = _goals(store, player_id, excluded)[:goal_limit]
+
+    refresh()
     if not any(b[1] for b in blocks):
         return ""
 
-    # fixed drop order when over budget: RESOLVED, LESSONS, LAST SEEN, then
-    # GOALS trimmed, then (unreachable today — see the budget proof above)
-    # full REVIEW lines dropped from the end, summaries kept: summaries are
-    # the densest id-per-character carriers. Mutating the block lists in
-    # place keeps every stage consistent (tuple replacement would strand
-    # the identity checks) and the loop strictly shrinks n_full.
+    def fits() -> bool:
+        return len(_assemble(blocks)) <= MEMORY_BUDGET
+
     for victim in (resolved, lessons, seen):
-        if len(_assemble(blocks)) <= MEMORY_BUDGET:
+        if fits():
             break
         victim[1] = []
-    if len(_assemble(blocks)) > MEMORY_BUDGET:
-        goals[1] = goals[1][:3]
-    while len(_assemble(blocks)) > MEMORY_BUDGET and n_full > 1:
+    if not fits():
+        goal_limit = 3
+        refresh()
+    while not fits() and n_full > 0:
         n_full -= 1
-        review[1].pop(n_full)
-        goals[1] = goals_for(n_full)
+        refresh()
+    while not fits() and goal_limit > 0:
+        goal_limit -= 1
+        refresh()
+    if not fits():
+        goal_limit = 0
+        refresh()
 
     return _assemble(blocks)

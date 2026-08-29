@@ -1273,31 +1273,84 @@ def test_all_64_due_prediction_ids_stay_visible():
 
 
 def test_worst_legal_assembly_fits_budget_after_stage_drops():
-    """Codex R4 #1 (the structural half): with the section caps as shipped,
-    the worst LEGAL assembly fits the budget once RESOLVED/LESSONS drop —
-    the last-resort loop is unreachable, as the in-code budget proof
-    claims. If a cap changes without re-doing the arithmetic, this fails."""
+    """Codex R5 #3 (strengthening the R4 pin, which under-bounded its own
+    claim): the worst LEGAL store is 32 due goals (the undropped cap) + 64
+    due predictions (the prediction cap) with max-length texts. Its review
+    alone is 6 full lines + 4 width-packed summary lines; with GOALS/SEEN
+    maxed the post-stage-drop assembly must still fit the budget — the
+    in-code arithmetic, pinned at its true worst case."""
     from civ_arena.strategy import view as V
 
     store = StrategyStore()
     store.facts.note(0, 3, {"cities": 2})
-    for i in range(7):
+    for i in range(64):
         store.apply_prediction(0, {"text": "d" * 280, "review_turn": 3},
                                1, i + 1)
-    for i in range(6):
-        store.apply_goal(0, {"text": "g" * 280, "by_turn": 3}, 1, 10 + i)
+    for i in range(32):
+        store.apply_goal(0, {"text": "g" * 280, "by_turn": 4}, 1, 70 + i)
     review_lines, _goal_ids, _n_full = V._review_due(store, 0, 3)
+    # 6 full items + summaries covering all 90 overflow ids
+    assert sum(1 for line in review_lines if line.startswith("- ")) == 6
+    assert any("p59" in line for line in review_lines)  # tail id carried
     goals = ["x" * V.LINE_CLIP] * V.GOAL_CAP
     seen = ["x" * V.LINE_CLIP] * V.SEEN_CAP
-    lessons = ["x" * V.LINE_CLIP] * V.LESSON_TAIL
-    resolved = ["x" * V.LINE_CLIP] * V.RESOLVED_TAIL
     worst = V._assemble([["REVIEW DUE THIS TURN", review_lines],
                          ["GOALS (active)", goals],
                          ["LAST SEEN (may be stale)", seen]])
     assert len(worst) <= V.MEMORY_BUDGET, (
         f"cap arithmetic broken: worst post-drop assembly {len(worst)} > "
         f"{V.MEMORY_BUDGET} — see the budget proof in view.py")
-    assert lessons and resolved  # both exist only to be dropped first
+
+
+def test_high_id_churn_summaries_never_clip_legal_ids():
+    """Codex R5 #1: dropped goals free cap slots while ids stay monotone —
+    after churn the ids are 4+ chars and fixed-count chunking clipped the
+    tail ids out of existence. Summaries pack by character width; every
+    id stays visible (exact-token matching)."""
+    from civ_arena.strategy.view import render_memory
+
+    store = StrategyStore()
+    store.facts.note(0, 3, {"cities": 2})
+    for cycle in range(100):  # g1..g100 created, each dropped in turn
+        store.apply_goal(0, {"text": f"churn {cycle}", "by_turn": 9},
+                         1, cycle)
+        store.apply_goal(0, {"text": "bye", "goal_id": f"g{cycle + 1}",
+                             "status": "dropped"}, 1, cycle)
+    for i in range(101, 133):  # 32 due goals with 4-char ids, cap refilled
+        store.apply_goal(0, {"text": f"due {i}", "by_turn": 3}, 1, i)
+    text = render_memory(store, 0, 3)
+    for i in range(101, 133):
+        # exact token: g13 must not be satisfied by a substring of g131
+        assert any(
+            token == f"g{i}" for line in text.splitlines()
+            for token in line.replace("-", " ").split()
+        ), f"due goal g{i} vanished under id churn"
+
+
+def test_deep_budget_floor_keeps_summaries_visible(monkeypatch):
+    """Codex R5 #2: the last-resort ladder must preserve the GOALS trim
+    across recomputation, demote full lines into summaries (not into
+    GOALS-slot contention), and reach a fitting floor: summaries + a
+    shrinking GOALS section, always within the budget."""
+    from civ_arena.strategy import view as V
+
+    store = StrategyStore()
+    store.facts.note(0, 3, {"cities": 2})
+    for i in range(25):
+        store.apply_goal(0, {"text": f"due {i} " + "d" * 200, "by_turn": 3,
+                             "metric": "cities", "target": 1}, 1, i)
+    for i in range(4):
+        store.apply_goal(0, {"text": f"active {i} " + "a" * 100},
+                         1, 60 + i)
+    for budget in (1200, 800, 700):
+        monkeypatch.setattr(V, "MEMORY_BUDGET", budget)
+        text = V.render_memory(store, 0, 3)
+        assert len(text) <= budget, f"budget {budget}: rendered {len(text)}"
+        assert "more due:" in text  # the summaries survived every rung
+    # at the deepest floor the goals trim held (no cap restoration)
+    monkeypatch.setattr(V, "MEMORY_BUDGET", 700)
+    text = V.render_memory(store, 0, 3)
+    assert len(text) <= 700
 
 
 def test_service_binder_validates_the_exact_call():
