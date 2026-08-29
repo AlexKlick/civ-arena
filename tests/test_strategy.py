@@ -4,6 +4,7 @@ all rebuildable from the event log alone (the DiaryStore trust-root pattern).
 
 from __future__ import annotations
 
+import random
 from typing import Any
 
 from civ_arena.arena.coordinator import Arena
@@ -708,3 +709,142 @@ async def test_memory_view_flows_into_turn_header(tmp_path):
     # and the match still replays model-free with claims in the log
     result = await replay_run(tmp_path / "run", arena.spec, tmp_path / "replay")
     assert result["identical"]
+
+
+# ------------------------------------------------------ arena + resume
+
+
+class StrategyBot:
+    """Observes, writes one goal/prediction/lesson per turn, then ends."""
+
+    def __init__(self) -> None:
+        self.rng = random.Random(0)
+        self.turn = 0
+
+    def begin_turn(self, turn: int) -> None:
+        self.turn = int(turn)
+
+    async def take_turn(self, facade: Any) -> None:
+        await facade.get_units()
+        await facade.get_overview()
+        await facade.set_goal(f"goal set on turn {self.turn}",
+                              by_turn=self.turn, metric="units", target=1)
+        await facade.record_prediction(f"prediction of turn {self.turn}",
+                                       self.turn)
+        await facade.record_lesson(f"lesson of turn {self.turn}")
+        await facade.end_turn()
+
+
+class EndBot:
+    """Never writes a claim — whatever the resumed arena holds came from the
+    from_log REBUILD, not from this runtime."""
+
+    def __init__(self) -> None:
+        self.rng = random.Random(0)
+
+    async def take_turn(self, facade: Any) -> None:
+        await facade.end_turn()
+
+
+def _strategy_spec(match_id: str, max_turns: int) -> MatchSpec:
+    return MatchSpec(
+        match_id=match_id, seed=424242, max_turns=max_turns,
+        adapter="simulator", watchdog_mode="flag_and_continue",
+        violation_limit=5, checkpoint_every=1,
+        agents=[
+            AgentSpec(agent_id="roman", player_id=0, policy="expansionist",
+                      seed=11),
+            AgentSpec(agent_id="korea", player_id=1, policy="turtler",
+                      seed=22),
+        ],
+    )
+
+
+async def test_strategy_survives_resume(tmp_path):
+    import json
+
+    from civ_arena.arena.checkpoints import CheckpointState
+
+    spec = _strategy_spec("strategy-resume", 4)
+    arena = Arena(tmp_path / "run", spec,
+                  runtimes={0: StrategyBot(), 1: StrategyBot()})
+    await arena.run()
+    # the arena owns ONE store shared with the referee (one trust root)
+    assert arena.referee.strategy is arena.strategy
+    assert len(arena.strategy.current_goals(0)) == 4  # one per turn
+
+    ckpt = CheckpointState.from_doc(json.loads(
+        (tmp_path / "run" / "checkpoints" / "ckpt-turn-0002.json").read_text()))
+    prefix_store = StrategyStore.from_log(arena.log.records()[: ckpt.seq])
+    assert len(prefix_store.current_goals(0)) == 2
+
+    # resume with runtimes that never write: the store the resumed arena
+    # holds can ONLY have come from the from_log rebuild in _resume_from
+    resumed = Arena(tmp_path / "run", spec,
+                    runtimes={0: EndBot(), 1: EndBot()})
+    summary = await resumed.run(resume_state=ckpt)
+    assert summary["final_turn"] == 4
+    assert resumed.referee.strategy is resumed.strategy
+    assert len(resumed.strategy.current_goals(0)) == 2
+    texts = {g.text for g in resumed.strategy.current_goals(0)}
+    assert texts == {"goal set on turn 1", "goal set on turn 2"}
+    # observation-derived state from the prefix survived too (no foreign
+    # sightings exist at this seed yet — beliefs stay empty, correctly)
+    assert resumed.strategy.facts.samples
+    assert resumed.strategy.facts.value(0, "own_units", 2) == 5
+
+
+async def test_resume_equals_uninterrupted_memory_view(tmp_path):
+    """The invariant that rules out snapshot-approximation beliefs: a turn-3
+    header produced after a crash-resume is byte-identical to one from an
+    uninterrupted run — the rebuilt store must be EXACTLY the live one."""
+    from fakes import FakeModel, use
+    from test_llm_runtime import _run, make_arena
+
+    script = [[
+        use("get_overview"),
+        use("set_goal", {"text": "grow the army", "by_turn": 2,
+                         "metric": "units", "target": 3}),
+        use("record_prediction", {"text": "scouting pays off",
+                                  "review_turn": 2}),
+        use("end_turn"),
+    ]]
+
+    clean, clean_fake = await _run(make_arena(
+        tmp_path / "clean", FakeModel(script=list(script)), max_turns=3,
+        match_id="header-parity"))
+    header_of = lambda fake, turn: next(  # noqa: E731
+        req["messages"][0]["content"] for req in fake.requests
+        if req["messages"][0]["content"].startswith(f"Turn {turn} begins."))
+    clean_header3 = header_of(clean_fake, 3)
+    assert "REVIEW DUE THIS TURN" in clean_header3  # the view is non-trivial
+
+    crashed, _fake = await _run(make_arena(
+        tmp_path / "crashed", FakeModel(script=list(script)), max_turns=3,
+        match_id="header-parity"))
+
+    import json
+
+    from civ_arena.arena.checkpoints import CheckpointState
+
+    ckpt = CheckpointState.from_doc(json.loads(
+        (tmp_path / "crashed" / "run" / "checkpoints" / "ckpt-turn-0002.json")
+        .read_text()))
+    resumed_fake = FakeModel(script=list(script))
+    from civ_arena.agents.llm.runtime import LLMAgentRuntime
+    from civ_arena.agents.runtime import AgentProfile
+
+    # rebuild an injected LLM runtime over the crashed run dir, mirroring
+    # make_arena's post-hoc wiring, then resume from turn 2
+    spec = crashed.spec
+    llm = next(a for a in spec.agents if a.policy == "llm").llm
+    profile = AgentProfile(agent_id="roman", player_id=0, policy="llm",
+                           seed=11, llm=llm)
+    rt = LLMAgentRuntime.build(profile, client=resumed_fake)
+    resumed = Arena(tmp_path / "crashed" / "run", spec, runtimes={0: rt})
+    rt.telemetry = resumed.telemetry
+    rt.diary = resumed.diary
+    rt.strategy = resumed.strategy
+    await resumed.run(resume_state=ckpt)
+    resumed_header3 = header_of(resumed_fake, 3)
+    assert resumed_header3 == clean_header3

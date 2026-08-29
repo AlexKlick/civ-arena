@@ -22,6 +22,7 @@ from civ_arena.config import MatchSpec
 from civ_arena.game.sim.chaos import ChaosDirector, ChaosEvent, MutationSpec
 from civ_arena.game.sim.simulator import SimulatorAdapter
 from civ_arena.session.player_session import PlayerSession
+from civ_arena.strategy.store import StrategyStore
 
 
 def _write_heartbeat(run_dir: Path, phase: str, turn: int) -> None:
@@ -42,6 +43,7 @@ class Arena:
         self.log = EventLog(self.run_dir / "events.jsonl")
         self.telemetry = TelemetryRegistry()
         self.diary = DiaryStore()
+        self.strategy = StrategyStore()
         self.spend = SpendLedger(self.run_dir / "spend.jsonl")
         self.adapter = SimulatorAdapter()
         self.chaos = ChaosDirector([
@@ -54,6 +56,7 @@ class Arena:
             RefereeConfig(watchdog_mode=spec.watchdog_mode,
                           violation_limit=spec.violation_limit),
             diary=self.diary,
+            strategy=self.strategy,
         )
         self.runtimes: dict[int, Any] = {}
         self.sessions: dict[int, PlayerSession] = {}
@@ -68,6 +71,7 @@ class Arena:
                 )
                 self.runtimes[agent_spec.player_id] = build_runtime(
                     profile, telemetry=self.telemetry, diary=self.diary,
+                    strategy=self.strategy,
                     on_post=(self._spend_sink(agent_spec)
                              if agent_spec.policy == "llm" else None))
             self.sessions[agent_spec.player_id] = PlayerSession(
@@ -222,12 +226,18 @@ class Arena:
         # the diary is derived state: rebuild it from the truncated prefix
         self.diary = DiaryStore.from_log(self.log.records())
         self.referee.diary = self.diary
-        # the runtimes hold their OWN store reference from construction —
-        # point them at the rebuilt one or every resumed prompt reads empty
+        # the strategy store is derived the same way (claims by adjacency-
+        # paired TOOL_CALLs, beliefs/facts from the observation digests)
+        self.strategy = StrategyStore.from_log(self.log.records())
+        self.referee.strategy = self.strategy
+        # the runtimes hold their OWN store references from construction —
+        # point them at the rebuilt ones or every resumed prompt reads empty
         # and resumed writes land in a store nobody feeds back
         for rt in self.runtimes.values():
             if hasattr(rt, "diary"):
                 rt.diary = self.diary
+            if hasattr(rt, "strategy"):
+                rt.strategy = self.strategy
         # cumulative accounting across legs (spend budget, tokens)
         telemetry_doc = state.coordinator_state.get("telemetry")
         if telemetry_doc:

@@ -39,7 +39,8 @@ class ScriptedRuntime:
 
 
 def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
-                  diary: Any = None, on_post: Any = None) -> AgentRuntime:
+                  diary: Any = None, strategy: Any = None,
+                  on_post: Any = None) -> AgentRuntime:
     if profile.policy == "llm":
         from civ_arena.agents.llm.runtime import LLMAgentRuntime
 
@@ -49,7 +50,7 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
                 "on the profile (config validation should have caught this)"
             )
         return LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
-                                     on_post=on_post)
+                                     strategy=strategy, on_post=on_post)
     if profile.policy == "expansionist":
         return ScriptedRuntime(profile=profile)
     if profile.policy == "turtler":
