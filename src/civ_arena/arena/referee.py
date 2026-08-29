@@ -232,7 +232,11 @@ class Referee:
             self._emit_pair(ctx, phase, "write_diary", log_args, None,
                             {"status": "rejected", "rejection": reason.value})
             return {"status": "rejected", "rejection": reason.value}
-        if not isinstance(text, str) or not 1 <= len(text.strip()) <= MAX_DIARY_CHARS:
+        if (not isinstance(text, str)
+                or not 1 <= len(text.strip()) <= MAX_DIARY_CHARS
+                or len(text) > MAX_DIARY_CHARS):
+            # the RAW length is bounded too: "x" + a million spaces would
+            # otherwise pass the strip check and be stored/fsync'd verbatim
             doc = {"status": "rejected", "rejection": RejectionReason.ARGS_INVALID.value,
                    "tool": "write_diary"}
             self._emit_pair(ctx, phase, "write_diary", log_args, None, doc)

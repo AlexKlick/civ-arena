@@ -70,6 +70,10 @@ class ReplayRuntime:
             self.issued += 1
             if call.tool == "end_turn":
                 return
+        # queue exhausted without a recorded end_turn (torn tail, or an agent
+        # that never completed): close the phase anyway so replay reports a
+        # clean DIVERGENCE instead of crashing the next begin_turn
+        await facade.end_turn()
 
 
 def _strip(records: list[dict[str, Any]]) -> list[tuple]:
@@ -116,6 +120,12 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
     agents_by_id = {a.agent_id: a.player_id for a in spec.agents}
     calls = load_calls(records, agents_by_id)
     runtimes = {pid: ReplayRuntime(queue) for pid, queue in calls.items()}
+    # EVERY configured agent gets a ReplayRuntime — an agent with zero
+    # recorded calls (aborted before its first tool landed) must never fall
+    # back to its configured LIVE runtime, or replay would touch the network
+    for agent in spec.agents:
+        if agent.player_id not in runtimes:
+            runtimes[agent.player_id] = ReplayRuntime([])
 
     arena = Arena(replay_dir, spec, runtimes=runtimes)
     summary = await arena.run()

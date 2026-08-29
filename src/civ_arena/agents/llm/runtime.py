@@ -143,20 +143,38 @@ class LLMAgentRuntime:
 
     async def _call_tool(self, facade: Any, name: Any, args: Any
                          ) -> tuple[bool, str]:
-        if not isinstance(name, str):
-            self._note_error("llm_malformed_args")
-            return False, self._error("tool name is not a string")
-        try:
-            fn = getattr(facade, name)
-        except AttributeError:
+        if not isinstance(name, str) or name not in _SCHEMA_BY_NAME:
+            # manifest lookup FIRST: a facade attribute that is not a tool
+            # (e.g. "names") must degrade to an error result, never dispatch
             self._note_error("llm_unknown_tool")
             return False, self._error(f"unknown tool: {name!r}")
         if not isinstance(args, dict):
             self._note_error("llm_malformed_args")
             return False, self._error("tool arguments must be a JSON object")
-        order = list(_SCHEMA_BY_NAME[name]["input_schema"].get("properties", {}))
+        schema = _SCHEMA_BY_NAME[name]["input_schema"]
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        unknown = set(args) - set(properties)
+        if unknown or not required <= set(args):
+            self._note_error("llm_malformed_args")
+            return False, self._error(
+                f"bad arguments: unknown keys {sorted(unknown)}, required "
+                f"{sorted(required)}, got {sorted(args)}"
+            )
+        for key, value in args.items():
+            declared = properties[key].get("type")
+            if declared == "string" and not isinstance(value, str) \
+                    or declared == "integer" and (
+                        not isinstance(value, int) or isinstance(value, bool)):
+                self._note_error("llm_malformed_args")
+                return False, self._error(
+                    f"bad arguments: {key} must be {declared}, got "
+                    f"{type(value).__name__}"
+                )
         try:
-            result = await fn(*(args[k] for k in order if k in args))
+            # kwargs dispatch: no positional reordering can ever reinterpret
+            # a malformed argument as a different parameter
+            result = await getattr(facade, name)(**args)
         except TypeError as exc:
             self._note_error("llm_malformed_args")
             return False, self._error(f"bad arguments: {exc}")

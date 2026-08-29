@@ -92,14 +92,33 @@ class MiniMaxMessagesClient:
                 f"{self.spec.max_requests_per_match})"
             )
 
-    def _parse(self, doc: dict[str, Any]) -> ModelReply:
-        content = doc.get("content")
-        if not isinstance(content, list):
+    def _parse(self, doc: Any) -> ModelReply:
+        try:
+            return self._parse_inner(doc)
+        except ModelUnavailable:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # any shape surprise (bad JSON top level, non-mapping blocks,
+            # non-numeric usage) degrades to ModelUnavailable — the runtime
+            # turns it into MatchAborted and a summary is still written
+            raise ModelUnavailable(f"malformed response: {exc}") from exc
+
+    def _parse_inner(self, doc: Any) -> ModelReply:
+        if not isinstance(doc, dict):
             raise ModelUnavailable(
-                f"malformed response: content is not a block list "
-                f"({type(content).__name__})"
+                f"malformed response: top level is {type(doc).__name__}, "
+                "not an object"
+            )
+        content = doc.get("content")
+        if not isinstance(content, list) or not all(
+                isinstance(b, dict) and isinstance(b.get("type"), str)
+                for b in content):
+            raise ModelUnavailable(
+                "malformed response: content is not a list of typed blocks"
             )
         usage = doc.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
         return ModelReply(
             content=content,
             stop_reason=doc.get("stop_reason"),
@@ -127,6 +146,9 @@ class MiniMaxMessagesClient:
         last_error = "no attempt made"
         for attempt in range(self.spec.max_retries + 1):
             self._budget_check()
+            # count the attempt BEFORE posting: a transport failure mid-flight
+            # still consumed a request slot (the server may have received it)
+            self.posts_sent += 1
             try:
                 resp = await self._http.post(url, json=body,
                                              headers=self._headers())
@@ -136,19 +158,29 @@ class MiniMaxMessagesClient:
                     await asyncio.sleep(0.5 * 2 ** attempt)
                     continue
                 raise ModelUnavailable(last_error) from exc
-            self.posts_sent += 1
             if resp.status_code == 200:
-                return self._parse(resp.json())
+                try:
+                    return self._parse(resp.json())
+                except ValueError as exc:  # invalid JSON in a 200 body
+                    raise ModelUnavailable(
+                        f"malformed response: body is not JSON ({exc})"
+                    ) from exc
             if resp.status_code in _RETRYABLE_STATUS \
                     and attempt < self.spec.max_retries:
                 await asyncio.sleep(0.5 * 2 ** attempt)
                 continue
-            # 4xx and unretryable 5xx: fail immediately, carry the body
+            # 4xx and unretryable 5xx: fail immediately, carry a REDACTED body
+            # (a reflecting proxy can echo the key back; it must never reach
+            # the durable log via MatchAborted)
             raise ModelUnavailable(
                 f"HTTP {resp.status_code} from {self.spec.model_id}: "
-                f"{resp.text[:300]}"
+                f"{self._redact(resp.text[:300])}"
             )
         raise ModelUnavailable(last_error)
+
+    def _redact(self, text: str) -> str:
+        key = os.environ.get(self.spec.api_key_env, "")
+        return text.replace(key, "<redacted>") if key else text
 
     async def aclose(self) -> None:
         if self._http is not None:

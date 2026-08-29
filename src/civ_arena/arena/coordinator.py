@@ -187,6 +187,23 @@ class Arena:
         # the diary is derived state: rebuild it from the truncated prefix
         self.diary = DiaryStore.from_log(self.log.records())
         self.referee.diary = self.diary
+        # the runtimes hold their OWN store reference from construction —
+        # point them at the rebuilt one or every resumed prompt reads empty
+        # and resumed writes land in a store nobody feeds back
+        for rt in self.runtimes.values():
+            if hasattr(rt, "diary"):
+                rt.diary = self.diary
+        # cumulative accounting across legs (spend budget, tokens)
+        telemetry_doc = state.coordinator_state.get("telemetry")
+        if telemetry_doc:
+            self.telemetry.merge_snapshot(telemetry_doc)
+        posts = state.coordinator_state.get("llm_posts") or {}
+        for pid, rt in self.runtimes.items():
+            client = getattr(rt, "client", None)
+            if getattr(client, "posts_sent", None) is not None:
+                agent_id = self.spec.agent_for_player(pid).agent_id
+                if agent_id in posts:
+                    client.posts_sent = int(posts[agent_id])
         # control-plane counters and chaos schedule must resume, not reset
         self.referee.restore_violation_counters(
             state.coordinator_state.get("violations", 0),
@@ -208,6 +225,16 @@ class Arena:
 
             self.adapter.state.rng = rng_from_doc(state.rng_states["sim"])
 
+    def _llm_posts(self) -> dict[str, int]:
+        posts: dict[str, int] = {}
+        for pid, rt in self.runtimes.items():
+            client = getattr(rt, "client", None)
+            count = getattr(client, "posts_sent", None)
+            if isinstance(count, int):
+                agent_id = self.spec.agent_for_player(pid).agent_id
+                posts[agent_id] = count
+        return posts
+
     def _checkpoint_state(self, turn: int) -> CheckpointState:
         rng_states = {
             "sim": rng_to_doc(self.adapter.state.rng),
@@ -227,6 +254,16 @@ class Arena:
                 "violations": self.referee.violation_count(),
                 "violations_by_agent": dict(self.referee.violations_by_agent),
                 "chaos": self.chaos.state_doc(),
+                # cumulative across legs so a resumed match keeps the whole
+                # picture: spend budget and token accounting never reset.
+                # total_ms is STRIPPED: durations are wall-clock envelope
+                # data (same class as duration_ms) and would break the
+                # same-seed-same-checkpoint determinism contract
+                "telemetry": {
+                    aid: {k: v for k, v in doc.items() if k != "total_ms"}
+                    for aid, doc in self.telemetry.snapshot().items()
+                },
+                "llm_posts": self._llm_posts(),
             },
             log_prefix_sha256=log_prefix_hash(self.log.records()),
         )

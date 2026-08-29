@@ -7,6 +7,7 @@ the api key NEVER appears inline, only the NAME of the env var holding it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,10 +65,16 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
             raise ConfigError(f"{where}.llm: {key} must be a positive integer")
     if ints["max_tool_rounds"] < 1:
         raise ConfigError(f"{where}.llm: max_tool_rounds must be >= 1")
+    if ints["max_retries"] > 10:
+        # retry sleeps grow 0.5 * 2**attempt; bound the wall-clock exposure
+        raise ConfigError(f"{where}.llm: max_retries must be <= 10")
     timeout = block.get("request_timeout_s", 120.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) \
-            or timeout <= 0:
-        raise ConfigError(f"{where}.llm: request_timeout_s must be positive")
+            or not math.isfinite(timeout) or not 0 < timeout <= 600:
+        raise ConfigError(
+            f"{where}.llm: request_timeout_s must be finite and in "
+            "(0, 600] seconds"
+        )
     return LLMSpec(
         base_url=base_url, api_key_env=api_key_env, model_id=model_id,
         max_tokens=ints["max_tokens"], max_tool_rounds=ints["max_tool_rounds"],

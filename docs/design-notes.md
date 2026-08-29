@@ -57,6 +57,19 @@ the whole match through the same referee machinery (same watchdog config),
 so rollbacks reproduce deterministically. `DedupeIndex.from_log` skips keys
 that were subsequently rolled back, so resume matches live forget-semantics.
 
+## LLM determinism
+
+An LLM match **replays model-free by construction**: replay re-executes the
+recorded `TOOL_CALL`s through `ReplayRuntime` and compares every
+`after_state_hash`; the model is never consulted, so a replayed LLM match
+needs no network and cannot drift. Crash-resume restores to the last
+turn-boundary checkpoint and the interrupted turn *re-queries the model* —
+fresh decisions, expected divergence from the aborted attempt's partial log
+(which `truncate_to` already discards). The checkpoint content hash does
+not cover the diary (see above) and no LLM runtime state besides the
+dummy `rng` is checkpointed; per-turn conversation is discarded at
+`end_turn`.
+
 ## Determinism
 
 - Canonical JSON rejects floats outright (`TypeError`); the sim is

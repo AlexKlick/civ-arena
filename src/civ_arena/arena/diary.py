@@ -44,7 +44,13 @@ class DiaryStore:
             nxt = records[i + 1]
             if (nxt.get("kind") != "TOOL_RESULT"
                     or nxt.get("tool") != "write_diary"
-                    or nxt.get("status") != "accepted"):
+                    or nxt.get("status") != "accepted"
+                    # namespace identity: the result must belong to the same
+                    # player/agent/turn as the call (adjacency alone would
+                    # let a foreign record authorize the preceding text)
+                    or nxt.get("player_id") != rec.get("player_id")
+                    or nxt.get("agent_id") != rec.get("agent_id")
+                    or nxt.get("turn") != rec.get("turn")):
                 continue
             text = (rec.get("args") or {}).get("text")
             pid = rec.get("player_id")

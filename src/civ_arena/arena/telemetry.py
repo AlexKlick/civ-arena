@@ -67,3 +67,20 @@ class TelemetryRegistry:
 
     def snapshot(self) -> dict[str, dict[str, Any]]:
         return {aid: s.to_doc() for aid, s in sorted(self._agents.items())}
+
+    def merge_snapshot(self, docs: dict[str, dict[str, Any]]) -> None:
+        """Fold a checkpointed snapshot back in (resume): a resumed match's
+        summary then reports the WHOLE match, not just the post-crash leg."""
+        for aid, doc in docs.items():
+            stats = self.stats_for(aid)
+            stats.input_tokens += int(doc.get("input_tokens", 0))
+            stats.output_tokens += int(doc.get("output_tokens", 0))
+            stats.total_ms += int(doc.get("total_ms", 0))
+            if doc.get("model"):
+                stats.model = doc["model"]
+            for tool, n in (doc.get("tool_calls") or {}).items():
+                stats.tool_calls[tool] = stats.tool_calls.get(tool, 0) + int(n)
+                stats.total_calls += int(n)
+            for tool, n in (doc.get("tool_errors") or {}).items():
+                stats.tool_errors[tool] = stats.tool_errors.get(tool, 0) + int(n)
+                stats.total_errors += int(n)

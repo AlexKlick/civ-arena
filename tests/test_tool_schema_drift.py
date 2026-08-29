@@ -49,6 +49,22 @@ def test_manifest_params_match_signatures():
         assert declared_req <= declared_props
 
 
+def test_manifest_property_order_matches_signature_order():
+    """Order is documentation, not dispatch (the runtime calls by keyword) —
+    but a manifest whose order contradicts the signature misleads readers
+    and any future positional consumer."""
+    for name, fn in TOOL_REGISTRY.items():
+        schema = next(s for s in TOOL_SCHEMAS if s["name"] == name)
+        sig = inspect.signature(fn)
+        order = [p.name for pname, p in sig.parameters.items()
+                 if pname != "ctx"
+                 and p.kind not in (p.KEYWORD_ONLY, p.POSITIONAL_ONLY)]
+        assert list(schema["input_schema"].get("properties", {})) == order, (
+            f"{name}: manifest property order {list(schema['input_schema'].get('properties', {}))} "
+            f"!= signature order {order}"
+        )
+
+
 def test_every_tool_and_property_is_documented():
     for schema in TOOL_SCHEMAS:
         assert schema.get("description", "").strip(), f"{schema['name']}: no docs"
