@@ -62,25 +62,19 @@ def _jdump(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _revision_at(history: list[Any], turn: int) -> Any:
-    """The revision of one claim id that was the authority at ``turn``.
-
-    A verdict lesson CLOSES the prediction it is about one turn-boundary
-    before its own turn (``valid_to = lesson_turn - 1``), so the strict
-    at-turn lookup would orphan exactly the reference that embodies the
-    verdict. Fallback: the latest revision whose validity began at or before
-    ``turn`` — a reference that strictly predates the claim still resolves
-    to nothing (dropped, never guessed)."""
+def _revision_at(history: list[Any], created_seq: int) -> Any:
+    """The revision of one claim id that was the authority when the
+    referencing claim was WRITTEN: the last revision authored at or before
+    the referencing claim's ``created_seq``. Seq is totally ordered by log
+    position, so intra-turn ordering resolves too (a lesson written after a
+    same-turn amend points at the amended revision — turns alone cannot
+    express that). A claim created later than the reference resolves to
+    nothing: dropped and reported, never guessed."""
+    authority = None
     for rec in history:
-        if rec.valid_from_turn <= turn and (
-            rec.valid_to_turn == 0 or rec.valid_to_turn >= turn
-        ):
-            return rec
-    fallback = None
-    for rec in history:
-        if rec.valid_from_turn <= turn:
-            fallback = rec
-    return fallback
+        if rec.created_seq <= created_seq:
+            authority = rec
+    return authority
 
 
 def _meta(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -223,7 +217,7 @@ def project(records: list[dict[str, Any]]) -> Projection:
                     if ref:
                         _add_reference(
                             add_edge, group, pid, cid, rec.revision,
-                            rec.created_turn, ref, "subject_id", store,
+                            rec.created_seq, ref, "subject_id", store,
                             entity_ids, dropped_refs)
         for lesson in store.lesson_list(pid):
             claim_counts["lesson"] += 1
@@ -233,7 +227,7 @@ def project(records: list[dict[str, Any]]) -> Projection:
             if lesson.about:
                 _add_reference(
                     add_edge, group, pid, lesson.lesson_id, 1,
-                    lesson.created_turn, lesson.about, "about", store,
+                    lesson.created_seq, lesson.about, "about", store,
                     entity_ids, dropped_refs)
 
         # VERDICT: outcomes for claims due by the projection horizon. Verdicts
@@ -359,17 +353,17 @@ def _add_claim_node(
 
 def _add_reference(
     add_edge: Any, group: str, pid: int, cid: str, revision: int,
-    created_turn: int, ref: str, via: str, store: StrategyStore,
+    created_seq: int, ref: str, via: str, store: StrategyStore,
     entity_ids: set[str], dropped: list[str],
 ) -> None:
-    """Resolve subject_id/about to a claim revision (the one valid at the
-    referencing claim's created_turn) or an entity node; dangling refs are
-    dropped and reported, never guessed."""
+    """Resolve subject_id/about to a claim revision (the one authoritative
+    at the referencing claim's created_seq) or an entity node; dangling refs
+    are dropped and reported, never guessed."""
     src = f"{group}:claim:p{pid}:{cid}:r{revision}"
     target = ""
     for by_id in (store.goals.get(pid) or {}, store.predictions.get(pid) or {}):
         if ref in by_id:
-            resolved = _revision_at(by_id[ref], created_turn)
+            resolved = _revision_at(by_id[ref], created_seq)
             if resolved is not None:
                 target = f"{group}:claim:p{pid}:{ref}:r{resolved.revision}"
             break

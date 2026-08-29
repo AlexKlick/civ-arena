@@ -263,6 +263,27 @@ def test_references_resolve_to_revision_valid_at_referencing_turn():
             "m:main:claim:p0:g1:r1") in edges
 
 
+def test_same_turn_amend_reference_resolves_by_seq():
+    # a lesson written at t1 AFTER two same-turn amends points at the
+    # revision that was authoritative when it was WRITTEN (r3), not the
+    # stale r1 — turns cannot express intra-turn order, created_seq can
+    log = [
+        _start(),
+        *_pair("set_goal", {"text": "v1"}, seq=1, pid=0, turn=1),
+        *_pair("set_goal", {"text": "v2", "goal_id": "g1"}, seq=3, pid=0,
+               turn=1),
+        *_pair("set_goal", {"text": "v3", "goal_id": "g1"}, seq=5, pid=0,
+               turn=1),
+        *_pair("record_lesson", {"text": "about g1", "about": "g1"},
+               seq=7, pid=0, turn=1),
+        _end(seq=9, final_turn=2),
+    ]
+    proj = project(log)
+    assert ("m:main:claim:p0:l1:r1", "REFERENCES",
+            "m:main:claim:p0:g1:r3") in _edges(proj)
+    assert proj.report["dropped_references"] == []
+
+
 def test_verdict_lesson_reference_survives_the_closure_it_causes():
     # a lesson about a DUE prediction closes it (valid_to = lesson_turn - 1);
     # the closure must not orphan the reference the verdict embodies — the
