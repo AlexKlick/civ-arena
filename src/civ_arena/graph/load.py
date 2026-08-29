@@ -133,17 +133,14 @@ def edge_query(rel: str) -> str:
 def legacy_edge_cleanup_query() -> str:
     """Pre-rework loads wrote pipe-join edge uuids with no group_id; those
     rows are invisible to reconciliation and would silently duplicate every
-    relationship on the next load. The sweep is SCOPED to the legacy uuids
-    this load replaces — reconstructed from the artifacts' own
-    (source, rel, target) tuples — so upgrading one match never strips
-    another match's legacy relationships."""
-    return "MATCH ()-[e]->() WHERE e.uuid IN $legacy DELETE e"
-
-
-def legacy_uuids(edges: list[dict[str, Any]]) -> list[str]:
-    """The pipe-join uuids a pre-rework load would have written for exactly
-    these edges (current uuids are e:<hex> and never contain '|')."""
-    return [f"{e['source']}|{e['rel']}|{e['target']}" for e in edges]
+    relationship on the next load. The sweep is ENDPOINT-scoped: it removes
+    pipe-uuid edges touching THIS match's nodes — including ghosts whose
+    triple no longer exists in the artifacts — and nothing else. Endpoint
+    scoping, not uuid reconstruction: pipe uuids were not injective, so a
+    reconstructed uuid can equal another match's legacy edge."""
+    return ("MATCH (a)-[e]->(b) WHERE e.uuid CONTAINS '|' "
+            "AND (a.group_id = $group OR b.group_id = $group "
+            "OR a.uuid = $match_node OR b.uuid = $match_node) DELETE e")
 
 
 def reconcile_nodes_query() -> str:
@@ -175,9 +172,6 @@ def load_plan(
     """Fully validate and materialize the write plan BEFORE any write: a
     token problem must never surface after node batches have committed."""
     plan: list[tuple[str, dict[str, Any]]] = [
-        *([(legacy_edge_cleanup_query(),
-            {"legacy": legacy_uuids(edges)})]
-          if edges else []),
         *[(node_query(labels), {"rows": rows})
           for labels, rows in node_batches(nodes, batch)],
         *[(edge_query(rel), {"rows": rows})
@@ -185,11 +179,14 @@ def load_plan(
     ]
     group = _match_group(nodes)
     if group is not None:
+        match_node = "match:" + group[: -len(":main")]
         keep = {
             "keep_nodes": [n["uuid"] for n in nodes],
             "keep_edges": [e["uuid"] for e in edges],
             "group": group,
         }
+        plan.insert(0, (legacy_edge_cleanup_query(),
+                        {"group": group, "match_node": match_node}))
         plan.append((reconcile_nodes_query(), dict(keep)))
         plan.append((reconcile_edges_query(), dict(keep)))
     return plan

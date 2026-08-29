@@ -586,6 +586,30 @@ def test_ambiguous_claim_entity_id_drops_loudly():
                for d in proj.report["dropped_references"])
 
 
+def test_validated_lesson_about_bypasses_the_ambiguity_rule():
+    # round-4 P2: lesson `about` is validated at write time as an own
+    # claim id (store.py) — it can never legitimately mean an entity, so a
+    # same-id entity must not make it ambiguous, and it must never bind an
+    # entity either
+    log = [
+        _start(),
+        _obs("get_units",
+             {"own_units": 1, "foreign_units": [
+                 {"unit_id": "g1", "type": "WARRIOR", "coord": "0,0",
+                  "owner_id": 1, "hp_bucket": 2}]},
+             seq=1, pid=0, turn=1),
+        *_pair("set_goal", {"text": "a goal named g1"}, seq=2, pid=0,
+               turn=1),
+        *_pair("record_lesson", {"text": "g1 verdict", "about": "g1"},
+               seq=4, pid=0, turn=1),
+        _end(seq=6, final_turn=2),
+    ]
+    proj = project(log)
+    assert ("m:main:claim:p0:l1:r1", "REFERENCES",
+            "m:main:claim:p0:g1:r1") in _edges(proj)
+    assert proj.report["dropped_references"] == []
+
+
 def test_agent_node_carries_no_policy_but_the_edge_does():
     # review round-1 P2: policy is a per-MATCH fact; on the shared Agent
     # node it would make DB contents load-order dependent across matches
@@ -804,11 +828,13 @@ def test_load_plan_is_one_transaction_with_reconcile():
     # reconcile nodes, reconcile edges
     assert counts["queries"] == 6
     assert session.calls == 1  # ONE transaction: all-or-nothing
-    # the legacy sweep runs FIRST and is SCOPED to this load's own tuples —
-    # upgrading one match never strips another match's legacy relationships
-    assert "IN $legacy" in session.queries[0][0]
-    assert session.queries[0][1]["legacy"] == \
-        ["agent:roman|PLAYED_AS|m:main:player:p0"]
+    # the legacy sweep runs FIRST and is ENDPOINT-scoped (pipe uuids were
+    # not injective — uuid reconstruction could delete another match's
+    # legacy edge or miss ghosts; endpoints cannot lie)
+    assert "CONTAINS '|'" in session.queries[0][0]
+    assert "$group" in session.queries[0][0]
+    assert session.queries[0][1] == {"group": "m:main",
+                                     "match_node": "match:m"}
     assert any("DETACH DELETE" in q for q, _ in session.queries)
     reconcile = [p for q, p in session.queries if "DETACH DELETE" in q][0]
     assert reconcile["group"] == "m:main"
@@ -893,19 +919,26 @@ def test_live_db_round_trip_idempotent():
 
     try:
         with driver.session() as session:
-            # seed a LEGACY pipe-uuid duplicate of a real PLAYED_IN edge —
-            # exactly what a pre-rework load would have written — the next
-            # load's scoped migration sweep must remove it
+            # seed two LEGACY pipe-uuid edges — exactly what a pre-rework
+            # load would have written: a duplicate of a real PLAYED_IN, and
+            # a GHOST between two live match-scoped nodes whose triple no
+            # longer exists in any projection. Both must go.
             session.run(
                 "MATCH (a {uuid: 'agent:roman-live'}) "
                 "MATCH (b {uuid: 'match:live-1'}) "
                 "MERGE (a)-[r:PLAYED_IN {uuid: 'agent:roman-live|"
                 "PLAYED_IN|match:live-1'}]->(b)")
+            session.run(
+                "MATCH (a {uuid: 'live-1:main:player:p0'}) "
+                "MATCH (b {uuid: 'live-1:main:entity:c9'}) "
+                "MERGE (a)-[r:REFERENCES {uuid: 'live-1:main:player:p0|"
+                "REFERENCES|live-1:main:entity:c9'}]->(b)")
             legacy_before = _count(
-                session, "MATCH ()-[r:PLAYED_IN]->(:Match "
-                         "{uuid: 'match:live-1'}) "
-                         "WHERE r.uuid CONTAINS '|' RETURN count(r) AS c")
-            assert legacy_before == 1
+                session, "MATCH ()-[r]->() WHERE r.uuid CONTAINS '|' "
+                         "AND (r.uuid STARTS WITH 'agent:roman-live' "
+                         "OR r.uuid STARTS WITH 'live-1:') "
+                         "RETURN count(r) AS c")
+            assert legacy_before == 2
 
         # review round-1 P2 pin: re-loading a CHANGED projection reconciles
         # — the goal, its outcome and every match-scoped edge disappear, the
@@ -922,7 +955,8 @@ def test_live_db_round_trip_idempotent():
                          "RETURN count(r) AS c")
             legacy_after = _count(
                 session, "MATCH ()-[r]->() WHERE r.uuid CONTAINS '|' "
-                         "AND (r.uuid STARTS WITH 'agent:roman-live') "
+                         "AND (r.uuid STARTS WITH 'agent:roman-live' "
+                         "OR r.uuid STARTS WITH 'live-1:') "
                          "RETURN count(r) AS c")
             played_in_all = _count(
                 session, "MATCH ()-[r:PLAYED_IN]->(:Match "

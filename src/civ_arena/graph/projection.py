@@ -284,7 +284,7 @@ def project(records: list[dict[str, Any]]) -> Projection:
                 _add_reference(
                     add_edge, group, pid, lesson.lesson_id, 1,
                     lesson.created_seq, lesson.about, "about", store,
-                    entity_ids, dropped_refs)
+                    entity_ids, dropped_refs, validated_claim=True)
 
         # VERDICT: outcomes for claims due by the projection horizon. Verdicts
         # are recomputed here (never stored in the log); claims resolved
@@ -410,11 +410,15 @@ def _add_claim_node(
 def _add_reference(
     add_edge: Any, group: str, pid: int, cid: str, revision: int,
     created_seq: int, ref: str, via: str, store: StrategyStore,
-    entity_ids: set[str], dropped: list[str],
+    entity_ids: set[str], dropped: list[str], *,
+    validated_claim: bool = False,
 ) -> None:
     """Resolve subject_id/about to a claim revision (the one authoritative
     at the referencing claim's created_seq) or an entity node; dangling refs
-    are dropped and reported, never guessed."""
+    are dropped and reported, never guessed. ``validated_claim`` marks a
+    reference the STORE already validated as an own claim id at write time
+    (lesson ``about``) — it can never legitimately mean an entity, so the
+    claim/entity ambiguity rule must not apply to it."""
     src = f"{group}:claim:p{pid}:{cid}:r{revision}"
     claim_target = ""
     claim_namespace = False
@@ -426,7 +430,7 @@ def _add_reference(
                 claim_target = f"{group}:claim:p{pid}:{ref}:r{resolved.revision}"
             break
     entity_hit = ref in entity_ids
-    if claim_namespace and entity_hit:
+    if not validated_claim and claim_namespace and entity_hit:
         # the id names BOTH an own claim and an entity — real logs never
         # produce one (claim ids are g/p/l+digits, sim entity ids are
         # u/c+digits), and intent cannot be inferred from the bare string;
@@ -434,8 +438,11 @@ def _add_reference(
         dropped.append(f"p{pid}:{cid} -> {ref!r} "
                        f"({via}, ambiguous claim/entity id)")
         return
-    target = claim_target or (
-        f"{group}:entity:{ref}" if entity_hit else "")
+    # entity binding only for unvalidated refs: a validated own-claim
+    # reference must never bind an entity, whatever shares its id
+    target = claim_target
+    if not target and not validated_claim and entity_hit:
+        target = f"{group}:entity:{ref}"
     if not target:
         dropped.append(f"p{pid}:{cid} -> {ref!r} ({via})")
         return
