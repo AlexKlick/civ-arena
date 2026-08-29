@@ -33,35 +33,43 @@ def _quote(text: str) -> str:
     return '"' + text.replace('"', "'") + '"'
 
 
-def _review_due(store: Any, player_id: int, turn: int) -> list[str]:
+def _review_due(
+    store: Any, player_id: int, turn: int,
+) -> tuple[list[str], set[str]]:
+    """Returns (lines, goal ids rendered here). The rendered ids drive the
+    GOALS dedup: a due goal that did NOT make the item cap must stay
+    visible in GOALS, not vanish from both sections."""
     lines: list[str] = []
+    rendered: set[str] = set()
+    candidates: list[tuple[str, str, Any]] = []
     for goal in scoring.due_goals(store, player_id, turn):
-        verdict = scoring.verdict(goal, store.facts, player_id, turn)
-        if verdict == scoring.SELF_ASSESS:
-            lines.append(
-                f"- goal {goal.goal_id} {_quote(goal.text)} due t{goal.by_turn}: "
-                "SELF-ASSESS — judge it: amend (set_goal) or record_lesson")
-        else:
-            value = scoring.metric_value(
-                store.facts, player_id, goal.metric, turn)
-            lines.append(
-                f"- goal {goal.goal_id} {_quote(goal.text)} due "
-                f"t{goal.by_turn}: {verdict.upper()} "
-                f"({goal.metric}={value})")
+        candidates.append(("goal", goal.goal_id, goal))
     for pred in scoring.due_predictions(store, player_id, turn):
-        verdict = scoring.verdict(pred, store.facts, player_id, turn)
+        candidates.append(("prediction", pred.prediction_id, pred))
+    for kind_word, _cid, claim in candidates[:REVIEW_ITEM_CAP]:
+        verdict = scoring.verdict(claim, store.facts, player_id, turn)
+        # the DISPLAYED value is bound to the same deadline as the verdict:
+        # "MISSED (gold=150)" for a goal that had 50 at its deadline would
+        # contradict the sticky verdict next to it
+        as_of = min(turn, scoring.deadline_turn(claim, turn) or turn)
+        claim_id = claim.goal_id if kind_word == "goal" \
+            else claim.prediction_id
         if verdict == scoring.SELF_ASSESS:
+            remedy = ("judge it: amend (set_goal) or record_lesson"
+                      if kind_word == "goal"
+                      else "record_lesson your verdict")
             lines.append(
-                f"- prediction {pred.prediction_id} {_quote(pred.text)} due "
-                f"t{pred.review_turn}: SELF-ASSESS — record_lesson your verdict")
+                f"- {kind_word} {claim_id} {_quote(claim.text)} "
+                f"due t{as_of}: SELF-ASSESS — {remedy}")
         else:
             value = scoring.metric_value(
-                store.facts, player_id, pred.metric, turn)
+                store.facts, player_id, claim.metric, as_of)
             lines.append(
-                f"- prediction {pred.prediction_id} {_quote(pred.text)} due "
-                f"t{pred.review_turn}: {verdict.upper()} "
-                f"({pred.metric}={value})")
-    return [_clip(line) for line in lines[:REVIEW_ITEM_CAP]]
+                f"- {kind_word} {claim_id} {_quote(claim.text)} "
+                f"due t{as_of}: {verdict.upper()} ({claim.metric}={value})")
+        if kind_word == "goal":
+            rendered.add(claim.goal_id)
+    return [_clip(line) for line in lines], rendered
 
 
 def _goals(store: Any, player_id: int, exclude: set[str]) -> list[str]:
@@ -125,11 +133,11 @@ def render_memory(store: Any, player_id: int, turn: int) -> str:
     """The memory view for one player's turn header ('' when the store has
     nothing to say). Identity-free by construction: claim texts are the
     model's own words, ids are claim/entity ids."""
-    review_lines = _review_due(store, player_id, turn)
-    # due goals render once, in REVIEW DUE — not again in GOALS
-    due_ids = {g.goal_id for g in scoring.due_goals(store, player_id, turn)}
+    review_lines, rendered_due = _review_due(store, player_id, turn)
+    # due goals render once — but only the ones REVIEW DUE actually shows
+    # (the item cap truncates): overflow due goals stay visible in GOALS
     review = ("REVIEW DUE THIS TURN", review_lines)
-    goals = ("GOALS (active)", _goals(store, player_id, due_ids))
+    goals = ("GOALS (active)", _goals(store, player_id, rendered_due))
     seen = ("LAST SEEN (may be stale)", _last_seen(store, player_id))
     lessons = ("LESSONS", _lessons(store, player_id))
     resolved = ("RESOLVED", _resolved(store, player_id))

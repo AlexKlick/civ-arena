@@ -75,11 +75,22 @@ def _split(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Classify projected entities as own/foreign. Own docs may carry either
     ownership key (units: owner_id; cities: owner, deep-copied raw); foreign
-    projections always carry owner_id within the allowlist."""
+    projections always carry owner_id within the allowlist. The two keys
+    DISAGREEING is a broken policy/adapter, not a classification question:
+    an own doc misread as foreign would be embedded wholesale (an allowlist
+    violation) — fail loudly instead. Foreign-entry allowlist enforcement
+    itself is owned by the visibility meta-tests, not re-checked here."""
     own: list[dict[str, Any]] = []
     foreign: list[dict[str, Any]] = []
     for entry in projected:
         if isinstance(entry, dict):
-            owner = entry.get("owner_id", entry.get("owner"))
-            (own if owner == player_id else foreign).append(entry)
+            owner_id, owner = entry.get("owner_id"), entry.get("owner")
+            if owner_id is not None and owner is not None \
+                    and owner_id != owner:
+                entity = entry.get("unit_id") or entry.get("city_id")
+                raise ValueError(
+                    f"projected entity {entity!r} carries conflicting "
+                    f"ownership keys: owner_id={owner_id!r} owner={owner!r}")
+            resolved = owner_id if owner_id is not None else owner
+            (own if resolved == player_id else foreign).append(entry)
     return own, foreign

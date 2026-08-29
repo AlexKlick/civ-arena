@@ -53,20 +53,32 @@ def due_predictions(store: Any, player_id: int, turn: int) -> list[Prediction]:
             if p.review_turn <= turn]
 
 
+def deadline_turn(claim: Goal | Prediction, turn: int) -> int | None:
+    """The turn a claim is judged on (None = never auto-judged). Goals with
+    no deadline are self-assessed by contract — the arena scores only when
+    due — so they have no judgment turn."""
+    if isinstance(claim, Prediction):
+        return claim.review_turn
+    if isinstance(claim, Goal):
+        return claim.by_turn if claim.by_turn != 0 else None
+    return None
+
+
 def verdict(
     claim: Goal | Prediction, facts: Facts, player_id: int, turn: int,
 ) -> str:
     """met | missed | self_assess, evaluated AS OF the claim's deadline
     (by_turn / review_turn): later observations must never flip a verdict
     retroactively — a goal missed at its deadline stays missed. Vision can
-    only score the player's OWN observable metrics: no metric or no sample
-    at or before the deadline degrades to self_assess (subject annotations
-    do not block scoring — the metric always measures the player's own
-    state, and the model owns that labeling)."""
+    only score the player's OWN observable metrics: no metric, no deadline,
+    or no sample at or before the deadline degrades to self_assess (subject
+    annotations do not block scoring — the metric always measures the
+    player's own state, and the model owns that labeling)."""
     if claim.metric == "":
         return SELF_ASSESS
-    deadline = getattr(claim, "by_turn", 0) or getattr(
-        claim, "review_turn", 0) or turn
+    deadline = deadline_turn(claim, turn)
+    if deadline is None:
+        return SELF_ASSESS
     value = metric_value(facts, player_id, claim.metric, min(turn, deadline))
     if value is None:
         return SELF_ASSESS

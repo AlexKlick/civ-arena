@@ -150,6 +150,14 @@ class StrategyStore:
         if not history:
             return self._reject("set_goal", f"unknown goal_id {goal_id!r}")
         prior = history[-1]
+        # reactivation re-consumes a cap slot — the create-path cap alone
+        # would let drop/create/reactivate grow without bound
+        if prior.status == "dropped" and status != "dropped" \
+                and self._living_goals(histories) >= MAX_GOALS_PER_PLAYER:
+            return self._reject(
+                "set_goal",
+                f"at most {MAX_GOALS_PER_PLAYER} undropped goals — "
+                "drop or amend one")
         history[-1] = replace(
             prior,
             valid_to_turn=max(prior.valid_from_turn, turn - 1),
@@ -375,11 +383,13 @@ class StrategyStore:
         """Typed namespace check. The log writer always emits these fields
         with these types on agent-facing records, so a record missing them —
         or carrying None where identity belongs — is not one of ours: an
-        equal-None pair must never authorize a claim or inject a digest."""
+        equal-None pair must never authorize a claim or inject a digest.
+        ``type(...) is int`` because bool IS int in Python — a JSON ``true``
+        must not alias player 1."""
         return (
-            isinstance(rec.get("player_id"), int)
-            and isinstance(rec.get("turn"), int)
-            and isinstance(rec.get("seq"), int)
+            type(rec.get("player_id")) is int
+            and type(rec.get("turn")) is int
+            and type(rec.get("seq")) is int
             and isinstance(rec.get("agent_id"), str)
             and isinstance(rec.get("match_id"), str)
             and isinstance(rec.get("game_instance_id"), str)
@@ -417,6 +427,8 @@ class StrategyStore:
                 continue
             nxt = records[i + 1] if i + 1 < len(records) else None
             if nxt is None or nxt.get("kind") != "TOOL_RESULT" \
+                    or not cls._namespaced(nxt) \
+                    or nxt.get("seq") != rec.get("seq") + 1 \
                     or nxt.get("tool") != rec.get("tool") \
                     or nxt.get("status") != "accepted" \
                     or nxt.get("player_id") != rec.get("player_id") \

@@ -86,6 +86,17 @@ class LLMAgentRuntime:
         """Coordinator hook: the authoritative turn number (resume-safe)."""
         self._turn = int(turn)
 
+    def bind_services(self, *, diary: Any = None,
+                      strategy: Any = None) -> None:
+        """Coordinator hook: receive the arena-owned cross-turn stores
+        (injected runtimes get them this way too — construction AND resume).
+        An explicit opt-in rather than attribute probing, so a runtime with
+        a read-only property never breaks Arena construction."""
+        if diary is not None:
+            self.diary = diary
+        if strategy is not None:
+            self.strategy = strategy
+
     async def aclose(self) -> None:
         await self.client.aclose()
 

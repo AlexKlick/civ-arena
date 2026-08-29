@@ -996,21 +996,144 @@ async def test_oversized_reference_field_is_malformed_zero_events(tmp_path):
 
 
 async def test_injected_runtime_gets_memory_without_manual_wiring(tmp_path):
-    """Codex R1 #10: arena-owned services reach injected runtimes too — a
-    goal written turn 1 must surface in turn 2's header with NO post-hoc
-    rt.strategy patch."""
+    """Codex R2 #8 (superseding the R1 #10 pin, which was vacuous —
+    make_arena patched rt.strategy itself): construct the runtime and arena
+    DIRECTLY, assert the arena wired the store before any turn runs, then
+    prove the memory view flows without a single manual assignment."""
+    from civ_arena.agents.llm.runtime import LLMAgentRuntime
+    from civ_arena.agents.runtime import AgentProfile
+    from civ_arena.config import LLMSpec
     from fakes import FakeModel, use
-    from test_llm_runtime import _run, make_arena
+    from test_llm_runtime import FAKE_LLM
 
     fake = FakeModel(script=[
         [use("set_goal", {"text": "grow", "by_turn": 9}),
          use("end_turn")],
         [use("end_turn")],
     ])
-    # deliberately DO NOT patch rt.strategy — the arena must wire it
-    arena, fake = await _run(make_arena(tmp_path, fake, max_turns=2))
+    spec = MatchSpec(
+        match_id="wired-injected", seed=424242, max_turns=2,
+        adapter="simulator", watchdog_mode="flag_and_continue",
+        violation_limit=5, checkpoint_every=1,
+        agents=[
+            AgentSpec(agent_id="roman", player_id=0, policy="llm", seed=11,
+                      llm=LLMSpec(**{
+                          "base_url": FAKE_LLM.base_url,
+                          "api_key_env": FAKE_LLM.api_key_env,
+                          "model_id": FAKE_LLM.model_id})),
+            AgentSpec(agent_id="korea", player_id=1, policy="turtler",
+                      seed=22),
+        ],
+    )
+    profile = AgentProfile(agent_id="roman", player_id=0, policy="llm",
+                           seed=11, llm=FAKE_LLM)
+    rt = LLMAgentRuntime.build(profile, client=fake)  # NO strategy passed
+    arena = Arena(tmp_path / "run", spec, runtimes={0: rt})
+    # the ARENA wired it (bind_services), not this test
+    assert rt.strategy is arena.strategy
+    assert rt.diary is arena.diary
+    await arena.run()
     header2 = fake.requests[1]["messages"][0]["content"]
     assert "grow" in header2
+
+
+def test_goal_reactivation_reconsumes_a_cap_slot():
+    """Codex R2 #1: drop/create/reactivate must not grow past the cap — the
+    amend path re-checks when a dropped goal comes back to life."""
+    store = StrategyStore()
+    for i in range(MAX_GOALS_PER_PLAYER):
+        store.apply_goal(0, {"text": f"g{i}"}, 1, i)
+    store.apply_goal(0, {"text": "dropped", "goal_id": "g1",
+                         "status": "dropped"}, 1, 100)
+    assert store.apply_goal(0, {"text": "slot"}, 1,
+                            101)["status"] == "accepted"  # 32 undropped
+    # the 33rd undropped goal — via reactivation — is refused
+    assert store.apply_goal(
+        0, {"text": "zombie", "goal_id": "g1", "status": "active"},
+        1, 102)["status"] == "rejected"
+
+
+def test_from_log_rejects_result_side_and_bool_identity():
+    """Codex R2 #2: the RESULT record carries its own namespace — a
+    referee-scope result must not authorize an adjacent valid call, and a
+    JSON true must not alias player 1 as a bool-int."""
+    records = _log_records()
+    # valid call, referee-scope result: the claim must not apply
+    doctored = []
+    for rec in records:
+        if rec.get("kind") == "TOOL_RESULT" and rec.get("tool") == \
+                "set_goal":
+            rec = {**rec, "visibility_scope": "referee"}
+        doctored.append(rec)
+    assert StrategyStore.from_log(doctored).goals == {}
+    # bool player_id: type(...) is int rejects True (which == 1)
+    boolified = []
+    for rec in records:
+        if "player_id" in rec:
+            rec = {**rec, "player_id": True, "phase_player_id": True}
+        boolified.append(rec)
+    store = StrategyStore.from_log(boolified)
+    assert store.goals == {}
+    assert store.facts.samples == {}
+
+
+async def test_digest_rejects_conflicting_ownership_keys():
+    """Codex R2 #3: an entry carrying disagreeing owner/owner_id keys is a
+    broken policy/adapter — embedding it wholesale would leak full own
+    fields into the foreign list, so the split fails loudly instead."""
+    import pytest
+
+    from civ_arena.strategy.digest import observation_digest
+
+    hybrid = [{"city_id": "c9", "owner": 0, "owner_id": 1,
+               "population": 3, "buildings": ["WALLS"]}]
+    with pytest.raises(ValueError):
+        observation_digest("cities", hybrid, 0)
+
+
+def test_overflow_due_goals_stay_visible_in_goals():
+    """Codex R2 #4: more due goals than the REVIEW item cap — the overflow
+    must remain in GOALS, never vanish from both sections."""
+    from civ_arena.strategy.view import render_memory
+
+    store = StrategyStore()
+    store.facts.note(0, 3, {"cities": 2, "gold": 5})
+    for i in range(8):
+        store.apply_goal(0, {"text": f"due {i}", "by_turn": 3}, 1, i)
+    text = render_memory(store, 0, 3)
+    # six in REVIEW DUE, the remaining two in GOALS — all eight somewhere
+    assert text.count("\n- goal g") + text.count("\n- g") >= 8
+    assert "g7" in text and "g8" in text
+
+
+def test_displayed_value_is_bound_to_the_deadline():
+    """Codex R2 #5: the value shown next to a sticky verdict is fetched at
+    the same deadline the verdict was — 'MISSED (gold=150)' next to a goal
+    that had 50 at its deadline would contradict itself."""
+    from civ_arena.strategy.view import render_memory
+
+    store = StrategyStore()
+    store.apply_goal(0, {"text": "save gold", "by_turn": 5,
+                         "metric": "gold", "target": 100}, 1, 1)
+    store.facts.note(0, 5, {"gold": 50})
+    store.facts.note(0, 6, {"gold": 150})
+    text = render_memory(store, 0, 6)
+    assert "MISSED (gold=50)" in text
+    assert "gold=150" not in text
+
+
+def test_no_deadline_metric_goal_is_self_assess():
+    """Codex R2 #6: the arena scores when due — a metric goal with no
+    deadline is never due, so it is self-assessed regardless of metric."""
+    from civ_arena.strategy import scoring
+
+    store = StrategyStore()
+    store.apply_goal(0, {"text": "someday rich", "metric": "gold",
+                         "target": 500}, 1, 1)
+    store.facts.note(0, 9, {"gold": 900})
+    assert scoring.verdict(store.current_goals(0)[0], store.facts, 0, 9) \
+        == "self_assess"
+    assert scoring.deadline_turn(store.current_goals(0)[0], 9) is None
 
 
 def test_render_memory_budget_drops_stages_in_order():

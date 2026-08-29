@@ -76,16 +76,15 @@ class Arena:
                              if agent_spec.policy == "llm" else None))
             self.sessions[agent_spec.player_id] = PlayerSession(
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
-        # Arena-owned services reach EVERY runtime, injected ones included:
-        # a runtime holding its own store reference from construction would
-        # read empty memory after resume (the exact trap the resume repoint
-        # exists to undo — close it at construction too). Idempotent for
-        # runtimes the build path already wired.
+        # Arena-owned services reach EVERY runtime that opts in via the
+        # bind_services hook, injected ones included: a runtime holding its
+        # own store reference would read empty memory after resume. A hook
+        # (not attribute probing) so a runtime exposing a read-only property
+        # never breaks Arena construction.
         for rt in self.runtimes.values():
-            if hasattr(rt, "diary"):
-                rt.diary = self.diary
-            if hasattr(rt, "strategy"):
-                rt.strategy = self.strategy
+            bind = getattr(rt, "bind_services", None)
+            if callable(bind):
+                bind(diary=self.diary, strategy=self.strategy)
         self.checkpoints = CheckpointManager(
             self.run_dir / "checkpoints", every_n_turns=spec.checkpoint_every)
 
@@ -246,8 +245,10 @@ class Arena:
         for rt in self.runtimes.values():
             if hasattr(rt, "diary"):
                 rt.diary = self.diary
-            if hasattr(rt, "strategy"):
-                rt.strategy = self.strategy
+        for rt in self.runtimes.values():
+            bind = getattr(rt, "bind_services", None)
+            if callable(bind):
+                bind(diary=self.diary, strategy=self.strategy)
         # cumulative accounting across legs (spend budget, tokens)
         telemetry_doc = state.coordinator_state.get("telemetry")
         if telemetry_doc:
