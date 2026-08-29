@@ -57,6 +57,15 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_strategy",
+        "description": "Your current strategy record: goals, predictions, "
+            "recent lessons, and the last-known positions of foreign "
+            "entities you have previously seen (stale sightings included — "
+            "they vanish from live view while unobserved). The same view "
+            "your next turn's header summarizes.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "move_unit",
         "description": "Move one of your units to an adjacent tile.",
         "input_schema": {
@@ -168,6 +177,95 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "text": {"type": "string",
                          "description": "the note to remember",
                          "maxLength": 2000},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "set_goal",
+        "description": "Commit or revise a goal. With a deadline (by_turn) "
+            "and a metric the arena scores it automatically when due; "
+            "without both you judge it yourself. Pass goal_id to revise an "
+            "existing goal — the id stays stable across revisions. Max 280 "
+            "characters.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string",
+                         "description": "the goal, phrased as an outcome",
+                         "maxLength": 280},
+                "goal_id": {"type": "string",
+                            "description": "id of the goal to revise, e.g. "
+                                           "\"g1\"; empty to create"},
+                "by_turn": {"type": "integer",
+                            "description": "deadline turn, 0 for none"},
+                "metric": {"type": "string",
+                           "description": "one of \"cities\", \"units\", "
+                                          "\"techs\", \"gold\", \"population\", "
+                                          "or empty for self-assessment"},
+                "target": {"type": "integer",
+                           "description": "metric value that means the goal "
+                                          "is met"},
+                "status": {"type": "string",
+                           "description": "\"active\", \"done\", or "
+                                          "\"dropped\""},
+                "confidence": {"type": "integer",
+                               "description": "your confidence, 0 to 100"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "record_prediction",
+        "description": "Record a testable claim about the future with the "
+            "turn it should be judged on. With a metric the arena scores it "
+            "at review_turn; otherwise you self-assess when it comes due — "
+            "record a lesson with your verdict. Pass prediction_id to "
+            "revise.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string",
+                         "description": "the prediction, phrased testably",
+                         "maxLength": 280},
+                "review_turn": {"type": "integer",
+                                "description": "turn to judge the prediction "
+                                               "on"},
+                "prediction_id": {"type": "string",
+                                  "description": "id of the prediction to "
+                                                 "revise; empty to create"},
+                "subject_id": {"type": "string",
+                               "description": "optional entity or claim id "
+                                              "this is about, e.g. \"u8\", "
+                                              "\"c4\", \"g2\""},
+                "metric": {"type": "string",
+                           "description": "one of \"cities\", \"units\", "
+                                          "\"techs\", \"gold\", \"population\", "
+                                          "or empty for self-assessment"},
+                "target": {"type": "integer",
+                           "description": "metric value that means the "
+                                          "prediction held"},
+                "confidence": {"type": "integer",
+                               "description": "your confidence, 0 to 100"},
+            },
+            "required": ["text", "review_turn"],
+        },
+    },
+    {
+        "name": "record_lesson",
+        "description": "Record a durable takeaway — what worked, what "
+            "didn't, what to watch for. Optionally attach it to one of your "
+            "goals or predictions. Lessons persist across turns and are "
+            "summarized in your header.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string",
+                         "description": "the lesson",
+                         "maxLength": 280},
+                "about": {"type": "string",
+                          "description": "optional goal/prediction id this "
+                                         "lesson is about"},
             },
             "required": ["text"],
         },

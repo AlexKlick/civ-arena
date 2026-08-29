@@ -49,6 +49,15 @@ class MatchAborted(RuntimeError):
         self.reason = reason
 
 
+def _log_safe(value: Any) -> Any:
+    """Canonical JSON rejects floats; typed claim params are str/int, so
+    anything else a DIRECT caller smuggles in (a float, a list) is logged
+    as None — the store rejects the call regardless, and the RAW args_digest
+    contract only needs to be canonical-safe, not forensic."""
+    return value if isinstance(value, (str, int, bool)) or value is None \
+        else None
+
+
 @dataclass
 class RefereeConfig:
     watchdog_mode: str = "flag_and_continue"  # "flag_and_continue" | "rollback"
@@ -256,6 +265,95 @@ class Referee:
         self._emit_pair(ctx, phase, "write_diary", log_args, None, doc)
         self.telemetry.note_call(ctx.agent_id, "write_diary",
                                  int((time.perf_counter() - t0) * 1000), ok=True)
+        return doc
+
+    # -------------------------------------------------------------- strategy
+    async def set_goal(
+        self, ctx: SessionCtx, text: str, goal_id: str = "", by_turn: int = 0,
+        metric: str = "", target: int = 0, status: str = "active",
+        confidence: int = 50,
+    ) -> dict[str, Any]:
+        """Commit or revise a goal. The write_diary shape: validated
+        non-action — no adapter call, no state hash, no mutations."""
+        return await self._claim(ctx, "set_goal", {
+            "text": _log_safe(text), "goal_id": _log_safe(goal_id),
+            "by_turn": _log_safe(by_turn), "metric": _log_safe(metric),
+            "target": _log_safe(target), "status": _log_safe(status),
+            "confidence": _log_safe(confidence),
+        })
+
+    async def record_prediction(
+        self, ctx: SessionCtx, text: str, review_turn: int,
+        prediction_id: str = "", subject_id: str = "", metric: str = "",
+        target: int = 0, confidence: int = 50,
+    ) -> dict[str, Any]:
+        """Record a testable claim about the future."""
+        return await self._claim(ctx, "record_prediction", {
+            "text": _log_safe(text),
+            "review_turn": _log_safe(review_turn),
+            "prediction_id": _log_safe(prediction_id),
+            "subject_id": _log_safe(subject_id),
+            "metric": _log_safe(metric), "target": _log_safe(target),
+            "confidence": _log_safe(confidence),
+        })
+
+    async def record_lesson(
+        self, ctx: SessionCtx, text: str, about: str = "",
+    ) -> dict[str, Any]:
+        """Record a durable takeaway, optionally about an own claim."""
+        return await self._claim(ctx, "record_lesson", {
+            "text": _log_safe(text), "about": _log_safe(about),
+        })
+
+    async def _claim(
+        self, ctx: SessionCtx, tool: str, log_args: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The shared claim-tool path: lease, then the store's SINGLE
+        validation+mutation path, args logged RAW, pair emitted, telemetry
+        noted. The TOOL_CALL of this pair is the next record written, so its
+        seq (len(log) now) is the claim's provenance — exactly the seq
+        from_log later derives from that record."""
+        t0 = time.perf_counter()
+        phase = await self._phase()
+        reason = self._lease_reason(ctx, phase, tool=tool, args=log_args)
+        if reason is not None:
+            self.telemetry.note_call(ctx.agent_id, tool,
+                                     int((time.perf_counter() - t0) * 1000),
+                                     ok=False)
+            self._emit_pair(ctx, phase, tool, log_args, None,
+                            {"status": "rejected", "rejection": reason.value})
+            return {"status": "rejected", "rejection": reason.value}
+        seq = len(self.log)
+        doc = self.strategy.apply_claim(
+            tool, ctx.player_id, log_args, phase["turn"], seq)
+        self._emit_pair(ctx, phase, tool, log_args, None, doc)
+        self.telemetry.note_call(
+            ctx.agent_id, tool, int((time.perf_counter() - t0) * 1000),
+            ok=doc.get("status") == "accepted")
+        return doc
+
+    async def get_strategy(self, ctx: SessionCtx) -> dict[str, Any]:
+        """Read the current strategy view — the same docs the next turn's
+        header renders (view_for), so a mid-turn read can never disagree
+        with it. Requires the lease like every tool; the payload rides under
+        a key _emit_pair does not lift, so the log stays lean (the view is
+        derivable from the log, like every observation)."""
+        t0 = time.perf_counter()
+        phase = await self._phase()
+        reason = self._lease_reason(ctx, phase, tool="get_strategy", args={})
+        if reason is not None:
+            self.telemetry.note_call(ctx.agent_id, "get_strategy",
+                                     int((time.perf_counter() - t0) * 1000),
+                                     ok=False)
+            self._emit_pair(ctx, phase, "get_strategy", {}, None,
+                            {"status": "rejected", "rejection": reason.value})
+            return {"status": "rejected", "rejection": reason.value}
+        doc = {"status": "accepted", "tool": "get_strategy",
+               "strategy": self.strategy.view_for(ctx.player_id)}
+        self._emit_pair(ctx, phase, "get_strategy", {}, None, doc)
+        self.telemetry.note_call(ctx.agent_id, "get_strategy",
+                                 int((time.perf_counter() - t0) * 1000),
+                                 ok=True)
         return doc
 
     # -------------------------------------------------------------- observe

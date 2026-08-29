@@ -30,6 +30,7 @@ ARG_ORDER: dict[str, list[str]] = {
     "get_visible_map": [],
     "get_available_research": [],
     "get_available_production": ["city_id"],
+    "get_strategy": [],
     "move_unit": ["unit_id", "dest"],
     "attack": ["unit_id", "target_id"],
     "fortify": ["unit_id"],
@@ -39,6 +40,11 @@ ARG_ORDER: dict[str, list[str]] = {
     "purchase": ["city_id", "item_id"],
     "end_turn": [],
     "write_diary": ["text"],
+    "set_goal": ["text", "goal_id", "by_turn", "metric", "target", "status",
+                 "confidence"],
+    "record_prediction": ["text", "review_turn", "prediction_id", "subject_id",
+                          "metric", "target", "confidence"],
+    "record_lesson": ["text", "about"],
 }
 
 

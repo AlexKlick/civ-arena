@@ -272,6 +272,33 @@ class StrategyStore:
             "lesson_id": lesson_id,
         }
 
+    def apply_claim(
+        self, tool: str, player_id: int, args: dict[str, Any],
+        turn: int, seq: int,
+    ) -> dict[str, Any]:
+        """Dispatch one claim-tool call to its apply_* path (the referee's
+        single entry point; from_log uses the same one)."""
+        if tool == "set_goal":
+            return self.apply_goal(player_id, args, turn, seq)
+        if tool == "record_prediction":
+            return self.apply_prediction(player_id, args, turn, seq)
+        if tool == "record_lesson":
+            return self.apply_lesson(player_id, args, turn, seq)
+        return self._reject(tool, f"unknown claim tool {tool!r}")
+
+    def view_for(self, player_id: int) -> dict[str, Any]:
+        """The agent-readable strategy view: exactly what get_strategy returns
+        and (M11d) the turn header renders — one shape, no disagreement
+        possible between a mid-turn read and the next turn's summary."""
+        return {
+            "goals": [g.to_doc() for g in self.current_goals(player_id)],
+            "predictions": [p.to_doc()
+                            for p in self.current_predictions(player_id)],
+            "lessons": [lesson.to_doc()
+                        for lesson in self.lesson_list(player_id)[-8:]],
+            "beliefs": self.beliefs.view(player_id),
+        }
+
     # ----------------------------------------------------- observation feed
     def note_observation(
         self, player_id: int, turn: int, seq: int,

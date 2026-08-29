@@ -422,3 +422,135 @@ async def test_replayed_observations_rebuild_identical_store(tmp_path):
     replay_store = StrategyStore.from_log(replay_records)
     assert live_store == replay_store
     assert live_store.beliefs.entries  # the comparison is over real sightings
+
+
+# ------------------------------------------------- claim tools (referee)
+
+
+async def test_claim_tools_accepted_logged_and_rebuildable(tmp_path):
+    from test_hostile_agent import hostile_setup
+
+    _adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    doc = await referee.set_goal(ctx, "hold 3 cities", by_turn=20,
+                                 metric="cities", target=3)
+    assert doc == {"status": "accepted", "tool": "set_goal", "goal_id": "g1",
+                   "revision": 1}
+    amend = await referee.set_goal(ctx, "hold 4 cities", goal_id="g1",
+                                   by_turn=24, metric="cities", target=4)
+    assert amend["revision"] == 2
+    assert (await referee.record_prediction(
+        ctx, "rival walls by t12", 12))["prediction_id"] == "p1"
+    assert (await referee.record_lesson(
+        ctx, "check production every turn", "g1"))["lesson_id"] == "l1"
+
+    # args are logged RAW — exactly what the caller sent (Python defaults
+    # filled by the signature count as sent for direct calls; the runtime
+    # always sends the full kwargs set it was given)
+    call = [r for r in log.records()
+            if r["kind"] == "TOOL_CALL" and r.get("tool") == "set_goal"][-1]
+    assert call["args"]["text"] == "hold 4 cities"
+    assert call["args"]["by_turn"] == 24
+    # provenance: created_seq IS the TOOL_CALL's own seq
+    assert referee.strategy.goals[0]["g1"][-1].created_seq == call["seq"]
+    # live store == rebuild, through the shared apply_claim path
+    assert StrategyStore.from_log(log.records()) == referee.strategy
+    # telemetry parity: one call counted per emitted pair
+    results = [r for r in log.records() if r["kind"] == "TOOL_RESULT"]
+    assert referee.telemetry.snapshot()["roman"]["total_calls"] == len(results)
+
+
+async def test_claim_tools_require_valid_lease(tmp_path):
+    from test_hostile_agent import hostile_setup
+
+    _adapter, log, referee, _session, ctx, lease = await hostile_setup(tmp_path)
+    lease.release()
+    doc = await referee.set_goal(ctx, "too late")
+    assert doc["status"] == "rejected" and doc["rejection"] == "lease_expired"
+    kinds = [(r["kind"], r.get("rejection")) for r in log.records()]
+    assert ("UNAUTHORIZED_TOOL_CALL", "lease_expired") in kinds
+    assert ("TOOL_RESULT", "lease_expired") in kinds
+    assert referee.strategy.goals == {}  # nothing landed
+
+
+async def test_claim_rejections_never_land_in_store(tmp_path):
+    from test_hostile_agent import hostile_setup
+
+    _adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    assert (await referee.set_goal(ctx, "ok"))["status"] == "accepted"
+    for doc in [
+        await referee.set_goal(ctx, "x" * 281),               # oversized raw
+        await referee.set_goal(ctx, "ok", metric="happiness"),  # bad metric
+        await referee.set_goal(ctx, "ok", by_turn=0, confidence=101),
+        await referee.record_prediction(ctx, "retro", 0),     # review in past
+        await referee.record_lesson(ctx, "dangling", "g9"),   # unknown about
+    ]:
+        assert doc["status"] == "rejected" and doc["rejection"] == "args_invalid"
+    # one accepted goal, nothing else; rejections are on the record
+    assert len(referee.strategy.current_goals(0)) == 1
+    rejected = [r for r in log.records()
+                if r["kind"] == "TOOL_RESULT" and r.get("status") == "rejected"
+                and r.get("rejection") == "args_invalid"]
+    assert len(rejected) == 5
+
+
+async def test_claim_tools_never_touch_game_state(tmp_path):
+    from test_hostile_agent import hostile_setup
+
+    adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    before = adapter.state_hash()
+    await referee.set_goal(ctx, "note")
+    await referee.record_prediction(ctx, "pred", 2)
+    await referee.record_lesson(ctx, "lesson")
+    await referee.get_strategy(ctx)
+    assert adapter.state_hash() == before
+    for rec in log.records():
+        if rec["kind"] == "TOOL_RESULT" and rec.get("tool") in (
+                "set_goal", "record_prediction", "record_lesson",
+                "get_strategy"):
+            for key in ("after_state_hash", "before_state_hash", "receipts",
+                        "mutations"):
+                assert key not in rec, f"{rec['tool']} must not carry {key}"
+
+
+async def test_get_strategy_round_trips_the_view(tmp_path):
+    from conftest import teleport
+    from test_hostile_agent import hostile_setup
+
+    adapter, log, referee, _session, ctx, _lease = await hostile_setup(tmp_path)
+    teleport(adapter.state, "u8", -2, 0)
+    await referee.observe(ctx, ObserveKind.UNITS)
+    await referee.set_goal(ctx, "watch the north", metric="units", target=5)
+    doc = await referee.get_strategy(ctx)
+    assert doc["status"] == "accepted"
+    # the same docs the store serves the renderer — one shape, no drift
+    assert doc["strategy"] == referee.strategy.view_for(0)
+    assert doc["strategy"]["goals"][0]["goal_id"] == "g1"
+    assert doc["strategy"]["beliefs"][0]["entity_id"] == "u8"
+    # the payload is NOT lifted into the log record (derivable, like any
+    # observation payload)
+    result = next(r for r in log.records()
+                  if r["kind"] == "TOOL_RESULT" and r.get("tool") ==
+                  "get_strategy")
+    assert result["result_doc"] is None
+
+
+# ------------------------------------------- claim tools through the model
+
+
+async def test_oversized_model_claim_is_malformed_and_replay_stable(tmp_path):
+    from fakes import FakeModel, use
+    from test_llm_runtime import _run, make_arena
+
+    fake = FakeModel(script=[
+        [use("set_goal", {"text": "x" * 281, "by_turn": 20})],
+        [use("end_turn")],
+    ])
+    arena, _fake = await _run(make_arena(tmp_path, fake, max_turns=1))
+    # bounded BEFORE any log record: zero events, replay cannot diverge
+    kinds = [(r["kind"], r.get("tool")) for r in arena.log.records()]
+    assert ("TOOL_CALL", "set_goal") not in kinds
+    assert ("TOOL_RESULT", "set_goal") not in kinds
+    tel = arena.telemetry.snapshot()["roman"]
+    assert tel["model_errors"] == {"llm_malformed_args": 1}
+    result = await replay_run(tmp_path / "run", arena.spec, tmp_path / "replay")
+    assert result["identical"]

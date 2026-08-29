@@ -1,4 +1,4 @@
-"""The 15 agent-visible tools. NO tool takes a player/owner identity parameter.
+"""The 19 agent-visible tools. NO tool takes a player/owner identity parameter.
 
 Identity is bound server-side: each function receives an opaque SessionCtx
 whose player the referee injected at lease grant. An LLM AgentRuntime later
@@ -51,6 +51,13 @@ async def get_available_research(ctx: SessionCtx) -> list[dict]:
 async def get_available_production(ctx: SessionCtx, city_id: str) -> list[dict]:
     return await ctx.referee.observe(ctx, ObserveKind.AVAILABLE_PRODUCTION,
                                      subject_id=city_id)
+
+
+async def get_strategy(ctx: SessionCtx) -> dict:
+    """Read the current strategy record (goals, predictions, lessons,
+    last-known foreign entities) — the same view the next turn's header
+    summarizes."""
+    return await ctx.referee.get_strategy(ctx)
 
 
 # -- actions -------------------------------------------------------------------
@@ -115,6 +122,30 @@ async def write_diary(ctx: SessionCtx, text: str) -> dict:
     return await ctx.referee.write_diary(ctx, text)
 
 
+# -- strategy claims (validated non-actions, the write_diary shape) --------
+
+async def set_goal(ctx: SessionCtx, text: str, goal_id: str = "",
+                   by_turn: int = 0, metric: str = "", target: int = 0,
+                   status: str = "active", confidence: int = 50) -> dict:
+    return await ctx.referee.set_goal(
+        ctx, text, goal_id=goal_id, by_turn=by_turn, metric=metric,
+        target=target, status=status, confidence=confidence)
+
+
+async def record_prediction(ctx: SessionCtx, text: str, review_turn: int,
+                            prediction_id: str = "", subject_id: str = "",
+                            metric: str = "", target: int = 0,
+                            confidence: int = 50) -> dict:
+    return await ctx.referee.record_prediction(
+        ctx, text, review_turn, prediction_id=prediction_id,
+        subject_id=subject_id, metric=metric, target=target,
+        confidence=confidence)
+
+
+async def record_lesson(ctx: SessionCtx, text: str, about: str = "") -> dict:
+    return await ctx.referee.record_lesson(ctx, text, about=about)
+
+
 TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "get_overview": get_overview,
     "get_units": get_units,
@@ -122,6 +153,7 @@ TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "get_visible_map": get_visible_map,
     "get_available_research": get_available_research,
     "get_available_production": get_available_production,
+    "get_strategy": get_strategy,
     "move_unit": move_unit,
     "attack": attack,
     "fortify": fortify,
@@ -131,6 +163,9 @@ TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "purchase": purchase,
     "end_turn": end_turn,
     "write_diary": write_diary,
+    "set_goal": set_goal,
+    "record_prediction": record_prediction,
+    "record_lesson": record_lesson,
 }
 
 
