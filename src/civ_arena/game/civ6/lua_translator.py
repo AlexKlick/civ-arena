@@ -173,10 +173,12 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
             if Locale ~= nil then name = Locale.Lookup(city:GetName()) end
         end)
         if name == nil or name == "" then name = "c" .. city:GetID() end
-        -- Codex P2-5: a renamed city carrying | or a newline would tear the
-        -- pipe-row parse; | and newlines are plain-string gsubs (no patterns)
+        -- Codex P2-5: a renamed city carrying | or a newline would tear
+        -- the pipe-row parse. | is a plain gsub; control chars go via the
+        -- %c class — NO backslash escapes (the tuner lexer rejects them
+        -- in command chunks, live-learned run 009)
         name = string.gsub(name, "|", "-")
-        name = string.gsub(name, "\n", " ")
+        name = string.gsub(name, "%c", " ")
         local queue = "-"
         pcall(function()
             local bq = city:GetBuildQueue()
@@ -339,6 +341,21 @@ if Puppeteer == nil or Puppeteer.Status == nil then
 else
     local s = Puppeteer.Status()
     if s ~= nil then print(s) end
+end
+print("---END---")
+"""
+
+
+def mod_trace() -> str:
+    """Puppeteer.Trace() — the mod v0.3.1 pollable hook-event ring (D3:
+    prints from engine callbacks are unsolicited and drained; polling is
+    the only sound read). Each line is '<turn>|<EVENT>|<args>'."""
+    return """
+if Puppeteer == nil or Puppeteer.Trace == nil then
+    print("MOD_TRACE|unavailable")
+else
+    local t = Puppeteer.Trace()
+    if t ~= nil and t ~= "" then print(t) end
 end
 print("---END---")
 """

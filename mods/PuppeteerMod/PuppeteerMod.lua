@@ -300,8 +300,7 @@ function Puppeteer.RestoreUnit(unitId)
     if lease.restored[unitId] then
         return
     end
-    local unit = Players[lease.playerID]:FindID and nil or nil
-    unit = Players[lease.playerID]:GetUnits():FindID(unitId)
+    local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
     if unit ~= nil then
         UnitManager.RestoreMovement(unit)
         UnitManager.RestoreUnitAttacks(unit)

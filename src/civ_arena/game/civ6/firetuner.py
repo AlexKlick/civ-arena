@@ -133,6 +133,17 @@ def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
     return None
 
 
+_MOD_VERSION_RE = re.compile(r'Puppeteer\.version\s*=\s*"([^"]+)"')
+
+
+def _mod_version(lua_text: str) -> str:
+    """The version the MOD FILE declares (its source of truth)."""
+    m = _MOD_VERSION_RE.search(lua_text)
+    if m is None:
+        raise RuntimeError("mod file declares no Puppeteer.version")
+    return m.group(1)
+
+
 def _rejection_value(token: str) -> str:
     """The act Lua emits UPPERCASE reason tokens; the seam contract is the
     RejectionReason VALUE (lowercase). An unknown token fails LOUD — a
@@ -258,8 +269,14 @@ class FireTunerAdapter:
         await self._conn.disconnect()
 
     async def read_raw(self, lua: str) -> list[str]:
-        """Raw pipe-rows for translator output (smoke/driver transcript use)."""
+        """Raw pipe-rows for translator output (smoke/driver transcript use)
+        — GameCore VM."""
         return await self._conn.execute_read(lua)
+
+    async def write_raw(self, lua: str) -> list[str]:
+        """Raw pipe-rows in the InGame VM (UI actions; the driver's
+        bootstrap end-turn — UI is nil in GameCore, live-learned run 009)."""
+        return await self._conn.execute_write(lua)
 
     async def mod_handshake(self) -> dict[str, Any]:
         """PuppeteerMod capability handshake — fail-closed (parse_handshake)."""
@@ -279,9 +296,16 @@ class FireTunerAdapter:
         ALREADY live, this VERIFIES it instead of re-executing — the
         re-injection hygiene retires the old instance, whose ``lease``
         (and any ENGAGED lease on the engine's parked turn) dies with it.
-        Re-inject only on absence or capability mismatch."""
+        Re-inject only on absence, capability mismatch, or VERSION
+        mismatch (the file is the source of truth; an older live instance
+        lacks the current seam — e.g. turn-bound Release, seq diffs)."""
+        file_version = _mod_version(lua_text)
         try:
-            return await self.require_mod()
+            doc = await self.require_mod()
+            if doc["mod_version"] == file_version:
+                return doc
+            # version drift: re-inject the file (no lease survives this —
+            # the caller boots a parked, lease-free turn or accepts the loss)
         except RuntimeError:
             pass  # absent or incapable: (re-)inject below
         payload = lua_text + (
@@ -294,7 +318,12 @@ class FireTunerAdapter:
         if marker is None or marker == "MOD_LOADED|NIL":
             raise RuntimeError(
                 f"mod injection failed: {marker!r} from {lines[:3]!r}")
-        return await self.require_mod()
+        doc = await self.require_mod()
+        if doc["mod_version"] != file_version:
+            raise RuntimeError(
+                f"injected {file_version!r} but handshake reports "
+                f"{doc['mod_version']!r} — a foreign mod instance answered")
+        return doc
 
     async def require_mod(self) -> dict[str, Any]:
         """Phase-1 live gate (docs/live-validation.md §3.1): refuse to drive
@@ -416,6 +445,11 @@ class FireTunerAdapter:
         Every Status poll re-syncs the mirror to the engine's truth."""
         if turn > self._turn_mirror:
             self._turn_mirror = turn
+
+    async def read_trace(self) -> list[str]:
+        """The mod's hook-event ring, flattened (driver targeting)."""
+        lines = await self._conn.execute_read(lua_translator.mod_trace())
+        return response_parser._split_lines(lines)  # noqa: SLF001
 
     async def refresh_digest(self) -> str:
         """Poll the whole-board digest and return the new state hash."""

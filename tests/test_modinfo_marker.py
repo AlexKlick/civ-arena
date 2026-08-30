@@ -5,6 +5,8 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import pytest
+
 MODS = Path(__file__).resolve().parents[1] / "mods" / "PuppeteerMod"
 MARKER = "UNVALIDATED"
 
@@ -74,3 +76,30 @@ def test_live_validation_doc_exists_and_documents_both_routes():
     )
     assert "EnableTuner 1" in doc
     assert "4318" in doc
+
+
+def test_mod_lua_parses():
+    """The mod file must PARSE before it can be injected — a Lua syntax
+    error costs a live run (run 008: 'function arguments expected' from a
+    stray half-line reached the wire). luatex's embedded interpreter is
+    the host's available Lua; skipped where absent."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    luatex = shutil.which("luatex")
+    if luatex is None:
+        pytest.skip("no luatex on this host for the Lua parse gate")
+    repo = Path(__file__).resolve().parents[1]
+    checker = repo / "tests" / "_lua_parse_check.lua"
+    checker.write_text(
+        "local chunk, err = loadfile(arg[1])\n"
+        "if not chunk then print('PARSE_FAIL|' .. tostring(err)) os.exit(1) end\n"
+        "print('PARSE_OK')\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [luatex, "--luaonly", str(checker),
+         str(repo / "mods" / "PuppeteerMod" / "PuppeteerMod.lua")],
+        capture_output=True, text=True, timeout=60.0)
+    assert "PARSE_OK" in proc.stdout, proc.stdout + proc.stderr

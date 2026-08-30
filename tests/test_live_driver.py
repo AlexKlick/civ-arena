@@ -663,10 +663,15 @@ def test_dispatch_target_turn_rules():
     assert _target_turn(
         {"TURN": 3, "PUPPET_ACTIVE": True, "LEASE_PLAYER": 0,
          "LEASE_TURN": 3, "TURN_ACTIVE": False}, 0) == 3
-    # rule 2: mid-transition — TURN shared by all players, hook still ahead
+    # rule 3: we JUST drove 7 ourselves; the AI is still playing it —
+    # our next hook fires at 8 (targeting 7 would wait for a dead hook)
     assert _target_turn(
         {"TURN": 7, "PUPPET_ACTIVE": False, "LEASE_PLAYER": -1,
-         "LEASE_TURN": -1, "TURN_ACTIVE": False}, 0) == 7
+         "LEASE_TURN": -1, "TURN_ACTIVE": False}, 0, last_driven=7) == 8
+    # rule 4: mid-transition into OUR next turn — hook imminent at TURN
+    assert _target_turn(
+        {"TURN": 8, "PUPPET_ACTIVE": False, "LEASE_PLAYER": -1,
+         "LEASE_TURN": -1, "TURN_ACTIVE": False}, 0, last_driven=7) == 8
     # rule 3: attach case — parked local turn, hook already fired
     assert _target_turn(
         {"TURN": 1, "PUPPET_ACTIVE": False, "LEASE_PLAYER": -1,
