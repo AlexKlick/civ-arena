@@ -48,6 +48,32 @@ _LIVE_POINTER = (
     "docs/live-validation.md §'extending the adapter'"
 )
 
+
+def _row_owner(row: str) -> int | None:
+    """Owner player of one digest row (u<uid>|<pid>|.., c<cid>|<pid>|..,
+    p<pid>|..) — None for unattributed rows."""
+    parts = row.split("|")
+    head = parts[0]
+    if head[:1] in ("u", "c") and len(parts) > 1:
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+    if head[:1] == "p":
+        try:
+            return int(head[1:])
+        except ValueError:
+            return None
+    return None
+
+
+def filter_digest_rows(digest: str, owner: int) -> list[str]:
+    """The phase owner's slice of a whole-board digest. Live play is
+    asynchronous: after our release the next player mutates the board
+    immediately, so a phase's hashes must not cover foreign activity
+    (Codex P1-4) — the whole board hashes only when no phase is open."""
+    return sorted(r for r in digest.split(";") if r and _row_owner(r) == owner)
+
 # (event, player_id) -> fake-side Lua; the driver attaches this ONLY in
 # rehearsal mode. Hook prints are unsolicited and drained in the real wire,
 # so engine-side events exist for the adapter only through their effect on
@@ -99,6 +125,12 @@ class FireTunerAdapter:
         self._turn_mirror = -1
         self._journal: list[MutationRecord] = []
         self._digest_text: str | None = None
+        # hash scoping (Codex P1-4): while a phase is open (and for the
+        # sealed phase-end hash) state_hash covers ONLY the phase owner's
+        # digest rows — the next player acts immediately after release and
+        # must not leak into this phase's hash trail
+        self._hash_owner: int | None = None
+        self._sealed_hash: str | None = None
         self.state = _LiveStateView(self)
 
     # -- lifecycle ---------------------------------------------------------
@@ -115,10 +147,13 @@ class FireTunerAdapter:
         self._turn_mirror = int(parsed.get("TURN", -1))
         # digest seeding is best-effort: a mod-absent session still probes
         # (require_mod refuses later); state_hash stays unavailable until a
-        # digest exists — nothing drives a match without the mod anyway
+        # digest exists — nothing drives a match without the mod anyway.
+        # ValueError = no DIGEST row; LuaError = broken Digest() — both must
+        # stay out of setup so the SMOKE can blame the right stage (S1 must
+        # not absorb an S5 failure; Codex P2-11).
         try:
             await self._refresh_digest()
-        except ValueError:
+        except (ValueError, LuaError):
             self._digest_text = None
 
     async def current_phase(self) -> dict[str, Any]:
@@ -146,12 +181,15 @@ class FireTunerAdapter:
 
     async def require_mod(self) -> dict[str, Any]:
         """Phase-1 live gate (docs/live-validation.md §3.1): refuse to drive
-        a live match unless the mod reports freeze AND ledger support."""
+        a live match unless the mod reports freeze AND ledger AND digest —
+        state_hash cannot operate without the digest (Codex P2-8)."""
         doc = await self.mod_handshake()
-        if not doc["supports_freeze"] or not doc["supports_ledger"]:
+        if not (doc["supports_freeze"] and doc["supports_ledger"]
+                and doc["supports_digest"]):
             raise RuntimeError(
-                f"PuppeteerMod handshake gate failed: {doc} — freeze+ledger "
-                "required (docs/live-validation.md §3.1)")
+                f"PuppeteerMod handshake gate failed: {doc} — "
+                "freeze+ledger+digest required (docs/live-validation.md §3.1)"
+            )
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
@@ -172,11 +210,14 @@ class FireTunerAdapter:
             lua_translator.set_puppet(player_id, True))
         await self._fire_simulate("turn_start", player_id)
         # The make-or-break wait (upstream open question 1): the hook must
-        # engage the freeze BEFORE the stock AI acts. A timeout here IS the
-        # finding — record it dated and stop.
+        # engage the freeze BEFORE the stock AI acts, for THIS player at THIS
+        # turn — an engaged lease for anyone else is a refusal, not a pass
+        # (Codex P1-3). A timeout here IS the finding — record it, stop.
         await self._await(
-            lambda p: p.get("PUPPET_ACTIVE") is True,
-            f"lease to engage for player {player_id} "
+            lambda p: (p.get("PUPPET_ACTIVE") is True
+                       and p.get("LEASE_PLAYER") == player_id
+                       and p.get("LEASE_TURN") == turn),
+            f"lease to engage for player {player_id} at turn {turn} "
             "(PlayerTurnStartComplete timing)")
         # Declared ambient window: snapshot -> diff -> manifest rows
         await self._conn.execute_read(
@@ -186,6 +227,8 @@ class FireTunerAdapter:
         ambient = await self._conn.execute_read(lua_translator.dump_ambient())
         manifest = response_parser.parse_ledger_lines(ambient)
         self._phase_open = player_id
+        self._hash_owner = player_id
+        self._sealed_hash = None
         self._turn_mirror = turn
         await self._refresh_digest()
         return {"manifest": manifest}
@@ -217,11 +260,14 @@ class FireTunerAdapter:
         ledger = await self._conn.execute_read(lua_translator.dump_ledger())
         for doc in response_parser.parse_ledger_lines(ledger):
             self._journal.append(MutationRecord.from_doc(doc))
-        self._phase_open = -1
-        # refresh BEFORE the turn can advance: the TURN_END hash must cover
-        # THIS phase's final state, not whatever the engine does next (the
-        # other player acts immediately after release in live play)
+        # SEAL the phase-end hash while the owner scope is still set: the
+        # digest refresh races the next player's first mutations in live
+        # play, so the hash is fixed here — owner-scoped, immune to foreign
+        # activity (Codex P1-4) — and served to the referee's post-hash call
         await self._refresh_digest()
+        self._sealed_hash = self.state_hash()
+        self._hash_owner = None
+        self._phase_open = -1
         # rehearsal-only: the real engine advances on its own after release
         await self._fire_simulate("advance_turn", player_id)
         return {}
@@ -280,6 +326,9 @@ class FireTunerAdapter:
 
     # -- action -----------------------------------------------------------------
     async def act(self, cmd: Any) -> Any:
+        # M14d contract: a landed act MUST end with await self._refresh_digest()
+        # (Codex P2-10) — otherwise execute()'s post-hash is the PRE-command
+        # digest and the log's hash trail goes stale mid-lease.
         raise NotImplementedError(f"act over FireTuner: {_LIVE_POINTER}")
 
     # -- watchdog / persistence ----------------------------------------------
@@ -294,8 +343,13 @@ class FireTunerAdapter:
         return out
 
     def state_hash(self) -> str:
+        if self._sealed_hash is not None:
+            return self._sealed_hash
         if self._digest_text is None:
             raise RuntimeError("state_hash before setup — no digest cached")
+        if self._hash_owner is not None:
+            rows = filter_digest_rows(self._digest_text, self._hash_owner)
+            return _sha({"live_digest": ";".join(rows)})
         return _sha({"live_digest": self._digest_text})
 
     def export_state(self) -> dict[str, Any]:

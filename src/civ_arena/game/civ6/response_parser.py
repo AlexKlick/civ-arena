@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_FLOAT_RE = re.compile(r"^-?\d+\.\d+$")
+# canonical ints only: a token that LOOKS numeric by any other spelling
+# (12.5, .5, 1., 1e3, nan, inf, +7) fails closed (Codex P2-9)
+_PLAIN_INT = re.compile(r"^-?\d+$")
+_NUMERICISH = re.compile(r"^[-+0-9.eE_]+$")
 
 
 def parse_kv_lines(lines: list[str]) -> dict[str, Any]:
@@ -54,10 +57,13 @@ def parse_handshake(lines: list[str]) -> dict[str, Any]:
 
 
 def _coerce_strict(value: str) -> Any:
-    """Canonical-int tripwire: a float-looking token fails LOUDLY here,
-    before it can ride an event log canonical() would reject."""
-    if _FLOAT_RE.match(value):
-        raise ValueError(f"non-canonical float on the wire: {value!r}")
+    """Canonical-int tripwire: any numeric-looking token that is not a
+    plain integer fails LOUDLY here, before it can ride an event log
+    canonical() would reject — or worse, slip through as a string."""
+    if _PLAIN_INT.match(value):
+        return int(value)
+    if _NUMERICISH.match(value) or value.lower() in ("nan", "inf", "-inf"):
+        raise ValueError(f"non-canonical number on the wire: {value!r}")
     return _coerce(value)
 
 

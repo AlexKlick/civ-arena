@@ -70,12 +70,27 @@ def test_parse_ledger_lines_shapes():
 
 
 def test_parse_ledger_rejects_floats_and_torn_rows():
-    with pytest.raises(ValueError, match="float"):
+    with pytest.raises(ValueError, match="non-canonical"):
         parse_ledger_lines(["LEDGER|unit.hp|unit|u7|hp|100|98.5"])
     with pytest.raises(ValueError, match="malformed"):
         parse_ledger_lines(["LEDGER|only|three|fields"])
     with pytest.raises(ValueError, match="non-ledger"):
         parse_ledger_lines(["TURNS|7"])
+
+
+def test_coerce_strict_rejects_every_numeric_spelling():
+    """Codex P2-9: .5 / 1. / 1e3 / nan / inf / +7 must ALL fail closed —
+    only plain integers are canonical numbers on the wire."""
+    from civ_arena.game.civ6.response_parser import _coerce_strict
+
+    for bad in (".5", "1.", "1e3", "1E3", "nan", "inf", "-inf", "+7", "1_0"):
+        with pytest.raises(ValueError, match="non-canonical"):
+            _coerce_strict(bad)
+    # and the legal shapes still pass
+    assert _coerce_strict("-12") == -12
+    assert _coerce_strict("true") is True
+    assert _coerce_strict("2,3") == "2,3"  # positions stay strings
+    assert _coerce_strict("u7") == "u7"
 
 
 def test_parse_digest():
@@ -189,6 +204,62 @@ async def test_turn_mismatch_is_loud():
         await server.stop()
 
 
+async def test_lease_for_the_wrong_player_is_refused():
+    """Codex P1-3: an engaged lease for ANYONE else (or a stale turn) is a
+    refusal — begin_phase must verify LEASE_PLAYER/LEASE_TURN, not just
+    PUPPET_ACTIVE."""
+    def wrong_player_hook(event: str, player_id: int) -> str:
+        return {
+            "turn_start": "Simulate.TurnStart(1)",  # the OTHER player's hook
+            "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",
+            "advance_turn": "Simulate.AdvanceTurn()",
+        }[event]
+
+    server = FakeTunerServer(mod=FakeMod())
+    port = await server.start()
+    adapter = FireTunerAdapter("127.0.0.1", port,
+                               simulate_hook=wrong_player_hook,
+                               poll_timeout_s=1.0)
+    try:
+        await adapter.setup({})
+        with pytest.raises(RuntimeError,
+                           match=r"lease to engage for player 0 at turn 1"):
+            await adapter.begin_phase(0, 1)
+    finally:
+        await server.stop()
+
+
+def test_digest_rows_filter_by_owner():
+    """Codex P1-4: a phase's hash covers ONLY the phase owner's rows —
+    live play is asynchronous and the next player must not leak into this
+    phase's hash trail."""
+    from civ_arena.game.civ6.firetuner import filter_digest_rows
+
+    digest = "u9|1|3|4|2|100|false;c3|0|7;p1|40|5;u2|0|1|1|2|95|true;p0|12|-1"
+    assert filter_digest_rows(digest, 0) == ["c3|0|7", "p0|12|-1", "u2|0|1|1|2|95|true"]
+    assert filter_digest_rows(digest, 1) == ["p1|40|5", "u9|1|3|4|2|100|false"]
+    assert filter_digest_rows("rehearsal|turn=1|nonce=0", 0) == []
+
+
+async def test_sealed_phase_hash_immune_to_foreign_drift():
+    """Codex P1-4: after end_phase the hash is SEALED — later digest polls
+    (foreign activity racing the next player's phase) cannot move what the
+    referee's TURN_END records."""
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        await adapter.begin_phase(0, 1)
+        await adapter.end_phase(0, 1)
+        sealed_end = adapter.state_hash()
+        # foreign drift AFTER the seal: the digest cache moves, the served
+        # hash must not
+        await adapter.read_raw("Simulate.Mutate()")
+        await adapter._refresh_digest()  # noqa: SLF001 — the race made real
+        assert adapter.state_hash() == sealed_end
+    finally:
+        await server.stop()
+
+
 async def test_ambient_manifest_rehearsal(tmp_path):
     """A declared ambient effect (population growth inside the window)
     flows: window diff -> DumpAmbient rows -> the referee's AMBIENT
@@ -235,6 +306,10 @@ def test_live_driver_rehearsal_end_to_end(tmp_path):
     assert summary["clean"] is True
     assert summary["violations_total"] == 0
     assert len(summary["per_turn"]) == 2
+    # Arena.run envelope parity (Codex P2-6): replay/_strip read these
+    assert summary["final_state_hash"] is not None
+    assert "aborted" in summary and "scores" in summary
+    assert "telemetry" in summary
     kinds = [json.loads(line)["kind"] for line in
              (run_dir / "events.jsonl").read_text().splitlines()]
     assert kinds[0] == "MATCH_START" and kinds[-1] == "MATCH_END"
@@ -252,7 +327,22 @@ def test_live_driver_refuses_finished_rerun(tmp_path):
     second = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
                             timeout=120.0)
     assert second.returncode != 0
-    assert "finished match" in second.stderr
+    assert "already exists" in second.stderr
+
+
+def test_live_driver_refuses_partial_rerun(tmp_path):
+    """Codex P1-5: a PARTIAL log (timed-out attempt, no MATCH_END) must
+    also refuse — appending a second MATCH_START would splice attempts."""
+    run_dir = tmp_path / "runs" / "live-duel-001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "events.jsonl").write_text('{"kind": "MATCH_START"}\n')
+    cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
+           str(CONFIG), "--phase", "exclusive-control", "--fake", "--turns", "1",
+           "--runs-root", str(tmp_path / "runs")]
+    proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
+                          timeout=120.0)
+    assert proc.returncode != 0
+    assert "already exists" in proc.stderr
 
 
 def test_rollback_mode_refused(tmp_path):

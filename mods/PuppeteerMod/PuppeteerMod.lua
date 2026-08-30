@@ -60,7 +60,12 @@ local function snapshot_units(playerID)
     return snap
 end
 
--- v0.2 ambient-recorder snapshot: units AND cities of one player
+-- v0.2 ambient-recorder snapshot: units AND cities AND treasury/research of
+-- one player. Scope note (Codex P1-2, 2026-08-30): this recorder + the
+-- digest cover units/cities/population/gold/research/production-name.
+-- Districts, build queues, promotions, and tile ownership are OUTSIDE both
+-- — a recorded, accepted limitation (docs/live-validation.md §6), not a
+-- silent hole: nothing may claim live watchdog authority over them.
 local function snapshot_player(playerID)
     local snap = { units = {}, cities = {} }
     pcall(function()
@@ -68,8 +73,19 @@ local function snapshot_player(playerID)
     end)
     pcall(function()
         for _, city in Players[playerID]:GetCities():Members() do
-            snap.cities[city:GetID()] = { population = city:GetPopulation() }
+            snap.cities[city:GetID()] = {
+                population = city:GetPopulation(),
+                production = tostring(city:GetProductionName()),
+            }
         end
+    end)
+    pcall(function()
+        local p = Players[playerID]
+        local tech = p:GetTechs():GetResearchingTech()
+        snap.player = {
+            gold = math.floor(p:GetTreasury():GetGold()),
+            researching = (tech ~= nil) and tech or -1,
+        }
     end)
     return snap
 end
@@ -138,6 +154,28 @@ local function diff_player(playerID, before, book)
             book("city.lost", "city", "c" .. cid, "exists", "true", "false")
         end
     end
+    -- treasury / research / per-city production (digest parity: Codex P1-2)
+    if before.player ~= nil and after.player ~= nil then
+        if ifloor(before.player.gold) ~= ifloor(after.player.gold) then
+            book("player.gold", "player", "p" .. playerID, "gold",
+                 ifloor(before.player.gold), ifloor(after.player.gold))
+        end
+        if before.player.researching ~= after.player.researching then
+            book("player.research_set", "player", "p" .. playerID,
+                 "researching", tostring(before.player.researching),
+                 tostring(after.player.researching))
+        end
+    end
+    if after.cities ~= nil and before.cities ~= nil then
+        for cid, c in pairs(after.cities) do
+            local b = before.cities[cid]
+            if b ~= nil and c.production ~= b.production then
+                book("city.production_set", "city", "c" .. cid,
+                     "production", tostring(b.production),
+                     tostring(c.production))
+            end
+        end
+    end
 end
 
 -- -- handshake -------------------------------------------------------------
@@ -174,14 +212,17 @@ function OnPlayerTurnStartComplete(playerID)
     if not PUPPET_PLAYERS[playerID] then
         return
     end
-    -- Step 1: capture per-unit state, then freeze ALL of the puppet's units
-    -- (zero movement) so the built-in AI cannot act during our lease.
-    lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
-              snapshot = snapshot_player(playerID) }
+    -- Step 1: freeze ALL of the puppet's units (zero movement) so the
+    -- built-in AI cannot act during our lease, THEN snapshot. Order is
+    -- load-bearing (Codex P1-1): the snapshot is the release-diff baseline,
+    -- so it must capture the FROZEN state — snapshotting first would book
+    -- our own freeze (movement 2->0) as an undeclared violation at release.
     local pUnits = Players[playerID]:GetUnits()
     for _, unit in pUnits:Members() do
         UnitManager.FinishMoves(unit)
     end
+    lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
+              snapshot = snapshot_player(playerID) }
     print("PUPPET_ACTIVE|true")
 end
 

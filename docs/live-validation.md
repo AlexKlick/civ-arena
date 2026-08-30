@@ -173,3 +173,68 @@ scripted FakeMod with fake-only `Simulate.*` commands to fire wire-
 invisible engine events). Gate: 18/18 on the wire+preflight files; full
 suite count in the M14a commit. Nothing live yet — every live step above
 still pending operator hands.
+
+### 2026-08-30 — M14b code leg + Codex round 1 (11 findings: 5 P1, 6 P2 → all fixed and pinned; 363 passed + 1 skipped)
+
+Mod v0.2 (Status polling, ambient recorder, canonical rows, whole-board
+digest) + the adapter phase surface (begin/end phase, D7 experiment,
+digest-cached hash, mutation journal) + the exclusive-control driver —
+all rehearsed against the REAL referee machinery over the fake wire.
+Zero changes under `arena/`, `session/`, `agents/` (verified by diff).
+
+Codex (gpt-5.6-sol) findings and their fixes:
+
+- **P1-1 LIVE-ONLY — the freeze booked itself as a violation**: the hook
+  snapshotted BEFORE `FinishMoves`, so every frozen unit diffed 2→0 at
+  release as an undeclared actual. Fixed: freeze FIRST, then snapshot
+  (the snapshot is the release baseline). Pinned by
+  `test_freeze_snapshots_the_frozen_state`.
+- **P1-2 LIVE-ONLY — recorder/digest coverage gap**: recorder covered
+  units/cities only; the digest additionally covered gold/research —
+  engine effects could move state with no ledger row to flag. Partially
+  fixed: the recorder now also books gold/research/production-name
+  (digest parity). RESIDUAL — DECLARED: districts, build queues,
+  promotions, tile ownership are outside BOTH the recorder and the
+  digest; nothing may claim live watchdog authority over them (the
+  limitation is written into the mod source and pinned by test).
+- **P1-3 LIVE-ONLY — lease identity unchecked**: begin_phase accepted any
+  `PUPPET_ACTIVE=true`. Fixed: the wait requires LEASE_PLAYER == player
+  AND LEASE_TURN == turn; an engaged lease for anyone else refuses.
+- **P1-4 LIVE-ONLY — phase-end hash raced the next player**: post-release
+  digest polls could hash foreign activity into TURN_END and fake idle
+  drift. Fixed STRUCTURALLY, not by timing: phase hashes are
+  owner-scoped (only the phase owner's digest rows) and SEALED at
+  end_phase — later polls cannot move them (`filter_digest_rows` +
+  `_sealed_hash`).
+- **P1-5 — partial-run rerun spliced attempts**: the guard only rejected
+  finished logs. Fixed: ANY existing events.jsonl refuses the rerun.
+- **P2-6 — live envelope lacked replay parity**: MATCH_END now carries
+  `aborted`/`final_state_hash`/`scores` (scores empty until M14c).
+- **P2-7 — tap IO could break the authority path**: TapConnection
+  degrades to closed on the first OSError; game responses never orphan.
+- **P2-8 — gate ignored digest**: require_mod now requires
+  freeze+ledger+digest (state_hash depends on it).
+- **P2-9 — float tripwire missed spellings**: `.5`, `1.`, `1e3`, `nan`,
+  `inf`, `+7`, `1_0` all fail closed now; only plain integers are
+  canonical numbers on the wire.
+- **P2-10 (future M14d) — act must refresh the digest**: contract
+  written into the act stub; lands with the action surface.
+- **P2-11 — setup absorbed S5 failures into S1**: digest seeding catches
+  LuaError too, so the smoke's stage codes name the failing layer.
+
+### 2026-08-30 — operator preflight attempt 1 (launch blocked, recorded)
+
+CLI game launch FAILED on this host: `/usr/games/steam -applaunch 289070`
+and the `steam://rungameid/289070` URI both start a second steam.sh that
+never hands the request to the week-old `-silent` client (pid 1245205,
+DISPLAY=:1); no Civ6 process, no aspyr-media tree, no :4318 listener.
+Runtime update downloads DID run. Conclusion: launch must be operator-
+clicked in the graphical session (the protocol's R10 path). AppOptions
+path still unconfirmed — §6 runbook step 2 pending the first successful
+launch.
+
+Post-M14 backlog (decided with the operator, 2026-08-30): once the live
+control plane is proven, **glm-5.3 (Z.AI) enters as the live-leg LLM
+opponent** — config-only per the M14 lane exploration (own `llm:` block,
+Z.AI base URL, key env var name; the arena's per-agent client wiring
+already supports two LLM agents).

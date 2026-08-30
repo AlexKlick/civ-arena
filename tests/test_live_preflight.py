@@ -73,6 +73,24 @@ async def test_require_mod_refuses_when_mod_absent():
                                        "PUPPET_ACTIVE|false"])])
 
 
+async def test_require_mod_refuses_without_digest():
+    """Codex P2-8: state_hash cannot operate without the digest — the gate
+    requires freeze AND ledger AND digest."""
+
+    async def check(adapter, _server):
+        await adapter.setup({})
+        with pytest.raises(RuntimeError, match="digest required"):
+            await adapter.require_mod()
+        await adapter.teardown()
+
+    canned = STATUS_DIGEST + [(0, "Puppeteer.Handshake",
+                               ["MOD_PRESENT|true", "MOD_VERSION|0.2.0-x",
+                                "SUPPORTS_FREEZE|true",
+                                "SUPPORTS_LEDGER|true",
+                                "SUPPORTS_DIGEST|false"])]
+    await with_mod(None, check, canned=canned)
+
+
 def test_parse_handshake_fail_closed():
     # garbage lines never produce a True capability
     doc = parse_handshake(["random noise", "SUPPORTS_FREEZE|true"])

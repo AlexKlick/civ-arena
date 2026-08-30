@@ -40,25 +40,34 @@ from civ_arena.strategy.store import StrategyStore
 
 class TapConnection(GameConnection):
     """Every command + response appended to wire.jsonl — diagnostic
-    transcript, explicitly NOT a trust root (the event log is)."""
+    transcript, explicitly NOT a trust root (the event log is). A transcript
+    failure must never break the authority path (Codex P2-7): the tap
+    degrades to closed on the first I/O error, the game response still
+    reaches the adapter."""
 
     def __init__(self, host: str, port: int, tap: Path) -> None:
         super().__init__(host, port)
         self._tap = tap
         self._fh = None
+        self._tap_broken = False
 
     async def _locked_execute(
         self, state_index: int, lua_code: str, timeout: float
     ) -> list[str]:
         t0 = time.monotonic()
         lines = await super()._locked_execute(state_index, lua_code, timeout)
-        if self._fh is None:
-            self._fh = self._tap.open("a", encoding="utf-8")
-        self._fh.write(json.dumps({
-            "state": state_index, "lua": lua_code,
-            "ms": round((time.monotonic() - t0) * 1000, 1), "lines": lines,
-        }) + "\n")
-        self._fh.flush()
+        if not self._tap_broken:
+            try:
+                if self._fh is None:
+                    self._fh = self._tap.open("a", encoding="utf-8")
+                self._fh.write(json.dumps({
+                    "state": state_index, "lua": lua_code,
+                    "ms": round((time.monotonic() - t0) * 1000, 1),
+                    "lines": lines,
+                }) + "\n")
+                self._fh.flush()
+            except OSError:
+                self._tap_broken = True
         return lines
 
     async def disconnect(self) -> None:
@@ -129,12 +138,20 @@ class LiveDriver:
         )
 
     async def match_end(self, final_turn: int, extra: dict[str, Any]) -> None:
+        # Arena.run envelope parity (Codex P2-6): replay reads
+        # final_state_hash and _strip walks these fields — a live log must
+        # carry the same keys (scores stay empty until the sim-shaped
+        # observe surface lands in M14c; live matches are not corpus
+        # members, so projection tolerates the empty civ table).
         summary = {
             "match_id": self.spec.match_id,
             "game_instance_id": self.game_instance_id,
             "final_turn": final_turn,
+            "aborted": None,
             "violations_total": self.referee.violation_count(),
+            "final_state_hash": self.adapter.state_hash(),
             "telemetry": self.telemetry.snapshot(),
+            "scores": {},
             **extra,
         }
         self._write("MATCH_END", turn=final_turn, summary=summary)
@@ -163,13 +180,13 @@ async def phase_exclusive_control(
     issue ZERO commands. Success = 0 violations and identical digests
     bracketing the lease."""
     events = run_dir / "events.jsonl"
-    if events.exists() and any(
-            json.loads(line).get("kind") == "MATCH_END"
-            for line in events.read_text().splitlines() if line.strip()):
+    if events.exists() and events.stat().st_size > 0:
+        # ANY prior content refuses the rerun (Codex P1-5): a partial log
+        # from a timed-out attempt must never gain a second MATCH_START —
+        # replay and projection would consume a mixed pair of attempts
         raise RuntimeError(
-            f"{events} already holds a finished match — re-running would "
-            "append a second MATCH_START and corrupt the record; use a "
-            "fresh --run-id")
+            f"{events} already exists — appending would corrupt the trust "
+            "root (partial or finished); use a fresh --run-id")
     run_dir.mkdir(parents=True, exist_ok=True)
     agent = spec.agents[0]
     driver = LiveDriver(spec, adapter, run_dir,
