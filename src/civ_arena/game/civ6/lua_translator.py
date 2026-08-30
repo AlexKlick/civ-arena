@@ -23,15 +23,25 @@ print("---END---")
 
 
 def overview_read() -> str:
-    """Minimal omniscient overview: turn + alive majors (referee scope only)."""
+    """Minimal omniscient overview: turn + alive majors (referee scope only).
+
+    Live-learned (2026-08-30, first attach): the global ``Players`` table
+    carries entries with MISSING methods (free agents / specials), and
+    ``GetAliveMajors()`` results may lack accessors — so every call is
+    nil-guarded and the player id comes from the iteration KEY, never
+    ``p:GetID()``. An unguarded method call dies as "function expected
+    instead of nil" and kills the whole read.
+    """
     return """
 print("OV|1")
 print("TURN|" .. Game.GetCurrentGameTurn())
-local players = PlayerManager.GetAliveMajors()
 local count = 0
-for _, p in ipairs(players) do
-    count = count + 1
-    print("PLAYER|" .. p:GetID() .. "|" .. p:GetCivilizationTypeName())
+for pid, p in pairs(Players) do
+    if p.IsAlive ~= nil and p.IsMajor ~= nil and p.IsBarbarian ~= nil
+        and p:IsAlive() and p:IsMajor() and not p:IsBarbarian() then
+        count = count + 1
+        print("PLAYER|" .. pid .. "|major")
+    end
 end
 print("ALIVE|" .. count)
 print("---END---")
@@ -46,20 +56,18 @@ def lua_error_probe() -> str:
 def mod_handshake() -> str:
     """PuppeteerMod capability handshake — the phase-1 live gate.
 
-    Tolerates both mod shapes: v0.1's Handshake() RETURNS a multi-line
-    string (printed here line-by-line so each row arrives as its own
-    message), and a print-direct Handshake() needs no help. ``Puppeteer``
-    being nil (mod absent/disabled) is an answer, not an error.
+    Live-learned (2026-08-30): the tuner's Lua lexer rejects backslash
+    escapes in patterns ("unfinished string near '[^'"), so no gmatch —
+    the mod's print-direct rows ARE the output, and a string-returning
+    entry point gets its payload printed WHOLE (the parser splits
+    embedded newlines). ``Puppeteer`` nil is an answer, not an error.
     """
     return """
 if Puppeteer == nil then
     print("MOD_PRESENT|false")
 else
     print("MOD_PRESENT|true")
-    local hs = Puppeteer.Handshake()
-    if hs ~= nil then
-        for line in string.gmatch(hs, "[^\n]+") do print(line) end
-    end
+    Puppeteer.Handshake()
 end
 print("---END---")
 """
@@ -70,31 +78,29 @@ def mod_status() -> str:
 
     The vendored connection drains unsolicited messages around every
     command, so hook-time prints are unreliable; Status() is the only
-    sound way to observe lease state.
+    sound way to observe lease state. Status() RETURNS its rows — one
+    multi-line print, split newline-wise by the parser.
     """
     return """
 if Puppeteer == nil or Puppeteer.Status == nil then
     print("MOD_STATUS|unavailable")
 else
     local s = Puppeteer.Status()
-    if s ~= nil then
-        for line in string.gmatch(s, "[^\n]+") do print(line) end
-    end
+    if s ~= nil then print(s) end
 end
 print("---END---")
 """
 
 
 def mod_digest() -> str:
-    """Puppeteer.Digest() — the live before/after state digest rows."""
+    """Puppeteer.Digest() — the live before/after state digest rows.
+    Print-direct in v0.2; a returning Digest prints its payload whole."""
     return """
 if Puppeteer == nil or Puppeteer.Digest == nil then
     print("MOD_DIGEST|unavailable")
 else
     local d = Puppeteer.Digest()
-    if d ~= nil then
-        for line in string.gmatch(d, "[^\n]+") do print(line) end
-    end
+    if d ~= nil then print(d) end
 end
 print("---END---")
 """

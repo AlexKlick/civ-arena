@@ -11,4 +11,10 @@
       <File>PuppeteerMod.lua</File>
     </AddGameplayScripts>
   </Components>
+  <!-- live-learned 2026-08-30: Civ VI refuses to load a component file
+       that is not ALSO declared here ("Invalid file reference in action,
+       did you forgot to add it in <Files>?") -->
+  <Files>
+    <File>PuppeteerMod.lua</File>
+  </Files>
 </Mod>

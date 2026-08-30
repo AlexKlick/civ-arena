@@ -12,7 +12,10 @@ import pytest
 from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
-from civ_arena.game.civ6.response_parser import parse_handshake, parse_kv_lines
+from civ_arena.game.civ6.response_parser import (
+    parse_handshake,
+    parse_kv_lines,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -89,6 +92,13 @@ async def test_require_mod_refuses_without_digest():
                                 "SUPPORTS_LEDGER|true",
                                 "SUPPORTS_DIGEST|false"])]
     await with_mod(None, check, canned=canned)
+
+
+def test_parse_kv_lines_splits_embedded_newlines():
+    """Live-learned 2026-08-30: one print() of a multi-line string arrives
+    as ONE payload — the parser must flatten before parsing."""
+    parsed = parse_kv_lines(["TURN|1\nPUPPET_ACTIVE|true\nLEASE_PLAYER|0"])
+    assert parsed == {"TURN": 1, "PUPPET_ACTIVE": True, "LEASE_PLAYER": 0}
 
 
 def test_parse_handshake_fail_closed():

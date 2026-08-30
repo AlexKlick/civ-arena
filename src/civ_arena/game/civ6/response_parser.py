@@ -11,6 +11,16 @@ _PLAIN_INT = re.compile(r"^-?\d+$")
 _NUMERICISH = re.compile(r"^[-+0-9.eE_]+$")
 
 
+def _split_lines(lines: list[str]) -> list[str]:
+    """One print() of a multi-line string arrives as ONE payload with
+    embedded newlines (live-learned on the first attach) — flatten every
+    incoming element before parsing."""
+    out: list[str] = []
+    for raw in lines:
+        out.extend(raw.splitlines())
+    return out
+
+
 def parse_kv_lines(lines: list[str]) -> dict[str, Any]:
     """Parse ``KEY|value`` lines into a dict (last write wins).
 
@@ -18,7 +28,7 @@ def parse_kv_lines(lines: list[str]) -> dict[str, Any]:
     under ``KEY`` as a list of tuples-as-lists.
     """
     out: dict[str, Any] = {}
-    for line in lines:
+    for line in _split_lines(lines):
         line = line.strip()
         if not line or line == "---END---":
             continue
@@ -76,7 +86,7 @@ def parse_ledger_lines(lines: list[str]) -> list[dict[str, Any]]:
     never silently shrink the watchdog's actual multiset.
     """
     docs: list[dict[str, Any]] = []
-    for line in lines:
+    for line in _split_lines(lines):
         line = line.strip()
         if not line or line.startswith("---END---"):
             continue
@@ -101,7 +111,7 @@ def parse_ledger_lines(lines: list[str]) -> list[dict[str, Any]]:
 
 def parse_digest(lines: list[str]) -> str:
     """The DIGEST| payload — the live state-hash source text."""
-    for line in lines:
+    for line in _split_lines(lines):
         line = line.strip()
         if line.startswith("DIGEST|"):
             return line[len("DIGEST|"):]

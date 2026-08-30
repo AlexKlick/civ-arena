@@ -71,14 +71,15 @@ class FakeMod:
         return f"DIGEST|rehearsal|turn={self.turn}|nonce={self.state_nonce}"
 
     def _status_rows(self) -> list[str]:
+        # ONE embedded-newline row: the real mod's Status() RETURNS its
+        # payload, so one print() carries all rows — the parser must split
+        # them (rehearses the live wire shape, live-learned 2026-08-30).
         active = self.lease is not None
         player = self.lease["player"] if self.lease else -1
         turn = self.lease["turn"] if self.lease else -1
         return [
-            f"TURN|{self.turn}",
-            f"PUPPET_ACTIVE|{str(active).lower()}",
-            f"LEASE_PLAYER|{player}",
-            f"LEASE_TURN|{turn}",
+            f"TURN|{self.turn}\nPUPPET_ACTIVE|{str(active).lower()}"
+            f"\nLEASE_PLAYER|{player}\nLEASE_TURN|{turn}"
         ]
 
     def respond(self, code: str) -> list[str] | None:
