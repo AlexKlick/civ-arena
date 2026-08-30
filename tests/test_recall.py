@@ -99,7 +99,7 @@ def test_corpus_rejects_log_without_roster(tmp_path: Path):
     (d / "events.jsonl").write_text(
         json.dumps({"kind": "TURN_END", "seq": 0, "match_id": "empty-run",
                     "turn": 1}) + "\n")
-    with pytest.raises(ValueError, match="no MATCH_START roster"):
+    with pytest.raises(ValueError, match="no well-formed MATCH_START roster"):
         RecallCorpus.from_runs(tmp_path, "self", ["empty-run"])
 
 
@@ -345,7 +345,7 @@ def test_corpus_rejects_internal_identity_mismatch(tmp_path: Path):
     text = path.read_text().replace('"match_id": "m-replay"',
                                     '"match_id": "m"')
     path.write_text(text)
-    with pytest.raises(ValueError, match="different match_id internally"):
+    with pytest.raises(ValueError, match="no well-formed MATCH_START roster"):
         RecallCorpus.from_runs(tmp_path, "self", ["m-replay"])
 
 
@@ -438,3 +438,78 @@ async def test_replay_with_custom_dir_resolves_corpus_from_source_root(
     elsewhere = tmp_path / "elsewhere" / "replay-out"
     out = await replay_run(runs / "recall-match2", ms, elsewhere)
     assert out["identical"], out.get("first_divergence")
+
+
+# ------------------------------------------------- review round 2 pins
+
+
+def test_corpus_rejects_mixed_lifecycle_injection(tmp_path: Path):
+    # round-2 P2: a foreign MATCH_START + lesson pair appended AFTER a
+    # finished prior must not be relabeled as the prior's lessons
+    _write_run(tmp_path, "prior-a")
+    path = tmp_path / "prior-a" / "events.jsonl"
+    recs = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    injected = _pair("record_lesson", {"text": "foreign injected lesson"},
+                     10, 0, 21, "intruder", "other-match")
+    recs += [dict(r, seq=recs[-1]["seq"] + 1 + i)
+             for i, r in enumerate(injected)]
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                            for r in recs))
+    # match-bound: the foreign appendix is excluded, the prior's own
+    # lessons come through, nothing is relabeled
+    corpus = RecallCorpus.from_runs(tmp_path, "self", ["prior-a"])
+    assert corpus.size() == 4  # roman 3 + turtler 1 — the intruder's lesson never lands
+    assert corpus.query("intruder", "foreign injected lesson") == []
+
+
+def test_corpus_rejects_extra_mixed_match_end(tmp_path: Path):
+    _write_run(tmp_path, "prior-a")
+    path = tmp_path / "prior-a" / "events.jsonl"
+    recs = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+    recs.append({"kind": "MATCH_END", "seq": recs[-1]["seq"] + 1,
+                 "match_id": "prior-a", "turn": 21, "phase_player_id": -1,
+                 "player_id": None, "agent_id": None,
+                 "visibility_scope": "referee", "summary": {}})
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                            for r in recs))
+    with pytest.raises(ValueError, match="not a finished match"):
+        RecallCorpus.from_runs(tmp_path, "self", ["prior-a"])
+
+
+def test_corpus_rejects_short_roster_entries(tmp_path: Path):
+    # round-2 P3: [agent, player] pairs without the policy field are
+    # malformed, not silently filtered
+    _write_run(tmp_path, "short")
+    path = tmp_path / "short" / "events.jsonl"
+    text = path.read_text().replace(
+        '"agents": [["roman", 0, "llm"], ["korean-turtler", 1, "turtler"]]',
+        '"agents": [["roman", 0]]')
+    path.write_text(text)
+    with pytest.raises(ValueError, match="no well-formed MATCH_START roster"):
+        RecallCorpus.from_runs(tmp_path, "self", ["short"])
+
+
+async def test_recall_digest_is_serialization_bounded(tmp_path: Path):
+    # round-2 P2: escaping (backslashes double, non-ASCII sextuples) means
+    # only the SERIALIZED length is real — the referee drops WHOLE lessons
+    # until the digest fits its budget, so the log always equals the feed
+    import json as j
+
+    from civ_arena.arena.referee import RECALL_DIGEST_BUDGET
+
+    nasty = "\\" + "阻" * 279  # maximal escape expansion per char
+    assert len(nasty) == 280
+    corpus = RecallCorpus([
+        {"agent_id": "roman", "match_id": f"p{i}", "turn": 5,
+         "lesson_id": f"l{i}", "text": nasty, "about": ""}
+        for i in range(5)
+    ])
+    referee, _log, ctx = await _referee(tmp_path, corpus)()
+    doc = await referee.recall_lessons(ctx, "阻 blocker")
+    digest = doc["recalled"]
+    serialized = j.dumps(digest, sort_keys=True, default=str)
+    assert len(serialized) <= RECALL_DIGEST_BUDGET
+    # whole lessons dropped, never a mid-lesson cut: every remaining lesson
+    # is complete
+    for lesson in digest["lessons"]:
+        assert lesson["text"] == nasty

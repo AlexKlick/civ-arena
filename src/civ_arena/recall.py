@@ -25,18 +25,27 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _roster(records: list[dict[str, Any]]) -> list[tuple[str, int]]:
-    """(agent_id, player_id) pairs from the run's MATCH_START."""
+    """(agent_id, player_id) pairs from the run's MATCH_START. Fail-closed:
+    every entry must be exactly (str, non-bool int, str) — silently
+    filtering a malformed entry could mis-attribute another agent's
+    lessons."""
     for rec in records:
         if rec.get("kind") != "MATCH_START":
             continue
         config = rec.get("config") if isinstance(rec.get("config"), dict) else {}
-        return [
-            (entry[0], entry[1])
-            for entry in (config.get("agents") or [])
-            if isinstance(entry, list) and len(entry) >= 2
-            and isinstance(entry[0], str) and isinstance(entry[1], int)
-            and not isinstance(entry[1], bool)
-        ]
+        entries = config.get("agents") or []
+        if not isinstance(entries, list) or not entries:
+            return []
+        roster: list[tuple[str, int]] = []
+        for entry in entries:
+            if not isinstance(entry, list) or len(entry) != 3 \
+                    or not isinstance(entry[0], str) or not entry[0] \
+                    or not isinstance(entry[1], int) \
+                    or isinstance(entry[1], bool) \
+                    or not isinstance(entry[2], str):
+                return []  # malformed -> caller reports "no valid roster"
+            roster.append((entry[0], entry[1]))
+        return roster
     return []
 
 
@@ -81,30 +90,34 @@ class RecallCorpus:
                     f"recall corpus names missing run {prior!r} "
                     f"under {run_dir}")
             records = load_records(path)
+            # bind EVERY record to the requested match: a concatenated log
+            # must not relabel a foreign match's lessons as this prior's
+            records = [r for r in records if r.get("match_id") == prior]
             roster = _roster(records)
             if not roster:
                 raise ValueError(
-                    f"recall corpus run {prior!r} has no MATCH_START roster")
+                    f"recall corpus run {prior!r} has no well-formed "
+                    "MATCH_START roster (missing, malformed, or carrying a "
+                    "foreign match_id)")
             starts = [r for r in records if r.get("kind") == "MATCH_START"]
-            if not starts or starts[0].get("match_id") != prior:
+            ends = [r for r in records if r.get("kind") == "MATCH_END"]
+            if len(starts) != 1 or starts[0].get("match_id") != prior:
                 raise ValueError(
-                    f"recall corpus run {prior!r} carries a different "
-                    f"match_id internally ({starts[0].get('match_id')!r} "
-                    "if any) — replay twins and misplaced dirs are not "
-                    "corpus members")
-            if not any(r.get("kind") == "MATCH_END"
-                       and r.get("match_id") == prior for r in records):
+                    f"recall corpus run {prior!r} must carry exactly one "
+                    f"MATCH_START with a matching id (got {len(starts)}) — "
+                    "replay twins and misplaced dirs are not corpus members")
+            if len(ends) != 1 or records[-1].get("kind") != "MATCH_END":
                 raise ValueError(
                     f"recall corpus run {prior!r} is not a finished match "
-                    "(no MATCH_END) — corpus members must be immutable")
+                    "(exactly one terminal MATCH_END required) — corpus "
+                    "members must be immutable")
             players = [pid for _, pid in roster]
             agents = [agent for agent, _ in roster]
             if len(set(players)) != len(players) \
-                    or len(set(agents)) != len(agents) \
-                    or any(not a for a in agents):
+                    or len(set(agents)) != len(agents):
                 raise ValueError(
                     f"recall corpus run {prior!r} has a malformed roster "
-                    f"(duplicate or empty identity): {roster!r}")
+                    f"(duplicate identity): {roster!r}")
             store = StrategyStore.from_log(records)
             for agent_id, pid in roster:
                 for lesson in store.lesson_list(pid):

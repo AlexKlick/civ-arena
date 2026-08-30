@@ -19,6 +19,7 @@ closed.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -57,6 +58,12 @@ def _log_safe(value: Any) -> Any:
     contract only needs to be canonical-safe, not forensic."""
     return value if isinstance(value, (str, int, bool)) or value is None \
         else None
+
+
+# the recall digest's serialized-size ceiling: the config enforces
+# max_result_chars >= RECALL_RESULT_FLOOR (see config.py) so a digest built
+# under this budget always reaches the model untruncated
+RECALL_DIGEST_BUDGET = 3900
 
 
 @dataclass
@@ -394,6 +401,16 @@ class Referee:
         lessons = (self.recall.query(ctx.agent_id, query)
                    if isinstance(query, str) else [])
         digest = {"query": query, "lessons": lessons}
+        # bound the SERIALIZED digest (escaping included — json.dumps
+        # expands backslashes and non-ASCII, so a character-count floor
+        # cannot bound it) by dropping WHOLE lessons from the tail until it
+        # fits: whatever lands in the log then reaches the model untruncated
+        # under the config-enforced result cap, and the log-vs-feed contract
+        # holds for any lesson content
+        while lessons and len(json.dumps(
+                digest, sort_keys=True, default=str)) > RECALL_DIGEST_BUDGET:
+            lessons.pop()
+            digest = {"query": query, "lessons": lessons}
         canonical(digest)  # non-canonical fails BEFORE any record is written
         doc = {"status": "accepted", "tool": "recall_lessons",
                "recalled": digest}

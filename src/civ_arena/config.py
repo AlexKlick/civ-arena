@@ -216,16 +216,17 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             raise ConfigError(
                 "match.recall_runs entries must be bare match ids "
                 "([A-Za-z0-9][A-Za-z0-9._-]{0,63}), not paths")
-        # the referee logs the FULL recall digest; the runtime truncates
-        # stringified tool results at max_result_chars. 5 lessons x (280-char
-        # text + ids + turn) + the 280-char query fits in ~2500 chars — a
-        # smaller cap would silently feed the model less than the log claims
+        # the referee bounds the recall digest's SERIALIZED size to 3900
+        # chars (dropping whole lessons if needed), so a result cap at or
+        # above this floor guarantees the model receives exactly what the
+        # log recorded — character-count arithmetic alone cannot bound the
+        # JSON-escaped form (backslashes double, non-ASCII sextuples)
         for agent in agents:
             if agent.policy == "llm" and agent.llm is not None \
-                    and agent.llm.max_result_chars < 2500:
+                    and agent.llm.max_result_chars < 4000:
                 raise ConfigError(
                     f"agents[{agent.agent_id}]: max_result_chars must be "
-                    ">= 2500 when recall_runs is set — the recall digest "
+                    ">= 4000 when recall_runs is set — the recall digest "
                     "must reach the model untruncated")
 
     return MatchSpec(
