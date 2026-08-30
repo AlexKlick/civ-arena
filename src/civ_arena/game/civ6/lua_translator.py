@@ -100,4 +100,49 @@ print("---END---")
 """
 
 
+# -- mod command surface (v0.2) ----------------------------------------------
+
+def set_puppet(player_id: int, enabled: bool) -> str:
+    return f"Puppeteer.SetPuppet({player_id}, {str(enabled).lower()})"
+
+
+def begin_ambient_window(player_id: int) -> str:
+    return f"Puppeteer.BeginAmbientWindow({player_id})"
+
+
+def end_ambient_window(player_id: int) -> str:
+    return f"Puppeteer.EndAmbientWindow({player_id})"
+
+
+def dump_ledger() -> str:
+    return "Puppeteer.DumpLedger()"
+
+
+def dump_ambient() -> str:
+    return "Puppeteer.DumpAmbient()"
+
+
+def release(player_id: int) -> str:
+    """Idempotent lease release; also books the lease re-diff as actuals."""
+    return f"Puppeteer.Release({player_id})"
+
+
+def restore_unit(unit_id: str) -> str:
+    """'u7' -> RestoreUnit(7): the mod keys snapshots by numeric engine id."""
+    num = unit_id[1:] if unit_id[:1] in ("u", "c") else unit_id
+    return f"Puppeteer.RestoreUnit({num})"
+
+
+def finish_all_moves(player_id: int) -> str:
+    """D7-H2 primitive: zero remaining movement so the engine auto-completes."""
+    return f"Puppeteer.FinishAllMoves({player_id})"
+
+
+def request_end_turn(player_id: int) -> str:
+    """D7-H1: ENDTURN via the UI action bus inside the player context
+    (InGame state — run with execute_write, not execute_read)."""
+    return (f"Puppeteer.WithPlayerContext({player_id}, function() "
+            "UI.RequestAction(ActionTypes.ACTION_ENDTURN) end)")
+
+
 _ = lua_error_probe  # exported for tests

@@ -16,6 +16,13 @@ from civ_arena.game.civ6.response_parser import parse_handshake, parse_kv_lines
 
 REPO = Path(__file__).resolve().parents[1]
 
+# canned answers for setup()'s mirror + digest seeding when no FakeMod rides
+STATUS_DIGEST = [
+    (0, "Puppeteer.Status",
+     ["TURN|1", "PUPPET_ACTIVE|false", "LEASE_PLAYER|-1", "LEASE_TURN|-1"]),
+    (0, "Puppeteer.Digest", ["DIGEST|canned-board"]),
+]
+
 
 async def with_mod(mod: FakeMod | None, fn, canned=None):
     server = FakeTunerServer(responses=canned or [], mod=mod)
@@ -45,10 +52,11 @@ async def test_require_mod_refuses_when_caps_false():
             await adapter.require_mod()
         await adapter.teardown()
 
-    canned = [(0, "Puppeteer.Handshake",
-               ["MOD_PRESENT|true", "MOD_VERSION|0.2.0-x",
-                "SUPPORTS_FREEZE|false", "SUPPORTS_LEDGER|true",
-                "SUPPORTS_DIGEST|true"])]
+    canned = STATUS_DIGEST + [(0, "Puppeteer.Handshake",
+                               ["MOD_PRESENT|true", "MOD_VERSION|0.2.0-x",
+                                "SUPPORTS_FREEZE|false",
+                                "SUPPORTS_LEDGER|true",
+                                "SUPPORTS_DIGEST|true"])]
     await with_mod(None, check, canned=canned)
 
 
@@ -60,7 +68,9 @@ async def test_require_mod_refuses_when_mod_absent():
         await adapter.teardown()
 
     await with_mod(None, check,
-                   canned=[(0, "Puppeteer", ["MOD_PRESENT|false"])])
+                   canned=[(0, "Puppeteer", ["MOD_PRESENT|false"]),
+                           (0, "TS|", ["TURN|1", "LOCAL|0",
+                                       "PUPPET_ACTIVE|false"])])
 
 
 def test_parse_handshake_fail_closed():

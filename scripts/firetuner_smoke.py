@@ -104,15 +104,7 @@ class Smoke:
 
 
 async def fake_mode(as_json: bool) -> int:
-    server = FakeTunerServer(
-        responses=[
-            (0, "TS|", ["TURN|1", "LOCAL|0", "PUPPET_ACTIVE|false"]),
-            (0, "OV|", ["OV|1", "TURN|1", "ALIVE|2",
-                        "PLAYER|0|CIVILIZATION_ROME",
-                        "PLAYER|1|CIVILIZATION_KOREA"]),
-        ],
-        mod=FakeMod(),
-    )
+    server = FakeTunerServer(mod=FakeMod())
     port = await server.start()
     try:
         smoke = Smoke(FireTunerAdapter("127.0.0.1", port))

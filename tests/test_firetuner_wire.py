@@ -13,6 +13,13 @@ from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
 
 TURN_LINES = ["TURN|7", "LOCAL|0", "PUPPET_ACTIVE|false"]
 
+# setup() seeds its mirror + digest cache: canned answers for those polls
+STATUS_DIGEST_CANNED = [
+    (0, "Puppeteer.Status",
+     ["TURN|7", "PUPPET_ACTIVE|false", "LEASE_PLAYER|-1", "LEASE_TURN|-1"]),
+    (0, "Puppeteer.Digest", ["DIGEST|canned-board"]),
+]
+
 
 async def with_server(responses, fn):
     server = FakeTunerServer(responses)
@@ -106,10 +113,12 @@ async def test_firetuner_adapter_poll_and_overview():
         await adapter.setup({})
         caps = adapter.capabilities()
         assert caps.acts is False and caps.rollback is False and caps.turn_events
+        assert caps.state_hash, "M14b: the digest hash is live"
 
+        # async by seam contract; body is the local mirror (no wire traffic)
         phase = await adapter.current_phase()
         assert phase["turn"] == 7
-        assert phase["raw"]["PUPPET_ACTIVE"] is False
+        assert phase["phase_player"] == -1
 
         overview = await adapter.observe(
             ObserveRequest(kind=ObserveKind.OVERVIEW, player_id=0))
@@ -117,7 +126,7 @@ async def test_firetuner_adapter_poll_and_overview():
         assert overview["ALIVE"] == 2
         await adapter.teardown()
 
-    responses = [
+    responses = STATUS_DIGEST_CANNED + [
         (0, "TS|", TURN_LINES),
         (0, "OV|", ["OV|1", "TURN|7", "ALIVE|2",
                    "PLAYER|0|CIVILIZATION_ROME", "PLAYER|1|CIVILIZATION_KOREA"]),
@@ -126,13 +135,13 @@ async def test_firetuner_adapter_poll_and_overview():
 
 
 async def test_adapter_gaps_point_at_live_validation_doc():
+    """The NOT-YET-implemented surface stays pinned to the doc; landed
+    surface (phases, digest hash, mutation journal) must NOT raise."""
     async def check(port: int, _server: FakeTunerServer):
         adapter = FireTunerAdapter("127.0.0.1", port)
         await adapter.setup({})
         for call in (
             adapter.snapshot,
-            adapter.state_hash,
-            adapter.drain_mutations,
             adapter.export_state,
             lambda: adapter.visibility_for(0),
             lambda: adapter.import_state({}),
@@ -141,13 +150,19 @@ async def test_adapter_gaps_point_at_live_validation_doc():
                 call()
         for async_call in (
             lambda: adapter.act(None),
-            lambda: adapter.begin_phase(0, 1),
-            lambda: adapter.end_phase(0, 1),
             lambda: adapter.observe(ObserveRequest(
                 kind=ObserveKind.UNITS, player_id=0)),
+            lambda: adapter.observe(ObserveRequest(
+                kind=ObserveKind.CITIES, player_id=0)),
+            lambda: adapter.observe(ObserveRequest(
+                kind=ObserveKind.VISIBLE_MAP, player_id=0)),
+            lambda: adapter.observe(ObserveRequest(
+                kind=ObserveKind.AVAILABLE_RESEARCH, player_id=0)),
+            lambda: adapter.observe(ObserveRequest(
+                kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=0)),
         ):
             with pytest.raises(NotImplementedError, match="live-validation"):
                 await async_call()
         await adapter.teardown()
 
-    await with_server([], check)
+    await with_server(STATUS_DIGEST_CANNED, check)

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_FLOAT_RE = re.compile(r"^-?\d+\.\d+$")
 
 
 def parse_kv_lines(lines: list[str]) -> dict[str, Any]:
@@ -48,3 +51,52 @@ def parse_handshake(lines: list[str]) -> dict[str, Any]:
         "supports_ledger": present and parsed.get("SUPPORTS_LEDGER") is True,
         "supports_digest": present and parsed.get("SUPPORTS_DIGEST") is True,
     }
+
+
+def _coerce_strict(value: str) -> Any:
+    """Canonical-int tripwire: a float-looking token fails LOUDLY here,
+    before it can ride an event log canonical() would reject."""
+    if _FLOAT_RE.match(value):
+        raise ValueError(f"non-canonical float on the wire: {value!r}")
+    return _coerce(value)
+
+
+def parse_ledger_lines(lines: list[str]) -> list[dict[str, Any]]:
+    """LEDGER|/AMBIENT| rows -> MutationRecord docs.
+
+    Row shape (both ledgers): ``<PREFIX>|kind|entity_type|entity_id|attr|
+    before|after``; the prefix sets ``origin`` ("ledger"=undeclared actual,
+    "ambient"=declared manifest). Malformed rows raise — a torn row must
+    never silently shrink the watchdog's actual multiset.
+    """
+    docs: list[dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("---END---"):
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix not in ("LEDGER", "AMBIENT"):
+            raise ValueError(f"non-ledger row in ledger dump: {line!r}")
+        parts = rest.split("|")
+        if len(parts) != 6:
+            raise ValueError(f"malformed {prefix} row (want 6 fields): {line!r}")
+        kind, entity_type, entity_id, attr, before, after = parts
+        docs.append({
+            "kind": kind,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "attr": attr,
+            "before": _coerce_strict(before),
+            "after": _coerce_strict(after),
+            "origin": prefix.lower(),
+        })
+    return docs
+
+
+def parse_digest(lines: list[str]) -> str:
+    """The DIGEST| payload — the live state-hash source text."""
+    for line in lines:
+        line = line.strip()
+        if line.startswith("DIGEST|"):
+            return line[len("DIGEST|"):]
+    raise ValueError(f"no DIGEST| row in {lines!r}")

@@ -47,12 +47,16 @@ class FakeMod:
         has_digest: bool = True,
         supports_freeze: bool = True,
         supports_ledger: bool = True,
+        auto_ambient: tuple | None = None,
     ) -> None:
         self.version = version
         self.has_status = has_status
         self.has_digest = has_digest
         self.supports_freeze = supports_freeze
         self.supports_ledger = supports_ledger
+        # engine effect that lands inside every ambient window:
+        # (kind, entity_type, numeric_id, attr, before, after)
+        self.auto_ambient = auto_ambient
         self.puppets: dict[int, bool] = {}
         self.turn = 1
         self.lease: dict[str, int] | None = None
@@ -60,13 +64,11 @@ class FakeMod:
         self.ambient_rows: list[str] = []
         self.state_nonce = 0
 
-    # -- digest: a pure function of state (zero-drift rehearses as equal) --
+    # -- digest: ENGINE STATE ONLY (zero-drift rehearses as equal). Puppet
+    # bookkeeping is mod state, not engine state — the real Digest reads
+    # units/cities/treasury, none of which SetPuppet/Release move.
     def _digest(self) -> str:
-        puppets = ",".join(str(p) for p in sorted(self.puppets)) or "none"
-        lease = ("none" if self.lease is None
-                 else f"p{self.lease['player']}t{self.lease['turn']}")
-        return (f"DIGEST|rehearsal|turn={self.turn}|puppets={puppets}"
-                f"|lease={lease}|nonce={self.state_nonce}")
+        return f"DIGEST|rehearsal|turn={self.turn}|nonce={self.state_nonce}"
 
     def _status_rows(self) -> list[str]:
         active = self.lease is not None
@@ -81,6 +83,13 @@ class FakeMod:
 
     def respond(self, code: str) -> list[str] | None:
         """Rows for a command's Lua code, or None if not mod-shaped."""
+        # game-level probes (the fake IS the whole game, mod included)
+        if 'print("TS|1")' in code:
+            return [f"TURN|{self.turn}", "LOCAL|0", "PUPPET_ACTIVE|false"]
+        if 'print("OV|1")' in code:
+            return ["OV|1", f"TURN|{self.turn}", "ALIVE|2",
+                    "PLAYER|0|CIVILIZATION_ROME",
+                    "PLAYER|1|CIVILIZATION_KOREA"]
         if "Puppeteer.Handshake" in code:
             return [
                 "MOD_PRESENT|true",
@@ -114,6 +123,17 @@ class FakeMod:
         if "Puppeteer.Release" in code:
             self.lease = None
             return ["PUPPET_ACTIVE|false"]
+        m = re.search(r"Puppeteer\.FinishAllMoves\(\s*(\d+)\s*\)", code)
+        if m:
+            return [f"FINISHED_MOVES|{m.group(1)}|0"]
+        if "UI.RequestAction(ActionTypes.ACTION_ENDTURN)" in code:
+            # D7-H1 rehearsal: the engine honors the end-turn request —
+            # the lease drops (OnPlayerTurnDeactivated) and the turn only
+            # advances when the driver simulates it.
+            m = re.search(r"Puppeteer\.WithPlayerContext\(\s*(\d+)", code)
+            if m and self.lease and self.lease["player"] == int(m.group(1)):
+                self.lease = None
+            return ["PUPPET_ACTIVE|false"]
         if "Puppeteer.RestoreUnit" in code:
             return []  # silent, like the mod
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
@@ -121,6 +141,14 @@ class FakeMod:
             return [f"AMBIENT_WINDOW|open|{m.group(1)}"]
         m = re.search(r"Puppeteer\.EndAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
+            # engine effects land inside the window (auto_ambient fixture):
+            # the window diff books them as DECLARED ambient rows
+            if self.auto_ambient is not None:
+                kind, etype, num, attr, before, after = self.auto_ambient
+                prefix = "c" if etype == "city" else "u"
+                self.ambient_rows.append(
+                    f"AMBIENT|{kind}|{etype}|{prefix}{num}"
+                    f"|{attr}|{before}|{after}")
             return [f"AMBIENT_WINDOW|closed|{m.group(1)}"]
 
         # -- Simulate.*: FAKE-ONLY (the live driver must never send these) --

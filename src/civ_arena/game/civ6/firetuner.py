@@ -1,38 +1,136 @@
-"""FireTunerAdapter — the live Civ VI leg, skeleton scope.
+"""FireTunerAdapter — the live Civ VI leg (M14b: phase surface + watchdog).
 
-Working today: connect (vendored wire layer), poll turn state, read an
-omniscient overview in referee scope. Everything else raises
-NotImplementedError naming the missing piece and where to add it — adding
-live support for an arena tool is one lua_translator entry + one
-response_parser entry + one FakeTunerServer canned test, with zero changes
-in arena/, session/, or agents/. See docs/live-validation.md.
+Working: connect (vendored wire layer), the mod handshake gate, turn/lease
+polling (D3: poll, never push — the wire drains unsolicited output around
+every command), phase open/close over the declared ambient window, a
+buffered mutation journal fed by the mod's ledgers, and the whole-board
+digest as the state-hash source.
+
+Still NotImplementedError: the 5 non-OVERVIEW observes, ``visibility_for``,
+``act``, ``snapshot``/``restore``, ``export_state``/``import_state`` — each
+lands per docs/live-validation.md §4 (one translator entry + one parser
+entry + one fake test; zero changes in ``arena/``, ``session/``, or
+``agents/``).
+
+Design notes that cost nothing to forget:
+
+- ``current_phase``/``state_hash`` are SYNC by seam contract, so the
+  adapter keeps a mirror (open player, engine turn) and a digest cache,
+  refreshed after every state-relevant wire operation (setup, begin_phase,
+  end_phase). Pre-hash of command N is exactly post-hash of command N-1 —
+  the invariant the log's hash trail relies on.
+- ``end_phase`` strategy is the D7 experiment (h1 UI ENDTURN / h2
+  FinishMoves / h3 release-only); outcomes are recorded dated in
+  docs/live-validation.md §6 and the winner becomes the default.
+- ``simulate_hook`` is REHEARSAL ONLY (FakeMod ``Simulate.*`` commands);
+  never attached against a real game.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import Callable
 from typing import Any
 
+from civ_arena.canonical import state_hash as _sha
 from civ_arena.game.adapter import (
     AdapterCapabilities,
+    MutationRecord,
     ObserveKind,
     ObserveRequest,
 )
 from civ_arena.game.civ6 import lua_translator, response_parser
-from civ_arena.game.civ6.vendor.connection import GameConnection
+from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
 
 _LIVE_POINTER = (
     "live FireTuner support is not implemented yet — see "
     "docs/live-validation.md §'extending the adapter'"
 )
 
+# (event, player_id) -> fake-side Lua; the driver attaches this ONLY in
+# rehearsal mode. Hook prints are unsolicited and drained in the real wire,
+# so engine-side events exist for the adapter only through their effect on
+# the next Status/Digest poll.
+SimulateHook = Callable[[str, int], str]
+
+
+class _LiveStateView:
+    """Minimal sim-state shim: referee.abort_cleanup reads
+    ``adapter.state.phase_player``/``.turn`` directly, and ``arena/`` is
+    untouchable — so the adapter exposes the mirror under those names."""
+
+    def __init__(self, adapter: FireTunerAdapter) -> None:
+        self._adapter = adapter
+
+    @property
+    def phase_player(self) -> int:
+        return self._adapter._phase_open
+
+    @property
+    def turn(self) -> int:
+        return self._adapter._turn_mirror
+
 
 class FireTunerAdapter:
-    def __init__(self, host: str = "127.0.0.1", port: int = 4318) -> None:
-        self._conn = GameConnection(host, port)
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 4318,
+        conn: GameConnection | None = None,
+        *,
+        end_phase_strategy: str = "h1",
+        poll_interval_s: float = 0.2,
+        poll_timeout_s: float = 10.0,
+        turn_wait_s: float = 120.0,
+        simulate_hook: SimulateHook | None = None,
+    ) -> None:
+        if end_phase_strategy not in ("h1", "h2", "h3"):
+            raise ValueError(
+                f"end_phase_strategy must be h1|h2|h3, got "
+                f"{end_phase_strategy!r}")
+        self._conn = conn if conn is not None else GameConnection(host, port)
+        self._strategy = end_phase_strategy
+        self._poll_interval_s = poll_interval_s
+        self._poll_timeout_s = poll_timeout_s
+        self._turn_wait_s = turn_wait_s
+        self._simulate = simulate_hook
+        self._phase_open = -1
+        self._turn_mirror = -1
+        self._journal: list[MutationRecord] = []
+        self._digest_text: str | None = None
+        self.state = _LiveStateView(self)
 
     # -- lifecycle ---------------------------------------------------------
     async def setup(self, cfg: dict[str, Any]) -> None:
         await self._conn.connect()  # raises ConnectionError with the EnableTuner hint
+        # seed the mirror: the mod's pollable Status when present, else the
+        # plain turn-state probe (pre-0.2 mods / probe-only sessions)
+        try:
+            parsed = await self.poll_status()
+        except (RuntimeError, LuaError):
+            lines = await self._conn.execute_read(
+                lua_translator.poll_turn_state())
+            parsed = response_parser.parse_kv_lines(lines)
+        self._turn_mirror = int(parsed.get("TURN", -1))
+        # digest seeding is best-effort: a mod-absent session still probes
+        # (require_mod refuses later); state_hash stays unavailable until a
+        # digest exists — nothing drives a match without the mod anyway
+        try:
+            await self._refresh_digest()
+        except ValueError:
+            self._digest_text = None
+
+    async def current_phase(self) -> dict[str, Any]:
+        # async by seam contract (the referee awaits it); the mirror itself
+        # is sync state — no wire traffic happens here
+        return {
+            "turn": self._turn_mirror,
+            "phase_player": self._phase_open,
+            # the live engine has no exposed per-player phase index; the
+            # referee only consumes turn + phase_player
+            "phase_index": 0,
+        }
 
     async def teardown(self) -> None:
         await self._conn.disconnect()
@@ -58,28 +156,112 @@ class FireTunerAdapter:
 
     def capabilities(self) -> AdapterCapabilities:
         return AdapterCapabilities(
-            rollback=False, save_load=False, acts=False, state_hash=False,
+            rollback=False, save_load=False, acts=False, state_hash=True,
             turn_events=True,
         )
 
     # -- turn lifecycle ------------------------------------------------------
     async def begin_phase(self, player_id: int, turn: int) -> dict[str, Any]:
-        raise NotImplementedError(
-            f"begin_phase over FireTuner: {_LIVE_POINTER}. The turn-interception "
-            "mod (mods/PuppeteerMod) supplies the freeze/lease/restore handshake."
-        )
+        if self._phase_open != -1:
+            raise RuntimeError(
+                f"phase already open for player {self._phase_open}")
+        await self._await(
+            lambda p: int(p.get("TURN", -1)) == turn,
+            f"engine to reach turn {turn}")
+        await self._conn.execute_read(
+            lua_translator.set_puppet(player_id, True))
+        await self._fire_simulate("turn_start", player_id)
+        # The make-or-break wait (upstream open question 1): the hook must
+        # engage the freeze BEFORE the stock AI acts. A timeout here IS the
+        # finding — record it dated and stop.
+        await self._await(
+            lambda p: p.get("PUPPET_ACTIVE") is True,
+            f"lease to engage for player {player_id} "
+            "(PlayerTurnStartComplete timing)")
+        # Declared ambient window: snapshot -> diff -> manifest rows
+        await self._conn.execute_read(
+            lua_translator.begin_ambient_window(player_id))
+        await self._conn.execute_read(
+            lua_translator.end_ambient_window(player_id))
+        ambient = await self._conn.execute_read(lua_translator.dump_ambient())
+        manifest = response_parser.parse_ledger_lines(ambient)
+        self._phase_open = player_id
+        self._turn_mirror = turn
+        await self._refresh_digest()
+        return {"manifest": manifest}
 
     async def end_phase(self, player_id: int, turn: int) -> dict[str, Any]:
-        raise NotImplementedError(f"end_phase over FireTuner: {_LIVE_POINTER}")
+        if self._phase_open != player_id:
+            raise RuntimeError(
+                f"end_phase: phase open for {self._phase_open}, not {player_id}")
+        if self._turn_mirror != turn:
+            raise RuntimeError(
+                f"end_phase turn mismatch: mirror {self._turn_mirror}, "
+                f"asked {turn}")
+        if self._strategy == "h1":
+            await self._conn.execute_write(
+                lua_translator.request_end_turn(player_id))
+        elif self._strategy == "h2":
+            await self._conn.execute_read(
+                lua_translator.finish_all_moves(player_id))
+        # h3: no explicit command — wait for the engine to release on its own
+        await self._fire_simulate("turn_deactivated", player_id)
+        await self._await(
+            lambda p: (p.get("PUPPET_ACTIVE") is False
+                       or int(p.get("TURN", -1)) > turn),
+            f"lease release for player {player_id} (D7-{self._strategy})",
+            timeout_s=self._turn_wait_s)
+        # Release books any lease-vs-close drift as UNDECLARED actuals —
+        # the referee's next sweep flags them (the live make-or-break check)
+        await self._conn.execute_read(lua_translator.release(player_id))
+        ledger = await self._conn.execute_read(lua_translator.dump_ledger())
+        for doc in response_parser.parse_ledger_lines(ledger):
+            self._journal.append(MutationRecord.from_doc(doc))
+        self._phase_open = -1
+        # refresh BEFORE the turn can advance: the TURN_END hash must cover
+        # THIS phase's final state, not whatever the engine does next (the
+        # other player acts immediately after release in live play)
+        await self._refresh_digest()
+        # rehearsal-only: the real engine advances on its own after release
+        await self._fire_simulate("advance_turn", player_id)
+        return {}
 
-    async def current_phase(self) -> dict[str, Any]:
-        lines = await self._conn.execute_read(lua_translator.poll_turn_state())
+    # -- polling (D3: poll, never push) --------------------------------------
+    async def poll_status(self) -> dict[str, Any]:
+        lines = await self._conn.execute_read(lua_translator.mod_status())
+        if any(ln.startswith("MOD_STATUS|unavailable") for ln in lines):
+            raise RuntimeError("mod has no pollable Status (need >= 0.2)")
         parsed = response_parser.parse_kv_lines(lines)
-        return {
-            "turn": parsed.get("TURN", -1),
-            "phase_player": -1,  # live engine does not expose the acting player
-            "raw": parsed,
-        }
+        if "TURN" in parsed:
+            self._turn_mirror = int(parsed["TURN"])
+        return parsed
+
+    async def refresh_digest(self) -> str:
+        """Poll the whole-board digest and return the new state hash."""
+        await self._refresh_digest()
+        return self.state_hash()
+
+    async def _refresh_digest(self) -> None:
+        lines = await self._conn.execute_read(lua_translator.mod_digest())
+        self._digest_text = response_parser.parse_digest(lines)
+
+    async def _await(
+        self, predicate: Callable[[dict[str, Any]], bool], what: str,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + (timeout_s or self._poll_timeout_s)
+        while True:
+            parsed = await self.poll_status()
+            if predicate(parsed):
+                return parsed
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"timed out waiting for {what}: {parsed}")
+            await asyncio.sleep(self._poll_interval_s)
+
+    async def _fire_simulate(self, event: str, player_id: int) -> None:
+        if self._simulate is None:
+            return
+        await self._conn.execute_read(self._simulate(event, player_id))
 
     # -- observation ----------------------------------------------------------
     async def observe(self, req: ObserveRequest) -> Any:
@@ -107,17 +289,14 @@ class FireTunerAdapter:
     def restore(self, snap: Any) -> None:
         raise NotImplementedError(f"restore over FireTuner: {_LIVE_POINTER}")
 
-    def drain_mutations(self) -> list[Any]:
-        raise NotImplementedError(
-            f"drain_mutations over FireTuner: {_LIVE_POINTER}. The mod's command "
-            "ledger (Puppeteer.DumpLedger) is the live mutation journal."
-        )
+    def drain_mutations(self) -> list[MutationRecord]:
+        out, self._journal = self._journal, []
+        return out
 
     def state_hash(self) -> str:
-        raise NotImplementedError(
-            f"state_hash over FireTuner: {_LIVE_POINTER}. Puppeteer.Digest is the "
-            "live before/after 'hash'."
-        )
+        if self._digest_text is None:
+            raise RuntimeError("state_hash before setup — no digest cached")
+        return _sha({"live_digest": self._digest_text})
 
     def export_state(self) -> dict[str, Any]:
         raise NotImplementedError(f"export_state over FireTuner: {_LIVE_POINTER}")

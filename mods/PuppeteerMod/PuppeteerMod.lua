@@ -12,6 +12,19 @@
 --     RestoreMovement sequence is EXPLICITLY REJECTED: restoring movement
 --     before the stock AI finishes processing hands control back to the AI.
 --
+-- v0.2 (M14b):
+--   * Status() — POLLABLE lease state. The tuner wire drains unsolicited
+--     output around every command, so hook-time prints never arrive;
+--     every wait must poll Status() instead (docs: D3, poll never push).
+--   * ambient recorder — BeginAmbientWindow snapshots the player, the
+--     EndAmbientWindow diff is booked as the DECLARED manifest; Release
+--     re-diffs against the lease snapshot and books any remaining drift
+--     into the command ledger (undeclared actuals => watchdog flags).
+--   * canonical wire rows (LEDGER|/AMBIENT|kind|entity_type|entity_id|
+--     attr|before|after, integers floored, numeric ids u<id>/c<id>).
+--   * Digest() covers ALL alive majors (the whole-board analogue of the
+--     simulator's state hash), integers floored, rows sorted.
+--
 -- Known live risks (upstream docs/agent-vs-agent.md open questions 1-2):
 --   * does GameEvents.PlayerTurnStartComplete fire before the built-in AI
 --     acts? If not, the freeze here is too late and the watchdog will say so.
@@ -19,16 +32,20 @@
 --     context? If not, write paths must run entirely in InGame state.
 
 Puppeteer = {}
-Puppeteer.version = "0.1.0-draft"
+Puppeteer.version = "0.2.0-draft"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
 
 local PUPPET_PLAYERS = {}          -- set[playerID] = true; configured via SetPuppet
 local lease = nil                  -- { playerID, turn, snapshot = {unitId -> state} }
-local command_ledger = {}          -- {turn, playerID, unitId, kind, before, after}
-local ambient_ledger = {}          -- effects booked during phase-boundary batches
+local command_ledger = {}          -- UNDECLARED actuals: drift the referee never asked for
+local ambient_ledger = {}          -- DECLARED at phase boundaries: the authorization manifest
 local ambient_window_open = false  -- true ONLY inside BeginAmbientWindow/EndAmbientWindow
+local ambient_snapshot = nil       -- BeginAmbientWindow's per-player snapshot
+
+local function ifloor(v) return string.format("%d", math.floor(v or 0)) end
+local function boolstr(v) return tostring(v and true or false) end
 
 local function snapshot_units(playerID)
     local snap = {}
@@ -43,29 +60,112 @@ local function snapshot_units(playerID)
     return snap
 end
 
-local function record(kind, playerID, unitId, before, after)
-    table.insert(command_ledger, {
-        turn = Game.GetCurrentGameTurn(), playerID = playerID,
-        unitId = unitId, kind = kind, before = before, after = after,
-    })
+-- v0.2 ambient-recorder snapshot: units AND cities of one player
+local function snapshot_player(playerID)
+    local snap = { units = {}, cities = {} }
+    pcall(function()
+        for id, u in pairs(snapshot_units(playerID)) do snap.units[id] = u end
+    end)
+    pcall(function()
+        for _, city in Players[playerID]:GetCities():Members() do
+            snap.cities[city:GetID()] = { population = city:GetPopulation() }
+        end
+    end)
+    return snap
+end
+
+local function book_ambient(kind, entity_type, entity_id, attr, before, after)
+    table.insert(ambient_ledger, string.format(
+        "AMBIENT|%s|%s|%s|%s|%s|%s",
+        kind, entity_type, entity_id, attr, tostring(before), tostring(after)))
+end
+
+local function book_actual(kind, entity_type, entity_id, attr, before, after)
+    table.insert(command_ledger, string.format(
+        "LEDGER|%s|%s|%s|%s|%s|%s",
+        kind, entity_type, entity_id, attr, tostring(before), tostring(after)))
+end
+
+-- Diff after-against-before and book every drift. `book` selects the
+-- destination: the ambient ledger (DECLARED manifest) inside a window,
+-- the command ledger (UNDECLARED actuals) at release time.
+local function diff_player(playerID, before, book)
+    local after = snapshot_player(playerID)
+    local seen = {}
+    for uid, u in pairs(after.units) do
+        seen[uid] = true
+        local b = before.units[uid]
+        local id = "u" .. uid
+        if b == nil then
+            book("unit.spawned", "unit", id, "exists", "false", "true")
+        else
+            if u.x ~= b.x or u.y ~= b.y then
+                book("unit.moved", "unit", id, "pos",
+                     b.x .. "," .. b.y, u.x .. "," .. u.y)
+            end
+            if ifloor(u.movement) ~= ifloor(b.movement) then
+                book("unit.movement", "unit", id, "movement",
+                     ifloor(b.movement), ifloor(u.movement))
+            end
+            if ifloor(u.hp) ~= ifloor(b.hp) then
+                book("unit.hp", "unit", id, "hp", ifloor(b.hp), ifloor(u.hp))
+            end
+            if u.fortified ~= b.fortified then
+                book("unit.fortified", "unit", id, "fortified",
+                     boolstr(b.fortified), boolstr(u.fortified))
+            end
+        end
+    end
+    for uid in pairs(before.units) do
+        if not seen[uid] then
+            book("unit.despawned", "unit", "u" .. uid, "exists", "true", "false")
+        end
+    end
+    local cseen = {}
+    for cid, c in pairs(after.cities) do
+        cseen[cid] = true
+        local b = before.cities[cid]
+        local id = "c" .. cid
+        if b == nil then
+            book("city.founded", "city", id, "exists", "false", "true")
+        elseif ifloor(c.population) ~= ifloor(b.population) then
+            book("city.growth", "city", id, "population",
+                 ifloor(b.population), ifloor(c.population))
+        end
+    end
+    for cid in pairs(before.cities) do
+        if not cseen[cid] then
+            book("city.lost", "city", "c" .. cid, "exists", "true", "false")
+        end
+    end
 end
 
 -- -- handshake -------------------------------------------------------------
 
 function Puppeteer.Handshake()
-    return string.format(
-        "MOD_VERSION|%s\nSUPPORTS_FREEZE|%s\nSUPPORTS_LEDGER|%s\nSUPPORTS_DIGEST|%s\n---END---",
-        Puppeteer.version,
-        tostring(Puppeteer.supports_freeze),
-        tostring(Puppeteer.supports_ledger),
-        tostring(Puppeteer.supports_digest)
-    )
+    print("MOD_VERSION|" .. Puppeteer.version)
+    print("SUPPORTS_FREEZE|" .. boolstr(Puppeteer.supports_freeze))
+    print("SUPPORTS_LEDGER|" .. boolstr(Puppeteer.supports_ledger))
+    print("SUPPORTS_DIGEST|" .. boolstr(Puppeteer.supports_digest))
+    print("---END---")
 end
 
 function Puppeteer.SetPuppet(playerID, enabled)
     PUPPET_PLAYERS[playerID] = enabled and true or nil
-    print("PUPPET_SET|" .. playerID .. "|" .. tostring(enabled and true or false))
+    if not enabled and lease ~= nil and lease.playerID == playerID then
+        lease = nil
+    end
+    print("PUPPET_SET|" .. playerID .. "|" .. boolstr(enabled))
     print("---END---")
+end
+
+function Puppeteer.Status()
+    local active = lease ~= nil
+    return string.format(
+        "TURN|%d\nPUPPET_ACTIVE|%s\nLEASE_PLAYER|%d\nLEASE_TURN|%d\n---END---",
+        Game.GetCurrentGameTurn(), boolstr(active),
+        (lease ~= nil) and lease.playerID or -1,
+        (lease ~= nil) and lease.turn or -1)
 end
 
 -- -- freeze / lease -----------------------------------------------------------
@@ -77,7 +177,7 @@ function OnPlayerTurnStartComplete(playerID)
     -- Step 1: capture per-unit state, then freeze ALL of the puppet's units
     -- (zero movement) so the built-in AI cannot act during our lease.
     lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
-              snapshot = snapshot_units(playerID) }
+              snapshot = snapshot_player(playerID) }
     local pUnits = Players[playerID]:GetUnits()
     for _, unit in pUnits:Members() do
         UnitManager.FinishMoves(unit)
@@ -94,11 +194,10 @@ end
 -- Step 2 of the contract: restore exactly ONE unit, immediately before the
 -- coordinator's command for that unit executes. NEVER bulk-restore.
 function Puppeteer.RestoreUnit(unitId)
-    if lease == nil or lease.snapshot[unitId] == nil then
+    if lease == nil then
         return
     end
-    local pUnits = Players[lease.playerID]:GetUnits()
-    local unit = pUnits:FindID(unitId)
+    local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
     if unit ~= nil then
         UnitManager.RestoreMovement(unit)
         UnitManager.RestoreUnitAttacks(unit)
@@ -106,8 +205,16 @@ function Puppeteer.RestoreUnit(unitId)
 end
 
 function Puppeteer.Release(playerID)
-    lease = nil
-    print("PUPPET_ACTIVE|false")
+    -- Re-diff the whole lease: anything the referee never declared lands in
+    -- the command ledger as an undeclared actual (the watchdog flags it).
+    if lease ~= nil and lease.playerID == playerID and lease.snapshot ~= nil then
+        diff_player(playerID, lease.snapshot, book_actual)
+    end
+    if lease ~= nil and lease.playerID == playerID then
+        lease = nil
+    end
+    print("PUPPET_ACTIVE|" .. boolstr(lease ~= nil))
+    print("---END---")
 end
 
 GameEvents.PlayerTurnStartComplete.Add(OnPlayerTurnStartComplete)
@@ -119,11 +226,17 @@ Events.PlayerTurnDeactivated.Add(OnPlayerTurnDeactivated)
 -- by definition — that is what makes the Python-side diff sound.
 
 function Puppeteer.BeginAmbientWindow(playerID)
+    ambient_snapshot = snapshot_player(playerID)
     ambient_window_open = true
     print("AMBIENT_WINDOW|open|" .. playerID)
+    print("---END---")
 end
 
 function Puppeteer.EndAmbientWindow(playerID)
+    if ambient_snapshot ~= nil then
+        diff_player(playerID, ambient_snapshot, book_ambient)
+        ambient_snapshot = nil
+    end
     ambient_window_open = false
     print("AMBIENT_WINDOW|closed|" .. playerID)
     print("---END---")
@@ -131,25 +244,30 @@ end
 
 -- -- verification digest -----------------------------------------------------------
 
--- Deterministic digest over sorted (unitId, x, y, movement, hp, fortified)
--- and (cityId, production, research, gold) tuples: the live before/after
--- "hash" the Python watchdog uses around each command.
+-- Deterministic whole-board digest over sorted rows for every ALIVE MAJOR:
+--   u<unitID>|<owner>|<x>|<y>|<movement>|<hp>|<fortified>
+--   c<cityID>|<owner>|<population>
+--   p<playerID>|<gold>|<researchingTechID or -1>
+-- Integers are floored (canonical JSON rejects floats); this is the live
+-- before/after "hash" source the Python referee sha256s.
 function Puppeteer.Digest()
     local rows = {}
-    for playerID, _ in pairs(PUPPET_PLAYERS) do
-        local pUnits = Players[playerID]:GetUnits()
-        for _, unit in pUnits:Members() do
-            table.insert(rows, string.format("u%d|%d|%d|%d|%d|%s",
-                unit:GetID(), unit:GetX(), unit:GetY(),
-                unit:GetMovementRemaining(), unit:GetHP(),
-                tostring(unit:IsFortified())))
+    for _, p in ipairs(PlayerManager.GetAliveMajors()) do
+        local pid = p:GetID()
+        for _, unit in p:GetUnits():Members() do
+            table.insert(rows, string.format("u%d|%d|%d|%d|%d|%d|%s",
+                unit:GetID(), pid, unit:GetX(), unit:GetY(),
+                math.floor(unit:GetMovementRemaining()),
+                math.floor(unit:GetHP()), boolstr(unit:IsFortified())))
         end
-        for _, city in Players[playerID]:GetCities():Members() do
-            table.insert(rows, string.format("c%s|%s|%s|%d",
-                city:GetName(), tostring(city:GetProductionName()),
-                tostring(Players[playerID]:GetTechs():GetResearchingTech()),
-                Players[playerID]:GetTreasury():GetGold()))
+        for _, city in p:GetCities():Members() do
+            table.insert(rows, string.format("c%d|%d|%d",
+                city:GetID(), pid, math.floor(city:GetPopulation())))
         end
+        local tech = p:GetTechs():GetResearchingTech()
+        table.insert(rows, string.format("p%d|%d|%d",
+            pid, math.floor(p:GetTreasury():GetGold()),
+            (tech ~= nil) and tech or -1))
     end
     table.sort(rows)
     print("DIGEST|" .. table.concat(rows, ";"))
@@ -159,20 +277,31 @@ end
 -- -- command ledger ------------------------------------------------------------
 
 function Puppeteer.DumpLedger()
-    for _, entry in ipairs(command_ledger) do
-        print(string.format("LEDGER|%d|%d|%s|%s|%s|%s",
-            entry.turn, entry.playerID, tostring(entry.unitId), entry.kind,
-            tostring(entry.before), tostring(entry.after)))
+    for _, row in ipairs(command_ledger) do
+        print(row)
     end
     command_ledger = {}
     print("---END---")
 end
 
 function Puppeteer.DumpAmbient()
-    for _, entry in ipairs(ambient_ledger) do
-        print("AMBIENT|" .. entry)
+    for _, row in ipairs(ambient_ledger) do
+        print(row)
     end
     ambient_ledger = {}
+    print("---END---")
+end
+
+-- -- turn-end experiments (D7; the driver picks, outcomes recorded dated) --------
+
+-- H2 primitive: zero out remaining movement so the engine can auto-complete.
+function Puppeteer.FinishAllMoves(playerID)
+    local n = 0
+    for _, unit in Players[playerID]:GetUnits():Members() do
+        UnitManager.FinishMoves(unit)
+        n = n + 1
+    end
+    print("FINISHED_MOVES|" .. playerID .. "|" .. n)
     print("---END---")
 end
 

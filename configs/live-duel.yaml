@@ -1,0 +1,23 @@
+# Live FireTuner leg (M14): turtler-vs-turtler over the real Civ VI engine.
+# No LLM by decision (D8) — phases 1-3 need no agent; dispatch uses scripted
+# bots through the same referee machinery. See docs/live-validation.md §6.
+match:
+  match_id: live-duel-001
+  seed: 314159
+  max_turns: 2
+  checkpoint_every: 1
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: live-turtler-a
+    player_id: 0
+    policy: turtler
+    seed: 1101
+  - agent_id: live-turtler-b
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []
