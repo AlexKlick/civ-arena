@@ -92,6 +92,7 @@ class FakeMod:
         self.state_nonce = 0
         self._diff_cache: str | None = None
         self._diff_cache_seq: int = -1
+        self.trace: list[str] = []
         self._restored: set[int] = set()
         self.act_log: list[tuple[str, str]] = []  # (tool, status) per command
         self.reset_board()
@@ -374,7 +375,12 @@ class FakeMod:
                 self.act_log.append((m.group(1), out[0].split("|")[2]))
                 return out
         if "PUPPET_PLAYERS = {}" in code:
-            # the injected mod source (D9): execution succeeds silently
+            # the injected mod source (D9): execution succeeds silently, and
+            # the fake ADOPTS the file's declared version — the adapter's
+            # version gate must rehearse against whatever file was injected
+            m = re.search(r'Puppeteer\.version\s*=\s*"([^"]+)"', code)
+            if m is not None:
+                self.version = m.group(1)
             self.injected = True
             self.injections += 1
             return [f"MOD_LOADED|{self.version}"]
@@ -409,6 +415,10 @@ class FakeMod:
             if not self.has_digest:
                 return ["MOD_DIGEST|unavailable"]
             return [self._digest()]
+        if "Puppeteer.Trace" in code:
+            # the mod v0.3.1 hook ring (minimal model: the turn-start /
+            # lease / deactivate events the driver's targeting reads)
+            return ["\n".join(self.trace)] if self.trace else ["---END---"]
         if "Puppeteer.DiffSinceLast" in code:
             if not self.has_command_diff:
                 return ["MOD_DIFF|unavailable"]
@@ -508,11 +518,14 @@ class FakeMod:
         if m:
             pid = int(m.group(1))
             self.turn_active = True
+            self.trace.append(f"{self.turn}|HOOK_ENTER|{pid}")
             if self.puppets.get(pid):
                 self.lease = {"player": pid, "turn": self.turn}
                 self.mark = self._snapshot(pid)
                 self._restored = set()
                 self._diff_cache = None
+                self.trace.append(
+                    f"{self.turn}|LEASE_SET|{pid}|{self.turn}")
             return []  # hook print is unsolicited => drained: no rows
         m = re.search(r"Simulate\.TurnStartAt\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
         if m:
@@ -522,16 +535,19 @@ class FakeMod:
             if turn > self.turn:
                 self.turn = turn
             self.turn_active = True
+            self.trace.append(f"{turn}|HOOK_ENTER|{pid}")
             if self.puppets.get(pid):
                 self.lease = {"player": pid, "turn": turn}
                 self.mark = self._snapshot(pid)
                 self._restored = set()
                 self._diff_cache = None
+                self.trace.append(f"{turn}|LEASE_SET|{pid}|{turn}")
             return []
         m = re.search(r"Simulate\.TurnDeactivated\(\s*(\d+)\s*\)", code)
         if m:
             pid = int(m.group(1))
             self.turn_active = False
+            self.trace.append(f"{self.turn}|HOOK_DEACT|{pid}")
             if self.lease and self.lease["player"] == pid:
                 # the real hook calls Release: book remaining drift (P2-2)
                 if self.mark is not None:

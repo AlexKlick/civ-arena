@@ -136,12 +136,12 @@ def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
 _MOD_VERSION_RE = re.compile(r'Puppeteer\.version\s*=\s*"([^"]+)"')
 
 
-def _mod_version(lua_text: str) -> str:
-    """The version the MOD FILE declares (its source of truth)."""
+def _mod_version(lua_text: str) -> str | None:
+    """The version the MOD FILE declares (its source of truth); None when
+    the text declares none (test stubs) — version gating then steps aside
+    and only the capability gate applies."""
     m = _MOD_VERSION_RE.search(lua_text)
-    if m is None:
-        raise RuntimeError("mod file declares no Puppeteer.version")
-    return m.group(1)
+    return m.group(1) if m is not None else None
 
 
 def _rejection_value(token: str) -> str:
@@ -302,7 +302,7 @@ class FireTunerAdapter:
         file_version = _mod_version(lua_text)
         try:
             doc = await self.require_mod()
-            if doc["mod_version"] == file_version:
+            if file_version is None or doc["mod_version"] == file_version:
                 return doc
             # version drift: re-inject the file (no lease survives this —
             # the caller boots a parked, lease-free turn or accepts the loss)
@@ -319,7 +319,7 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"mod injection failed: {marker!r} from {lines[:3]!r}")
         doc = await self.require_mod()
-        if doc["mod_version"] != file_version:
+        if file_version is not None and doc["mod_version"] != file_version:
             raise RuntimeError(
                 f"injected {file_version!r} but handshake reports "
                 f"{doc['mod_version']!r} — a foreign mod instance answered")
