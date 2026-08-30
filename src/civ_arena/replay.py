@@ -84,7 +84,14 @@ class ReplayRuntime:
 
 
 def _strip(records: list[dict[str, Any]]) -> list[tuple]:
-    """Replay-comparable projection: envelope fields dropped."""
+    """Replay-comparable projection: envelope fields dropped.
+
+    ``recalled`` is compared, unlike the observation ``observed`` digest:
+    observations re-derive from replayed game state (identical by
+    construction), but a recall re-queries an EXTERNAL corpus — if the
+    corpus changed between run and replay, the model would have been fed
+    different lessons, and the certificate must say so, not stay green.
+    ``.get`` keeps pre-M13 records comparable (None == None)."""
     out: list[tuple] = []
     for rec in records:
         kind = rec["kind"]
@@ -93,6 +100,7 @@ def _strip(records: list[dict[str, Any]]) -> list[tuple]:
                 kind, rec.get("turn"), rec.get("player_id"), rec.get("agent_id"),
                 rec.get("tool"), rec.get("args_digest"), rec.get("status"),
                 rec.get("rejection"), rec.get("after_state_hash"),
+                rec.get("recalled"),
             ))
         elif kind == "VIOLATION":
             out.append((kind, rec.get("turn"), rec.get("agent_id"),
@@ -134,7 +142,11 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
         if agent.player_id not in runtimes:
             runtimes[agent.player_id] = ReplayRuntime([])
 
-    arena = Arena(replay_dir, spec, runtimes=runtimes)
+    # the replay Arena writes to replay_dir but resolves the recall corpus
+    # from the SOURCE run's root — a custom --replay-dir must not move or
+    # shadow the corpus (the replayed recalls must re-query the same one)
+    arena = Arena(replay_dir, spec, runtimes=runtimes,
+                  recall_root=Path(run_dir).parent)
     summary = await arena.run()
 
     live = _strip(records)

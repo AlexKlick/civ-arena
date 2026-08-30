@@ -8,6 +8,7 @@ the api key NEVER appears inline, only the NAME of the env var holding it.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -206,6 +207,26 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
     for prior in recall_runs_raw:
         if prior not in recall_runs:
             recall_runs.append(prior)
+    if recall_runs:
+        # ids resolve to directories under the runs root: the safe-id
+        # charset (no '/', no leading dot) keeps path aliases from pointing
+        # the corpus at itself or outside the root
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", p)
+               for p in recall_runs):
+            raise ConfigError(
+                "match.recall_runs entries must be bare match ids "
+                "([A-Za-z0-9][A-Za-z0-9._-]{0,63}), not paths")
+        # the referee logs the FULL recall digest; the runtime truncates
+        # stringified tool results at max_result_chars. 5 lessons x (280-char
+        # text + ids + turn) + the 280-char query fits in ~2500 chars — a
+        # smaller cap would silently feed the model less than the log claims
+        for agent in agents:
+            if agent.policy == "llm" and agent.llm is not None \
+                    and agent.llm.max_result_chars < 2500:
+                raise ConfigError(
+                    f"agents[{agent.agent_id}]: max_result_chars must be "
+                    ">= 2500 when recall_runs is set — the recall digest "
+                    "must reach the model untruncated")
 
     return MatchSpec(
         match_id=match_id, seed=seed, max_turns=max_turns, adapter=adapter,

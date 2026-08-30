@@ -63,8 +63,12 @@ class RecallCorpus:
     ) -> RecallCorpus:
         """Build the corpus from prior run dirs. The CURRENT match id is
         always excluded (even if listed — on resume its own log exists and
-        must never feed its own recall); a missing run fails loudly before
-        any match spend."""
+        must never feed its own recall). Every prior must be a FINISHED
+        match (MATCH_END present, identity matching the requested id) with a
+        well-formed roster — a run still being written could feed a
+        crash-resume rebuild lessons that did not exist when the match
+        started, and a malformed roster could attribute one agent's lessons
+        to another. All failures are loud, before any match spend."""
         entries: list[dict[str, Any]] = []
         seen: set[str] = set()
         for prior in prior_ids:
@@ -81,6 +85,26 @@ class RecallCorpus:
             if not roster:
                 raise ValueError(
                     f"recall corpus run {prior!r} has no MATCH_START roster")
+            starts = [r for r in records if r.get("kind") == "MATCH_START"]
+            if not starts or starts[0].get("match_id") != prior:
+                raise ValueError(
+                    f"recall corpus run {prior!r} carries a different "
+                    f"match_id internally ({starts[0].get('match_id')!r} "
+                    "if any) — replay twins and misplaced dirs are not "
+                    "corpus members")
+            if not any(r.get("kind") == "MATCH_END"
+                       and r.get("match_id") == prior for r in records):
+                raise ValueError(
+                    f"recall corpus run {prior!r} is not a finished match "
+                    "(no MATCH_END) — corpus members must be immutable")
+            players = [pid for _, pid in roster]
+            agents = [agent for agent, _ in roster]
+            if len(set(players)) != len(players) \
+                    or len(set(agents)) != len(agents) \
+                    or any(not a for a in agents):
+                raise ValueError(
+                    f"recall corpus run {prior!r} has a malformed roster "
+                    f"(duplicate or empty identity): {roster!r}")
             store = StrategyStore.from_log(records)
             for agent_id, pid in roster:
                 for lesson in store.lesson_list(pid):

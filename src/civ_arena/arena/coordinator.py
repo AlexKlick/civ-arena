@@ -63,12 +63,18 @@ def _wire_services(runtimes: dict[int, Any], diary: Any, strategy: Any) -> None:
 
 class Arena:
     def __init__(self, run_dir: Path, spec: MatchSpec,
-                 runtimes: dict[int, Any] | None = None) -> None:
+                 runtimes: dict[int, Any] | None = None,
+                 recall_root: Path | None = None) -> None:
         self.run_dir = Path(run_dir)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "checkpoints").mkdir(exist_ok=True)
         self.spec = spec
         self.game_instance_id = f"{spec.match_id}-i{os.getpid()}"
+        # where prior corpus runs live: the runs root (this dir's parent)
+        # for live matches; replay passes the SOURCE run's root explicitly —
+        # a custom --replay-dir elsewhere must not move the corpus with it
+        self.recall_root = Path(recall_root) if recall_root is not None \
+            else self.run_dir.parent
         self.log = EventLog(self.run_dir / "events.jsonl")
         self.telemetry = TelemetryRegistry()
         self.diary = DiaryStore()
@@ -79,7 +85,7 @@ class Arena:
         self.recall: RecallCorpus | None = None
         if spec.recall_runs:
             self.recall = RecallCorpus.from_runs(
-                self.run_dir.parent, spec.match_id, spec.recall_runs)
+                self.recall_root, spec.match_id, spec.recall_runs)
         self.spend = SpendLedger(self.run_dir / "spend.jsonl")
         self.adapter = SimulatorAdapter()
         self.chaos = ChaosDirector([
@@ -275,7 +281,7 @@ class Arena:
         # so this rebuilds to the identical corpus — uniform with the other
         # derived stores rather than special-cased as "kept"
         self.recall = (RecallCorpus.from_runs(
-            self.run_dir.parent, self.spec.match_id, self.spec.recall_runs)
+            self.recall_root, self.spec.match_id, self.spec.recall_runs)
             if self.spec.recall_runs else None)
         self.referee.recall = self.recall
         # the runtimes hold their OWN store references from construction —

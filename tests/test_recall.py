@@ -302,3 +302,139 @@ async def test_match_with_recall_replays_model_free(tmp_path: Path):
     out = await replay_run(runs / "recall-match", ms,
                            runs / "recall-match-replay")
     assert out["identical"], out.get("first_divergence")
+
+
+# ------------------------------------------------- review round 1 pins
+
+
+def test_strip_compares_recalled_payloads():
+    # round-1 P1: observations re-derive from replayed state, but a recall
+    # re-queries an EXTERNAL corpus — a changed corpus must break replay,
+    # not stay green while the model would have been fed different lessons
+    from civ_arena.replay import _strip
+
+    base = {"kind": "TOOL_RESULT", "turn": 1, "player_id": 0,
+            "agent_id": "roman", "tool": "recall_lessons",
+            "status": "accepted"}
+    a = _strip([dict(base, recalled={"lessons": ["l1"]})])
+    b = _strip([dict(base, recalled={"lessons": ["l2"]})])
+    assert a != b
+    # absence still compares equal — pre-M13 logs replay unchanged
+    assert _strip([dict(base)]) == _strip([dict(base)])
+
+
+def test_corpus_rejects_unfinished_prior(tmp_path: Path):
+    # round-1 P2: a run still being written could feed a crash-resume
+    # rebuild lessons that did not exist when the match started
+    _write_run(tmp_path, "wip")
+    path = tmp_path / "wip" / "events.jsonl"
+    lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+    recs = [json.loads(ln) for ln in lines]
+    recs = [r for r in recs if r["kind"] != "MATCH_END"]  # still running
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                            for r in recs))
+    with pytest.raises(ValueError, match="not a finished match"):
+        RecallCorpus.from_runs(tmp_path, "self", ["wip"])
+
+
+def test_corpus_rejects_internal_identity_mismatch(tmp_path: Path):
+    # round-1 P2/F5: a replay twin (dir <id>-replay carrying internal id
+    # <id>) must not slip into the corpus as a "prior"
+    _write_run(tmp_path, "m-replay")
+    path = tmp_path / "m-replay" / "events.jsonl"
+    text = path.read_text().replace('"match_id": "m-replay"',
+                                    '"match_id": "m"')
+    path.write_text(text)
+    with pytest.raises(ValueError, match="different match_id internally"):
+        RecallCorpus.from_runs(tmp_path, "self", ["m-replay"])
+
+
+def test_corpus_rejects_malformed_roster(tmp_path: Path):
+    # round-1 P2: duplicate player ids would attribute one agent's lessons
+    # to another agent as its "own" memory
+    _write_run(tmp_path, "dup")
+    path = tmp_path / "dup" / "events.jsonl"
+    text = path.read_text().replace(
+        '"agents": [["roman", 0, "llm"], ["korean-turtler", 1, "turtler"]]',
+        '"agents": [["roman", 0, "llm"], ["korea", 0, "turtler"]]')
+    path.write_text(text)
+    with pytest.raises(ValueError, match="malformed roster"):
+        RecallCorpus.from_runs(tmp_path, "self", ["dup"])
+
+
+def _config_doc(recall_runs: list, max_result_chars: int = 8000) -> dict:
+    return {
+        "match": {"match_id": "m", "seed": 1, "max_turns": 2,
+                  "adapter": "simulator",
+                  "watchdog_mode": "flag_and_continue",
+                  "checkpoint_every": 1, "recall_runs": recall_runs},
+        "agents": [
+            {"agent_id": "roman", "player_id": 0, "policy": "llm",
+             "seed": 11,
+             "llm": {"base_url": "http://x", "api_key_env": "K",
+                     "model_id": "mm", "max_result_chars": max_result_chars}},
+            {"agent_id": "korea", "player_id": 1, "policy": "turtler",
+             "seed": 22},
+        ],
+    }
+
+
+def test_config_rejects_path_like_recall_ids():
+    from civ_arena.config import ConfigError, parse_config
+
+    for bad in ("./m", "../runs/x", "/abs/run", ".hidden"):
+        with pytest.raises(ConfigError, match="bare match ids"):
+            parse_config(_config_doc([bad]))
+    parse_config(_config_doc(["llm-vs-turtler-002"]))  # bare ids pass
+
+
+def test_config_enforces_result_cap_floor_for_recall():
+    from civ_arena.config import ConfigError, parse_config
+
+    with pytest.raises(ConfigError, match="max_result_chars"):
+        parse_config(_config_doc(["prior-a"], max_result_chars=80))
+    # without recall, a small cap stays legal (pre-existing behavior)
+    parse_config(_config_doc([], max_result_chars=80))
+
+
+async def test_replay_with_custom_dir_resolves_corpus_from_source_root(
+        tmp_path: Path):
+    # round-1 P3: the corpus lives beside the SOURCE run; a custom
+    # --replay-dir elsewhere must not move or shadow it
+    from civ_arena.agents.llm.runtime import LLMAgentRuntime
+    from civ_arena.agents.runtime import AgentProfile
+    from civ_arena.arena.coordinator import Arena
+    from civ_arena.config import AgentSpec, MatchSpec
+    from civ_arena.replay import replay_run
+    from fakes import FakeModel, use
+    from test_llm_runtime import FAKE_LLM
+
+    runs = tmp_path / "runs"
+    _write_run(runs, "prior-a")
+    ms = MatchSpec(
+        match_id="recall-match2", seed=424242, max_turns=1,
+        adapter="simulator", watchdog_mode="flag_and_continue",
+        violation_limit=5, checkpoint_every=1,
+        agents=[
+            AgentSpec(agent_id="roman", player_id=0, policy="llm", seed=11,
+                      llm=FAKE_LLM),
+            AgentSpec(agent_id="korea", player_id=1, policy="turtler",
+                      seed=22),
+        ],
+        recall_runs=["prior-a"],
+    )
+    fake = FakeModel(script=[[use("recall_lessons",
+                                  {"query": "grassland growth"})],
+                             [use("end_turn")]])
+    profile = AgentProfile(agent_id="roman", player_id=0, policy="llm",
+                           seed=11, llm=FAKE_LLM)
+    rt = LLMAgentRuntime.build(profile, client=fake)
+    arena = Arena(runs / "recall-match2", ms, runtimes={0: rt})
+    rt.telemetry = arena.telemetry
+    rt.diary = arena.diary
+    rt.strategy = arena.referee.strategy
+    await arena.run()
+
+    elsewhere = tmp_path / "elsewhere" / "replay-out"
+    out = await replay_run(runs / "recall-match2", ms, elsewhere)
+    assert out["identical"], out.get("first_divergence")
