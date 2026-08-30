@@ -400,3 +400,36 @@ file; full-suite count in the M14d commit):
 Live validation pending: dispatch with the turtler first, then the
 tourney games (each LLM vs the engine AI), observable on the gaming
 session.
+
+### 2026-08-30 — M14d LIVE: seven clean driven turns; the self-sustaining
+### loop proven; one engine wedge under investigation
+
+The dispatch ladder against the real engine (all with the turtler, zero
+watchdog violations on every driven turn):
+
+| run | turns driven | the finding |
+|---|---|---|
+| 001 | — | 300s engage window too short for human-paced clicks (deleted pre-evidence; the finding is this row) |
+| 002 | 2 | FIRST fully driven turn live: 9 tools through the real referee. Then t3 stranded: TURN+1 targeting overshoots after our own end-turn |
+| 003 | — | attach re-injection KILLS the live mod's engaged lease → inject_mod is verify-first (version-gated) |
+| 004 | — | reconfirmed 003; the bootstrap end-turn script born |
+| 005 | 6 | targeting fix v1; t7 stranded — poll races the AI's turn transition |
+| 006 | 8 | TURN_ACTIVE discriminator added (mod Status now reports IsTurnActive); t9 stranded — activation-in-progress ambiguity → settle window |
+| 007 | 10 | settle in; t11 stranded — the REAL mechanism found via Codex P1-8: end_phase's trailing Release was turn-UNBOUND and killed the NEXT turn's engaged lease |
+| 008 | — | mod syntax error reached the wire (junk half-line; cost the run) → luatex parse gate added |
+| 009 | — | UI nil in GameCore for the bootstrap (read_raw) → write_raw; backslash escapes rejected in COMMAND chunks too → %c class |
+| 009 (relaunch) | **14, 15, 16** | **SELF-SUSTAINING: three turns back-to-back, zero operator clicks** — the P1-8 fix proven live. Rule-2 targeting flaw found post-16 (fresh-attach ambiguity) |
+| 010/011 | — | trace-ring discriminator wired; **the ENGINE WEDGED mid-cycle**: after our t16 deactivation the AI's turn never started (trace ring shows the cycle stop). Tyre's empty production queue confirmed + resolved via `scripts/live_resolve_production.py` (BUILD accepted); cycle still halted — pending the operator's screen report (suspected modal: diplomacy/city panel) |
+
+Mechanisms learned about the engine (all via the mod's diagnostic ring):
+- The full turn cycle fires PlayerTurnStartComplete for players 0, 1, 62,
+  63 (majors + free agents) in order, every turn.
+- Our H1 end-turn deactivates player 0 (hook fires) and the cycle proceeds
+  — unless a modal blocks it (the current wedge).
+- The engine applies no turn-start hook for a turn whose predecessor is
+  blocked; everything downstream freezes cleanly.
+
+Tourney status: configs live (glm-5.3 / MiniMax-M3 / Qwen3.8-27B local);
+the first LLM game follows the turtler validation. The wedge must resolve
+first (or a fresh game is created for it — seven driven turtler turns
+already validate the milestone's core).
