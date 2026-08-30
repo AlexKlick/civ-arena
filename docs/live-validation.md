@@ -309,11 +309,28 @@ Players entries lack methods entirely); `UnitManager.FinishMoves`/
 rejects backslash escapes in patterns; multi-line prints arrive as one
 payload (parser flattens).
 
-Remaining for the leg (M14c–f): visibility isolation, action tools +
-sequential dispatch (H2 FinishMoves is the non-local turn-end path),
-restart/resume over autosaves, replay. After that: glm-5.3 enters as the
-live-leg LLM opponent (config-only), and the human-policy agent so the
-operator can play against the models.
+### 2026-08-30 — the action-surface routing table (live-probed, read-only)
+
+| Operation | VM | API (all verified present) |
+|---|---|---|
+| state reads (players/units/cities/techs/treasury) | GameCore | `Players`, guarded accessors (see above) |
+| 1-tile move | GameCore | `UnitManager.MoveUnit` |
+| freeze / per-unit restore | GameCore | `UnitManager.FinishMoves` / `RestoreMovement`+`RestoreUnitAttacks`, `Units:FindID` |
+| set research | GameCore | `Techs:SetResearchingTech`, `CanResearch` |
+| local-player switch | GameCore ONLY | `PlayerManager.SetLocalPlayerAndObserver` |
+| multi-tile MOVE_TO / attacks / found-city | InGame | `UnitManager.RequestOperation` (NOT MoveUnit there) |
+| production BUILD | InGame | `CityManager.RequestOperation(pCity, CityOperationTypes.BUILD, tParams)` — upstream's full pattern at civ6-mcp lua/cities.py:411-501, readback via `CurrentlyBuilding()` (GameCore) |
+| purchases | InGame | `CityManager.RequestCommand`, `CityCommandTypes` |
+| turn-end, LOCAL player | InGame | bare `UI.RequestAction(ActionTypes.ACTION_ENDTURN)` |
+
+**The M14d simplification:** the opponent does not need puppeteering at
+all — the ENGINE'S OWN AI plays that seat naturally between our turns.
+The first live 1v1 = the arena driving ONE player (the local seat, where
+every command above is legal as the acting local player: turtler policy
+first, glm-5.3 next) against the built-in AI, with the watchdog on our
+lease and the event log recording everything observable. Arena-vs-arena
+(both seats driven) remains available later via H2 for the non-local
+turn-end.
 
 Post-M14 backlog (decided with the operator, 2026-08-30): once the live
 control plane is proven, **glm-5.3 (Z.AI) enters as the live-leg LLM
