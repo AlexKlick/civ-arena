@@ -34,6 +34,7 @@ from civ_arena.arena.referee import Referee, RefereeConfig
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import MatchSpec, load_config
+from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.vendor.connection import GameConnection
@@ -271,6 +272,12 @@ async def phase_dispatch(
     driver = LiveDriver(spec, adapter, run_dir,
                         f"{spec.match_id}-i{os.getpid()}")
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
+    # Arena-owned services reach the runtime exactly as the coordinator
+    # wires them (LLM runtimes read diary/strategy at turn start; without
+    # this an llm-policy seat would run with empty cross-turn memory)
+    bind = getattr(runtime, "bind_services", None)
+    if bind is not None:
+        bind(diary=driver.referee.diary, strategy=driver.referee.strategy)
     await adapter.setup({})
     await adapter.inject_mod(mod_lua)
     per_turn: list[dict[str, Any]] = []
@@ -278,7 +285,10 @@ async def phase_dispatch(
     try:
         for _ in range(turns):
             status = await adapter.poll_status()  # engine turn is authority
-            turn = int(status["TURN"]) + 1  # attach-while-parked targeting
+            if (status.get("PUPPET_ACTIVE") is not True
+                    and status.get("TURN_ACTIVE") is True):
+                status = await _settle_engagement(adapter)
+            turn = _target_turn(status, agent.player_id)
             adapter.expect_turn(turn)
             lease = driver.referee.grant_lease(
                 agent.player_id, agent.agent_id, turn)
@@ -300,10 +310,11 @@ async def phase_dispatch(
                 "mutated": bool(allowed),
                 "violations": driver.referee.violation_count(),
             }
-            # integrity: the digest moves IFF something was authorized — a
-            # change with no mutations is undeclared drift; equal digests
-            # with mutations booked would mean the diff missed them
-            row["unexpected"] = row["digest_changed"] != row["mutated"]
+            # integrity (Codex P2-1, one-directional): the digest moving
+            # with ZERO authorized mutations is undeclared drift. The
+            # inverse is LEGAL — receipts with an unchanged net hash (a
+            # move there-and-back) — so it must not flag.
+            row["unexpected"] = row["digest_changed"] and not row["mutated"]
             per_turn.append(row)
             print(f"dispatch turn {turn}: allowed={row['allowed_mutations']} "
                   f"digest_changed={row['digest_changed']} "
@@ -324,6 +335,15 @@ async def phase_dispatch(
               f"violations={driver.referee.violation_count()})")
         return 0 if ok else 1
     finally:
+        # Codex P1-7: a crashed run must not leave the engine parked under
+        # a frozen lease — release this turn's lease (turn-bound, so a
+        # freshly-engaged next lease survives) and drop the puppet
+        try:
+            if adapter._phase_open != -1:  # noqa: SLF001
+                await adapter.read_raw(lua_translator.release(
+                    adapter._phase_open, adapter._turn_mirror))  # noqa: SLF001
+        except Exception:
+            pass
         await adapter.teardown()
 
 
@@ -335,6 +355,45 @@ def _refuse_rerun(events: Path) -> None:
         raise RuntimeError(
             f"{events} already exists — appending would corrupt the trust "
             "root (partial or finished); use a fresh --run-id")
+
+
+def _target_turn(status: dict[str, Any], player_id: int) -> int:
+    """Which engine turn the dispatch loop should drive.
+
+    Live-learned 2026-08-30 (runs 002/003/005/006), in precedence order:
+    1. a lease ENGAGED for us IS the turn (after our own end-turn the
+       engine parks on our next turn with the lease already engaged —
+       TURN+1 would strand that frozen turn forever);
+    2. no lease + our turn NOT active => the engine is mid-transition (the
+       AI still playing; TURN is shared by all players) and OUR hook is
+       still ahead — drive TURN;
+    3. no lease + our turn ACTIVE => the parked turn's hook already fired
+       before SetPuppet (the attach case) — drive TURN+1. This state is
+       AMBIGUOUS with "turn activation in progress, hook milliseconds
+       away" (run 006) — the caller settles it via _settle_engagement
+       before applying this rule."""
+    if (status.get("PUPPET_ACTIVE") is True
+            and int(status.get("LEASE_PLAYER", -1)) == player_id):
+        return int(status.get("LEASE_TURN", -1))
+    if status.get("TURN_ACTIVE") is True:
+        return int(status["TURN"]) + 1
+    return int(status["TURN"])
+
+
+async def _settle_engagement(adapter: FireTunerAdapter,
+                             settle_s: float = 20.0) -> dict[str, Any]:
+    """Resolve the ambiguous "no lease + our turn active" state (run 006):
+    the hook may be IMMINENT (turn activation in progress — the lease
+    appears within seconds) or already PAST (the attach case — no lease
+    ever appears for this turn). Poll briefly; whatever the state settles
+    into is the truth the targeting rules then apply."""
+    deadline = time.monotonic() + settle_s
+    status = await adapter.poll_status()
+    while (time.monotonic() < deadline
+           and status.get("PUPPET_ACTIVE") is not True):
+        await asyncio.sleep(1.0)
+        status = await adapter.poll_status()
+    return status
 
 
 def main() -> None:

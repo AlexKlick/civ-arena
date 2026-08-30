@@ -142,7 +142,11 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
             if unit.GetFortifyTurns ~= nil then fortified = unit:GetFortifyTurns() > 0 end
         end)
         local x = unit:GetX() local y = unit:GetY()
-        print("UNITROW|" .. unit:GetID() .. "|" .. p:GetID() .. "|" .. name
+        -- composite id (Codex P1-11): engine unit ids are PER-OWNER; the
+        -- agent-facing id is id + owner*65536 so foreign and own units can
+        -- never collide (own units decode back with uid % 65536)
+        print("UNITROW|" .. (unit:GetID() + p:GetID() * 65536)
+            .. "|" .. p:GetID() .. "|" .. name
             .. "|" .. x .. "|" .. (y - math.floor(x / 2))
             .. "|" .. hp .. "|" .. moves .. "|" .. maxmoves
             .. "|" .. combat .. "|" .. ranged .. "|" .. tostring(fortified))
@@ -169,6 +173,10 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
             if Locale ~= nil then name = Locale.Lookup(city:GetName()) end
         end)
         if name == nil or name == "" then name = "c" .. city:GetID() end
+        -- Codex P2-5: a renamed city carrying | or a newline would tear the
+        -- pipe-row parse; | and newlines are plain-string gsubs (no patterns)
+        name = string.gsub(name, "|", "-")
+        name = string.gsub(name, "\n", " ")
         local queue = "-"
         pcall(function()
             local bq = city:GetBuildQueue()
@@ -195,7 +203,8 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         local pop = 1
         pcall(function() pop = math.floor(city:GetPopulation()) end)
         local x = city:GetX() local y = city:GetY()
-        print("CITYROW|" .. city:GetID() .. "|" .. p:GetID() .. "|" .. name
+        print("CITYROW|" .. (city:GetID() + p:GetID() * 65536)
+            .. "|" .. p:GetID() .. "|" .. name
             .. "|" .. x .. "|" .. (y - math.floor(x / 2))
             .. "|" .. pop .. "|" .. queue)
     end
@@ -372,9 +381,11 @@ def dump_ambient() -> str:
     return "Puppeteer.DumpAmbient()"
 
 
-def release(player_id: int) -> str:
-    """Idempotent lease release; also books the lease re-diff as actuals."""
-    return f"Puppeteer.Release({player_id})"
+def release(player_id: int, turn: int = -1) -> str:
+    """TURN-BOUND idempotent lease release (Codex P1-8): -1 releases any
+    lease for the player (diagnostics); a turn releases only that turn's
+    lease — end_phase must never kill the NEXT turn's engaged lease."""
+    return f"Puppeteer.Release({player_id}, {turn})"
 
 
 def restore_unit(unit_id: str) -> str:
@@ -391,18 +402,18 @@ def freeze_unit(unit_id: str) -> str:
     return f"Puppeteer.FreezeUnit({num})"
 
 
-def diff_since_last() -> str:
+def diff_since_last(attrs: str = "", seq: int = 0) -> str:
     """Mod v0.3: the commanded-effects seam. DiffSinceLast() books the
     player's drift since the previous call (or lease start) as LEDGER rows
     and ADVANCES the baseline — so Release's final re-diff books only what
     no command ever covered. The adapter journals these rows as BOTH the
     command's mutations (allowed) and actuals — the watchdog's multiset
     diff then matches them exactly."""
-    return """
+    return f"""
 if Puppeteer == nil or Puppeteer.DiffSinceLast == nil then
     print("MOD_DIFF|unavailable")
 else
-    local d = Puppeteer.DiffSinceLast()
+    local d = Puppeteer.DiffSinceLast('{attrs}', {seq})
     if d ~= nil and d ~= "" then print(d) end
 end
 print("---END---")
@@ -441,11 +452,18 @@ def _bail(tool: str, reason: str, detail: str) -> str:
             "print('---END---') return ")
 
 
+def _own_uid(unit_id: str) -> int:
+    """Decode an own-unit composite id (uid + owner*65536; Codex P1-11).
+    Own units belong to the acting local player, so the low 16 bits are
+    the engine id."""
+    return int(unit_id[1:]) % 65536
+
+
 def move_unit(unit_id: str, dest: str) -> str:
     """InGame MOVE_TO (upstream's route — the same op a human click issues;
     the engine enforces movement cost/ZOC/terrain). MoveUnit exists only in
     GameCore and bypasses those rules, so it is NOT used for play."""
-    num = unit_id[1:]
+    num = _own_uid(unit_id)
     q, r = (int(p) for p in dest.split(","))
     x, y = axial_to_xy(q, r)
     return f"""-- arena:tool=move_unit
@@ -467,19 +485,16 @@ def attack(unit_id: str, target_id: str) -> str:
     """InGame: ranged units fire RANGE_ATTACK; melee closes via MOVE_TO with
     the ATTACK modifier (upstream's verified split). Target resolved by
     owner scan — target ids carry no owner on our wire."""
-    num, tnum = unit_id[1:], target_id[1:]
+    num, tnum = _own_uid(unit_id), int(target_id[1:])
     _cannot = _bail("attack", "CANNOT_ATTACK", target_id)
     return f"""-- arena:tool=attack
 local me = Game.GetLocalPlayer()
 local unit = UnitManager.GetUnit(me, {num})
 if unit == nil then {_bail("attack", "UNKNOWN_ENTITY", unit_id)} end
-local target = nil
-for i = 0, 62 do
-    if Players[i] ~= nil and Players[i].IsAlive ~= nil and Players[i]:IsAlive() then
-        local t = UnitManager.GetUnit(i, {tnum})
-        if t ~= nil then target = t break end
-    end
-end
+-- composite id (Codex P1-11): owner rides in the high bits — no owner
+-- scan, no wrong-target risk when both players have the same unit id
+local tOwner = math.floor({tnum} / 65536)
+local target = UnitManager.GetUnit(tOwner, {tnum} % 65536)
 if target == nil then {_bail("attack", "UNKNOWN_ENTITY", target_id)} end
 local tx = target:GetX() local ty = target:GetY()
 local info = GameInfo.Units[unit:GetType()]
@@ -502,7 +517,7 @@ print('---END---')"""
 def fortify(unit_id: str) -> str:
     """InGame FORTIFY with upstream's SLEEP fallback for units that cannot
     fortify (e.g. embarked)."""
-    num = unit_id[1:]
+    num = _own_uid(unit_id)
     return f"""-- arena:tool=fortify
 local me = Game.GetLocalPlayer()
 local unit = UnitManager.GetUnit(me, {num})
@@ -529,7 +544,7 @@ def found_city(unit_id: str, name: str | None = None) -> str:
     """InGame FOUND_CITY at the settler's tile. The optional name is
     DECLARED-IGNORED (engine auto-names; renaming is not on this surface)."""
     _ = name
-    num = unit_id[1:]
+    num = _own_uid(unit_id)
     _not_settler = _bail("found_city", "ILLEGAL_MOVE",
                          "not-a-settler-or-blocked")
     return f"""-- arena:tool=found_city
@@ -589,7 +604,7 @@ def set_city_production(city_id: str, item_id: str) -> str:
     """InGame CityManager.RequestOperation(BUILD) with upstream's
     VALUE_EXCLUSIVE insert mode — the tool's contract is REPLACE, not
     queue-alongside."""
-    cid = city_id[1:]
+    cid = int(city_id[1:]) % 65536
     return f"""{_resolve_item_lua(item_id, "set_city_production")}
 local me = Game.GetLocalPlayer()
 local pCity = CityManager.GetCity(me, {cid})
@@ -608,6 +623,16 @@ tParams[CityOperationTypes.PARAM_INSERT_MODE] = CityOperationTypes.VALUE_EXCLUSI
 CityManager.RequestOperation(pCity, CityOperationTypes.BUILD, tParams)
 local turns = -1
 pcall(function() turns = math.floor(bq:GetTurnsLeft(item.Hash)) end)
+-- Codex P1-4 readback: OK means the queue TOOK the item, not merely that
+-- the request was submitted (upstream's NOT_SET verification shape)
+local cur = -1
+pcall(function()
+    if bq.GetCurrentProductionType ~= nil then cur = bq:GetCurrentProductionType() end
+end)
+if cur ~= -1 and cur ~= item.Hash then
+    print('ACT|set_city_production|ERR|ILLEGAL_MOVE|engine-did-not-set')
+    print('---END---') return
+end
 print('ACT|set_city_production|OK|{item_id}|' .. turns)
 print('---END---')"""
 
@@ -646,6 +671,15 @@ pcall(function()
 end)
 if not can then {_bail("purchase", "ILLEGAL_MOVE", "engine-refused")} end
 CityManager.RequestCommand(pCity, CityCommandTypes.PURCHASE, tParams)
+-- Codex P1-4 readback: OK means the gold was CHARGED, not merely submitted
+local after_bal = nil
+pcall(function()
+    after_bal = math.floor(Players[me]:GetTreasury():GetGoldBalance())
+end)
+if after_bal ~= nil and after_bal > balance - cost then
+    print('ACT|purchase|ERR|ILLEGAL_MOVE|engine-did-not-charge')
+    print('---END---') return
+end
 print('ACT|purchase|OK|{item_id}|' .. cost)
 print('---END---')"""
 

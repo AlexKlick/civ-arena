@@ -646,3 +646,52 @@ def test_dispatch_rehearsal_end_to_end(tmp_path):
     results = [r for r in records if r["kind"] == "TOOL_RESULT"]
     assert len(results) == len([r for r in records
                                 if r["kind"] == "TOOL_CALL"])
+
+
+def test_dispatch_target_turn_rules():
+    """Live-learned runs 002/003/005: (1) an engaged lease for us IS the
+    turn; (2) no lease + our turn not active = mid-AI-transition, our hook
+    is ahead, drive TURN; (3) no lease + our turn ACTIVE = the attach
+    case (hook fired before SetPuppet), drive TURN+1."""
+    from civ_arena.game.civ6.live_driver import _target_turn
+
+    # rule 1: OUR lease engaged on the parked current turn
+    assert _target_turn(
+        {"TURN": 3, "PUPPET_ACTIVE": True, "LEASE_PLAYER": 0,
+         "LEASE_TURN": 3, "TURN_ACTIVE": True}, 0) == 3
+    # rule 1 beats rule 3 even when the turn is active
+    assert _target_turn(
+        {"TURN": 3, "PUPPET_ACTIVE": True, "LEASE_PLAYER": 0,
+         "LEASE_TURN": 3, "TURN_ACTIVE": False}, 0) == 3
+    # rule 2: mid-transition — TURN shared by all players, hook still ahead
+    assert _target_turn(
+        {"TURN": 7, "PUPPET_ACTIVE": False, "LEASE_PLAYER": -1,
+         "LEASE_TURN": -1, "TURN_ACTIVE": False}, 0) == 7
+    # rule 3: attach case — parked local turn, hook already fired
+    assert _target_turn(
+        {"TURN": 1, "PUPPET_ACTIVE": False, "LEASE_PLAYER": -1,
+         "LEASE_TURN": -1, "TURN_ACTIVE": True}, 0) == 2
+
+
+async def test_attach_does_not_reinject_over_live_mod():
+    """Live-learned run 004: re-executing the mod on attach RETIRES the
+    running instance — and any ENGAGED lease on the engine's parked turn
+    dies with it. A capable live mod must be VERIFIED, not re-injected."""
+    mod = FakeMod()  # injected by default (a prior attach left it live)
+    adapter, server = await _adapter_with(mod)
+    try:
+        doc = await adapter.inject_mod("-- PUPPET_PLAYERS = {}\n")
+        assert doc["present"] is True
+        assert mod.injections == 0, "verify-first must not re-execute"
+    finally:
+        await server.stop()
+
+    # the fresh-attach path still injects exactly once
+    mod2 = FakeMod(injected=False)
+    adapter, server = await _adapter_with(mod2)
+    try:
+        doc = await adapter.inject_mod("-- PUPPET_PLAYERS = {}\n")
+        assert doc["present"] is True and mod2.injections == 1
+        assert doc["supports_command_diff"] is True
+    finally:
+        await server.stop()

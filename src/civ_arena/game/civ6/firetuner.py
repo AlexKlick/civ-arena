@@ -34,6 +34,7 @@ Design notes that cost nothing to forget:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from collections.abc import Callable
@@ -60,15 +61,28 @@ _LIVE_POINTER = (
 # agent-supplied ids/coords are INTERPOLATED into Lua source — only these
 # spellings may cross the boundary (defense in depth beyond the referee's
 # type checks; a hostile tech_id like "MINING'] Evil() --" dies here).
-_UNIT_ID = re.compile(r"^u\d+$")
-_CITY_ID = re.compile(r"^c\d+$")
-_TOKEN = re.compile(r"^[A-Z0-9_]+$")
-_COORD = re.compile(r"^-?\d+,-?\d+$")
+_UNIT_ID = re.compile(r"^u\d+\Z")
+_CITY_ID = re.compile(r"^c\d+\Z")
+_TOKEN = re.compile(r"^[A-Z0-9_]+\Z")
+_COORD = re.compile(r"^-?\d+,-?\d+\Z")
 
 # tools that operate on a unit: restore its movement before the command
 # (the lease froze every unit at engagement), re-freeze on rejection so
 # the release diff sees the frozen baseline.
 _UNIT_TOOLS = frozenset({"move_unit", "attack", "fortify", "found_city"})
+
+# Codex P1-5: attrs each tool may legitimately move (the mod's DiffSinceLast
+# authorizes only rows in this scope for the command; drift on OTHER attrs
+# inside the command window is booked as UNDECLARED actuals by the mod).
+_TOOL_ATTRS = {
+    "move_unit": "pos,moves,damage,exists",
+    "attack": "pos,moves,damage,exists",
+    "fortify": "moves",
+    "found_city": "exists,population,moves",
+    "set_research": "researching",
+    "set_city_production": "none",   # production is outside recorder coverage
+    "purchase": "gold,exists",
+}
 
 
 def _row_owner(row: str) -> int | None:
@@ -203,6 +217,7 @@ class FireTunerAdapter:
         # must not leak into this phase's hash trail
         self._hash_owner: int | None = None
         self._sealed_hash: str | None = None
+        self._diff_seq = 0
         self.state = _LiveStateView(self)
 
     # -- lifecycle ---------------------------------------------------------
@@ -258,7 +273,17 @@ class FireTunerAdapter:
         tuner VM fire on the engine's own dispatch, so the mod is EXECUTED
         into the GameCore VM at attach instead. The mod file stays the
         source of truth; the .modinfo is a packaging artifact. Returns the
-        post-injection handshake (the same fail-closed gate)."""
+        post-injection handshake (the same fail-closed gate).
+
+        Live-learned 2026-08-30 (run 004): if a capable mod instance is
+        ALREADY live, this VERIFIES it instead of re-executing — the
+        re-injection hygiene retires the old instance, whose ``lease``
+        (and any ENGAGED lease on the engine's parked turn) dies with it.
+        Re-inject only on absence or capability mismatch."""
+        try:
+            return await self.require_mod()
+        except RuntimeError:
+            pass  # absent or incapable: (re-)inject below
         payload = lua_text + (
             "\nprint('MOD_LOADED|' .. tostring(Puppeteer ~= nil "
             "and Puppeteer.version or 'NIL'))\nprint('---END---')\n")
@@ -326,6 +351,7 @@ class FireTunerAdapter:
         self._phase_open = player_id
         self._hash_owner = player_id
         self._sealed_hash = None
+        self._diff_seq = 0
         self._turn_mirror = turn
         await self._refresh_digest()
         return {"manifest": manifest}
@@ -362,7 +388,7 @@ class FireTunerAdapter:
             timeout_s=self._turn_wait_s)
         # Release books any lease-vs-close drift as UNDECLARED actuals —
         # the referee's next sweep flags them (the live make-or-break check)
-        await self._conn.execute_read(lua_translator.release(player_id))
+        await self._conn.execute_read(lua_translator.release(player_id, turn))
         ledger = await self._conn.execute_read(lua_translator.dump_ledger())
         for doc in response_parser.parse_ledger_lines(ledger):
             self._journal.append(MutationRecord.from_doc(doc))
@@ -490,13 +516,24 @@ class FireTunerAdapter:
         unit_id = cmd.args.get("unit_id")
         if cmd.tool in _UNIT_TOOLS:
             # unfreeze exactly this unit (the lease froze all of them at
-            # engagement; NEVER bulk-restore)
+            # engagement; NEVER bulk-restore; once per unit per lease —
+            # mod-side, Codex P1-1)
             await self._conn.execute_read(
                 lua_translator.restore_unit(unit_id))
-        lua, ingame = builder(cmd.player_id, cmd.args)
-        lines = await (self._conn.execute_write(lua) if ingame
-                       else self._conn.execute_read(lua))
-        verdict = response_parser.parse_act(lines)
+        try:
+            lua, ingame = builder(cmd.player_id, cmd.args)
+            lines = await (self._conn.execute_write(lua) if ingame
+                           else self._conn.execute_read(lua))
+            verdict = response_parser.parse_act(lines)
+        except BaseException:
+            # Codex P1-7: a Lua error after the restore must not leak
+            # restored movement into the release diff — freeze it back,
+            # then let the failure propagate (the driver aborts the run)
+            if cmd.tool in _UNIT_TOOLS:
+                with contextlib.suppress(Exception):
+                    await self._conn.execute_read(
+                        lua_translator.freeze_unit(unit_id))
+            raise
         if verdict["status"] == "rejected":
             if cmd.tool in _UNIT_TOOLS:
                 # undo the restore: re-freeze so the restored-but-unused
@@ -511,13 +548,24 @@ class FireTunerAdapter:
         # — otherwise execute()'s post-hash is the PRE-command digest and the
         # log's hash trail goes stale mid-lease.
         await self._refresh_digest()
-        muts = await self._drain_command_diff(cmd.player_id)
+        muts = await self._drain_command_diff(
+            cmd.player_id, _TOOL_ATTRS.get(cmd.tool, ""),
+            self._next_diff_seq())
         return ActionResult(
             status="accepted",
             result={"tool": cmd.tool, "detail": verdict["detail"]},
             mutations=tuple(muts))
 
-    async def _drain_command_diff(self, player_id: int) -> list[MutationRecord]:
+    def _next_diff_seq(self) -> int:
+        """Per-lease monotonically increasing diff sequence (Codex P1-6):
+        a wire retry re-sends the same seq and re-serves the same rows; a
+        fresh command always computes a fresh window."""
+        self._diff_seq += 1
+        return self._diff_seq
+
+    async def _drain_command_diff(self, player_id: int,
+                                  attrs: str = "",
+                                  seq: int = 0) -> list[MutationRecord]:
         """The commanded-effects seam (mod v0.3): journal DiffSinceLast's
         rows as BOTH the command's mutations (allowed, via the returned
         records) and actuals (via the journal the referee drains) — the
@@ -525,7 +573,7 @@ class FireTunerAdapter:
         covers (production, promotions — declared recorder limitations)
         simply book nothing, on both sides."""
         lines = await self._conn.execute_read(
-            lua_translator.diff_since_last())
+            lua_translator.diff_since_last(attrs, seq))
         if any(ln.startswith("MOD_DIFF|unavailable") for ln in lines):
             raise RuntimeError(
                 "mod has no DiffSinceLast (need >= 0.3) — commanded effects "

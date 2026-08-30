@@ -44,11 +44,23 @@
 --     context? If not, write paths must run entirely in InGame state.
 
 Puppeteer = {}
-Puppeteer.version = "0.3.0-draft"
+Puppeteer.version = "0.3.1-diagnostic"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
 Puppeteer.supports_command_diff = true
+
+-- v0.3.1 diagnostic (live run 007): after an ARENA-driven (leased) H1
+-- end-turn, the NEXT local turn starts WITHOUT PlayerTurnStartComplete
+-- ever firing (t7/t9/t11 stable TURN_ACTIVE-no-lease; t6/t8/t10 hooks all
+-- followed no-lease bootstrap ends). PUPPETEER_TRACE is a pollable ring
+-- (D3) the driver reads to see hook entries and where they die.
+PUPPETEER_TRACE = PUPPETEER_TRACE or {}
+local function trace(msg)
+    table.insert(PUPPETEER_TRACE,
+        Game.GetCurrentGameTurn() .. "|" .. tostring(msg))
+    if #PUPPETEER_TRACE > 64 then table.remove(PUPPETEER_TRACE, 1) end
+end
 
 local PUPPET_PLAYERS = {}          -- set[playerID] = true; configured via SetPuppet
 local lease = nil                  -- { playerID, turn, snapshot = {unitId -> state} }
@@ -218,17 +230,34 @@ end
 
 function Puppeteer.Status()
     local active = lease ~= nil
+    -- IsTurnActive discriminates the dispatch race (live-learned run 005):
+    -- TURN is shared by all players, so "TURN=7, no lease" is ambiguous —
+    -- mid-AI-transition (our hook is still AHEAD: drive TURN) vs a parked
+    -- local turn whose hook already fired pre-injection (drive TURN+1).
+    -- Reported for the LOCAL player (the seat the driver drives).
+    local turn_active = false
+    pcall(function()
+        local me = Game.GetLocalPlayer()
+        local p = Players[me]
+        if p ~= nil and p.IsTurnActive ~= nil then
+            turn_active = p:IsTurnActive()
+        end
+    end)
     return string.format(
-        "TURN|%d\nPUPPET_ACTIVE|%s\nLEASE_PLAYER|%d\nLEASE_TURN|%d\n---END---",
+        "TURN|%d\nPUPPET_ACTIVE|%s\nLEASE_PLAYER|%d\nLEASE_TURN|%d"
+        .. "\nTURN_ACTIVE|%s\n---END---",
         Game.GetCurrentGameTurn(), boolstr(active),
         (lease ~= nil) and lease.playerID or -1,
-        (lease ~= nil) and lease.turn or -1)
+        (lease ~= nil) and lease.turn or -1,
+        boolstr(turn_active))
 end
 
 -- -- freeze / lease -----------------------------------------------------------
 
-function OnPlayerTurnStartComplete(playerID)
+local function OnPlayerTurnStartComplete(playerID)
+    trace("HOOK_ENTER|" .. tostring(playerID))
     if not PUPPET_PLAYERS[playerID] then
+        trace("HOOK_SKIP|not-puppet|" .. tostring(playerID))
         return
     end
     -- Step 1: freeze ALL of the puppet's units (zero movement) so the
@@ -236,31 +265,47 @@ function OnPlayerTurnStartComplete(playerID)
     -- load-bearing (Codex P1-1): the snapshot is the release-diff baseline,
     -- so it must capture the FROZEN state — snapshotting first would book
     -- our own freeze (movement 2->0) as an undeclared violation at release.
+    -- v0.3.1: per-unit pcall — one poisoned unit must not kill the hook
+    -- (and the trace shows exactly which one, if any).
     local pUnits = Players[playerID]:GetUnits()
     for _, unit in pUnits:Members() do
-        UnitManager.FinishMoves(unit)
+        local ok, err = pcall(function() UnitManager.FinishMoves(unit) end)
+        if not ok then trace("FREEZE_ERR|u" .. tostring(unit:GetID())
+                             .. "|" .. tostring(err)) end
     end
     lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
               snapshot = snapshot_player(playerID) }
+    trace("LEASE_SET|" .. tostring(playerID) .. "|"
+          .. tostring(Game.GetCurrentGameTurn()))
     print("PUPPET_ACTIVE|true")
 end
 
-function OnPlayerTurnDeactivated(playerID)
+local function OnPlayerTurnDeactivated(playerID)
+    trace("HOOK_DEACT|" .. tostring(playerID))
     if PUPPET_PLAYERS[playerID] then
-        Puppeteer.Release(playerID)
+        Puppeteer.Release(playerID, Game.GetCurrentGameTurn())
     end
 end
 
 -- Step 2 of the contract: restore exactly ONE unit, immediately before the
 -- coordinator's command for that unit executes. NEVER bulk-restore.
+-- Codex P1-1 (2026-08-30): ONCE per unit per lease — restore-before-every-
+-- command refilled movement/attacks each call, i.e. UNLIMITED actions per
+-- turn. The once-only bound keeps each unit to its natural allowance.
 function Puppeteer.RestoreUnit(unitId)
     if lease == nil then
         return
     end
-    local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
+    if lease.restored == nil then lease.restored = {} end
+    if lease.restored[unitId] then
+        return
+    end
+    local unit = Players[lease.playerID]:FindID and nil or nil
+    unit = Players[lease.playerID]:GetUnits():FindID(unitId)
     if unit ~= nil then
         UnitManager.RestoreMovement(unit)
         UnitManager.RestoreUnitAttacks(unit)
+        lease.restored[unitId] = true
     end
 end
 
@@ -283,27 +328,90 @@ end
 -- call (or lease start), advances the rolling baseline, and RETURNS the
 -- rows as one string. Release's final re-diff therefore books only what no
 -- command ever covered.
-function Puppeteer.DiffSinceLast()
+--   attrCsv (Codex P1-5): comma-list of attrs this COMMAND may touch
+--   (pos,moves,damage,exists,population,gold,researching). Rows outside it
+--   are NOT returned — engine drift inside the command window can no
+--   longer ride the command's authorization.
+--   Idempotence (Codex P1-6): the caller passes a monotonically
+--   increasing seq. A call with the SAME seq as the last one is a wire
+--   RETRY (lost response) and re-serves the same rows; a new seq computes
+--   fresh. Rehearsal-proven necessary: a heuristically re-served cache
+--   shifts every command's window into the NEXT command's attr scope.
+local diff_cache = nil
+local diff_cache_seq = -1
+
+-- attr of a LEDGER row, no patterns (the tuner lexer rejects them):
+-- LEDGER|kind|entity_type|entity_id|attr|before|after -> field 5
+local function row_attr(row)
+    local rest = row
+    for _ = 1, 4 do
+        local s = string.find(rest, "|", 1, true)
+        if s == nil then return nil end
+        rest = string.sub(rest, s + 1)
+    end
+    local s = string.find(rest, "|", 1, true)
+    if s == nil then return rest end
+    return string.sub(rest, 1, s - 1)
+end
+
+function Puppeteer.DiffSinceLast(attrCsv, seq)
     if lease == nil or lease.snapshot == nil then
         return ""
     end
+    if diff_cache ~= nil and seq ~= nil and seq == diff_cache_seq then
+        return diff_cache  -- wire retry of the same call: same rows
+    end
     local rows = diff_rows(lease.playerID, lease.snapshot)
+    local out = {}
+    for _, row in ipairs(rows) do
+        local keep = true
+        if attrCsv ~= nil and attrCsv ~= "" then
+            local attr = row_attr(row)
+            keep = attr ~= nil
+                and (("," .. attrCsv .. ","):find(
+                    "," .. attr .. ",", 1, true) ~= nil)
+        end
+        if keep then
+            table.insert(out, row)
+        else
+            -- NOT attributable to this command: engine drift inside the
+            -- command window — book it as an UNDECLARED actual right now
+            -- (Codex P1-5: it must never ride the command's authorization)
+            table.insert(command_ledger, row)
+        end
+    end
     lease.snapshot = snapshot_player(lease.playerID)
-    return table.concat(rows, "\n")
+    diff_cache = table.concat(out, "\n")
+    diff_cache_seq = seq
+    return diff_cache
 end
 
-function Puppeteer.Release(playerID)
+function Puppeteer.Release(playerID, turn)
     -- Re-diff from the ROLLING baseline (v0.3): anything no command ever
     -- covered lands in the command ledger as an undeclared actual — the
     -- watchdog flags it.
-    if lease ~= nil and lease.playerID == playerID and lease.snapshot ~= nil then
-        diff_player(playerID, lease.snapshot, book_actual)
-    end
-    if lease ~= nil and lease.playerID == playerID then
+    -- TURN-BOUND (Codex P1-8, live-confirmed t7/t9/t11): releasing by
+    -- player alone let end_phase's trailing release KILL the next turn's
+    -- freshly-engaged lease — the parked-turn-no-lease state that stalled
+    -- every second turn. -1 = release any (diagnostics).
+    if lease ~= nil and lease.playerID == playerID
+        and (turn == nil or turn == -1 or lease.turn == turn) then
+        if lease.snapshot ~= nil then
+            diff_player(playerID, lease.snapshot, book_actual)
+        end
         lease = nil
+        diff_cache = nil
     end
     print("PUPPET_ACTIVE|" .. boolstr(lease ~= nil))
     print("---END---")
+end
+
+-- v0.3.1: lifecycle cross-check (trace-only) — PlayerTurnActivated is
+-- the earliest turn-start event; if it fires while StartComplete does
+-- not, the engine's turn-start chain is stopping in between (the run-007
+-- suppression, localized).
+local function OnPlayerTurnActivated(playerID, isHuman)
+    trace("ACTIVATED|" .. tostring(playerID) .. "|" .. tostring(isHuman))
 end
 
 -- Re-injection hygiene (D9): the adapter re-executes this file at every
@@ -312,9 +420,11 @@ end
 if type(PUPPETEER_CLEANUP) == "function" then PUPPETEER_CLEANUP() end
 GameEvents.PlayerTurnStartComplete.Add(OnPlayerTurnStartComplete)
 Events.PlayerTurnDeactivated.Add(OnPlayerTurnDeactivated)
+GameEvents.PlayerTurnActivated.Add(OnPlayerTurnActivated)
 PUPPETEER_CLEANUP = function()
     GameEvents.PlayerTurnStartComplete.Remove(OnPlayerTurnStartComplete)
     Events.PlayerTurnDeactivated.Remove(OnPlayerTurnDeactivated)
+    GameEvents.PlayerTurnActivated.Remove(OnPlayerTurnActivated)
 end
 
 -- -- ambient windows: the load-bearing contract ---------------------------------
@@ -390,6 +500,12 @@ function Puppeteer.DumpAmbient()
 end
 
 -- -- turn-end experiments (D7; the driver picks, outcomes recorded dated) --------
+
+-- v0.3.1: pollable hook trace (D3 — prints from engine callbacks are
+-- unsolicited and get drained; polling is the only sound read).
+function Puppeteer.Trace()
+    return table.concat(PUPPETEER_TRACE, "\n")
+end
 
 -- H2 primitive: zero out remaining movement so the engine can auto-complete.
 function Puppeteer.FinishAllMoves(playerID)
