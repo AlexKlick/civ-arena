@@ -117,3 +117,59 @@ boundaries, ledgers dumped for the watchdog) lives in
 - Expect per-turn latency of seconds-to-minutes per puppeted player
   (upstream open question 5); the duel match config exists precisely to
   bound this.
+
+## 6. Live-leg execution record (M14)
+
+Host fact (verified 2026-08-29, read-only probes): the **Aspyr native Linux
+port** is installed — appid 289070, buildid 15296837, `StateFlags 4`,
+`libGameCore_*.so` — at
+`/media/alexk/RAID5_Storage/SteamLibrary/steamapps/common/Sid Meier's
+Civilization VI`. The game has never been launched on this host (no
+`~/.local/share/aspyr-media`, no `AppOptions.txt` anywhere — it is created
+on first run), so §1's Aspyr-native row is the expected AppOptions location
+and the Proton row is expected dead (no `compatdata/289070` in that
+library). Both expectations get CONFIRMED (not assumed) at the first
+launch, below.
+
+Entries are appended dated, newest last; every failure records the
+hypothesis it killed. The staged smoke
+(`uv run python scripts/firetuner_smoke.py --live`) is run before each
+phase; its exit code names the failing stage (S1=10 … S6=60).
+
+### Operator runbook — environment preflight (M14a)
+
+1. First launch, to materialize the config tree (quit at the main menu):
+
+   ```bash
+   steam -applaunch 289070
+   ```
+
+2. Locate AppOptions.txt (§1 "locate, don't assume"):
+
+   ```bash
+   find ~/.local/share/aspyr-media -maxdepth 3 -name AppOptions.txt
+   ls /media/alexk/RAID5_Storage/SteamLibrary/steamapps/compatdata/ 2>/dev/null
+   ```
+
+3. Edit the located `AppOptions.txt`: under `[Debug]` set `EnableTuner 1`;
+   set `FullScreen 0`.
+
+4. Stage the mod:
+
+   ```bash
+   mkdir -p "$HOME/.local/share/aspyr-media/Sid Meier's Civilization VI/Mods"
+   cp -r /home/alexk/documents/civ-arena/mods/PuppeteerMod \
+      "$HOME/.local/share/aspyr-media/Sid Meier's Civilization VI/Mods/"
+   ```
+
+### 2026-08-29 — M14a preflight shipped (no game touched)
+
+Code-side only: staged smoke S1–S6 (`--live --json`, stage-distinct exit
+codes, transcript under `runs/live-preflight-<ts>/`), the mod-handshake
+seam (`mod_handshake`/`mod_status`/`mod_digest` translators +
+fail-closed `parse_handshake` + `FireTunerAdapter.require_mod()` phase-1
+gate), and the FakeTunerServer rehearsal mode (per-state framing, a
+scripted FakeMod with fake-only `Simulate.*` commands to fire wire-
+invisible engine events). Gate: 18/18 on the wire+preflight files; full
+suite count in the M14a commit. Nothing live yet — every live step above
+still pending operator hands.

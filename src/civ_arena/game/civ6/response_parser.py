@@ -33,3 +33,18 @@ def _coerce(value: str) -> Any:
         return int(value)
     except ValueError:
         return value
+
+
+def parse_handshake(lines: list[str]) -> dict[str, Any]:
+    """Typed PuppeteerMod handshake doc, FAIL-CLOSED: a missing or false
+    capability is False, never defaulted True — the adapter refuses to
+    drive a live match unless freeze AND ledger are explicitly true."""
+    parsed = parse_kv_lines(lines)
+    present = parsed.get("MOD_PRESENT") is True
+    return {
+        "present": present,
+        "mod_version": parsed.get("MOD_VERSION") if present else None,
+        "supports_freeze": present and parsed.get("SUPPORTS_FREEZE") is True,
+        "supports_ledger": present and parsed.get("SUPPORTS_LEDGER") is True,
+        "supports_digest": present and parsed.get("SUPPORTS_DIGEST") is True,
+    }

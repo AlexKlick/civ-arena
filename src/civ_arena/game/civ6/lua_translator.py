@@ -43,4 +43,61 @@ def lua_error_probe() -> str:
     return "this is not ( valid lua"
 
 
+def mod_handshake() -> str:
+    """PuppeteerMod capability handshake — the phase-1 live gate.
+
+    Tolerates both mod shapes: v0.1's Handshake() RETURNS a multi-line
+    string (printed here line-by-line so each row arrives as its own
+    message), and a print-direct Handshake() needs no help. ``Puppeteer``
+    being nil (mod absent/disabled) is an answer, not an error.
+    """
+    return """
+if Puppeteer == nil then
+    print("MOD_PRESENT|false")
+else
+    print("MOD_PRESENT|true")
+    local hs = Puppeteer.Handshake()
+    if hs ~= nil then
+        for line in string.gmatch(hs, "[^\n]+") do print(line) end
+    end
+end
+print("---END---")
+"""
+
+
+def mod_status() -> str:
+    """Pollable puppet/lease state (mod >= 0.2 — D3: poll, never push).
+
+    The vendored connection drains unsolicited messages around every
+    command, so hook-time prints are unreliable; Status() is the only
+    sound way to observe lease state.
+    """
+    return """
+if Puppeteer == nil or Puppeteer.Status == nil then
+    print("MOD_STATUS|unavailable")
+else
+    local s = Puppeteer.Status()
+    if s ~= nil then
+        for line in string.gmatch(s, "[^\n]+") do print(line) end
+    end
+end
+print("---END---")
+"""
+
+
+def mod_digest() -> str:
+    """Puppeteer.Digest() — the live before/after state digest rows."""
+    return """
+if Puppeteer == nil or Puppeteer.Digest == nil then
+    print("MOD_DIGEST|unavailable")
+else
+    local d = Puppeteer.Digest()
+    if d ~= nil then
+        for line in string.gmatch(d, "[^\n]+") do print(line) end
+    end
+end
+print("---END---")
+"""
+
+
 _ = lua_error_probe  # exported for tests

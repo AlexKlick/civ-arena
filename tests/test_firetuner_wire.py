@@ -74,6 +74,20 @@ async def test_lua_error_raises():
     await with_server([(0, "bad code", ["ERR:lua exploded"])], check)
 
 
+async def test_ingame_state_framing_parses():
+    """InGame (state 1) responses arrive framed with their own context name;
+    the vendored parser must strip any context, not just GameCore_Tuner."""
+
+    async def check(port: int, _server: FakeTunerServer):
+        conn = GameConnection("127.0.0.1", port)
+        await conn.connect()
+        lines = await conn.execute_write('print("UI|1") print("---END---")')
+        assert lines == ["UI|1"]
+        await conn.disconnect()
+
+    await with_server([(1, "UI|", ["UI|1"])], check)
+
+
 async def test_parser_kv_and_rows():
     parsed = parse_kv_lines(
         ["TURN|12", "LOCAL|0", "PUPPET_ACTIVE|false", "---END---",

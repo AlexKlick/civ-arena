@@ -37,6 +37,25 @@ class FireTunerAdapter:
     async def teardown(self) -> None:
         await self._conn.disconnect()
 
+    async def read_raw(self, lua: str) -> list[str]:
+        """Raw pipe-rows for translator output (smoke/driver transcript use)."""
+        return await self._conn.execute_read(lua)
+
+    async def mod_handshake(self) -> dict[str, Any]:
+        """PuppeteerMod capability handshake — fail-closed (parse_handshake)."""
+        lines = await self._conn.execute_read(lua_translator.mod_handshake())
+        return response_parser.parse_handshake(lines)
+
+    async def require_mod(self) -> dict[str, Any]:
+        """Phase-1 live gate (docs/live-validation.md §3.1): refuse to drive
+        a live match unless the mod reports freeze AND ledger support."""
+        doc = await self.mod_handshake()
+        if not doc["supports_freeze"] or not doc["supports_ledger"]:
+            raise RuntimeError(
+                f"PuppeteerMod handshake gate failed: {doc} — freeze+ledger "
+                "required (docs/live-validation.md §3.1)")
+        return doc
+
     def capabilities(self) -> AdapterCapabilities:
         return AdapterCapabilities(
             rollback=False, save_load=False, acts=False, state_hash=False,
