@@ -145,10 +145,16 @@ def finish_all_moves(player_id: int) -> str:
 
 
 def request_end_turn(player_id: int) -> str:
-    """D7-H1: ENDTURN via the UI action bus inside the player context
-    (InGame state — run with execute_write, not execute_read)."""
-    return (f"Puppeteer.WithPlayerContext({player_id}, function() "
-            "UI.RequestAction(ActionTypes.ACTION_ENDTURN) end)")
+    """D7-H1: ENDTURN for the LOCAL player via the UI action bus (InGame
+    state — a separate VM from GameCore). Live-learned 2026-08-30:
+    SetLocalPlayerAndObserver exists ONLY in GameCore and UI only in
+    InGame, so no switch is possible here — but the local player's turn
+    needs none. Non-local turn-end (the AI's) takes the H2 FinishMoves
+    path in GameCore instead (docs/live-validation.md §6)."""
+    return (
+        "UI.RequestAction(ActionTypes.ACTION_ENDTURN) "
+        f"print('ENDTURN_SENT|{player_id}') print('---END---')"
+    )
 
 
 _ = lua_error_probe  # exported for tests

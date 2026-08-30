@@ -53,14 +53,16 @@ def test_freeze_snapshots_the_frozen_state():
     )
 
 
-def test_recorder_covers_treasury_research_production():
+def test_recorder_covers_treasury_research():
     """Codex P1-2 (partial): the release/window diffs must book the same
-    attributes the digest covers — gold, research, per-city production —
-    or engine effects move the digest with no ledger row to flag."""
+    attributes the digest covers — gold, research — or engine effects move
+    the digest with no ledger row to flag. Production-name coverage is
+    DEFERRED (no GameCore accessor; recorded in §6)."""
     lua = (MODS / "PuppeteerMod.lua").read_text()
     assert 'book("player.gold"' in lua
     assert 'book("player.research_set"' in lua
-    assert 'book("city.production_set"' in lua
+    assert "GetGoldBalance" in lua, "the GameCore treasury accessor"
+    assert "DEFERRED" in lua, "the production deferral stays written"
     # the residual (districts, queues, promotions, tiles) is DECLARED
     assert "OUTSIDE both" in lua, "the recorder's scope limit stays written"
 

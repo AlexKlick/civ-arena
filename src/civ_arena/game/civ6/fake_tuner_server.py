@@ -91,6 +91,9 @@ class FakeMod:
             return ["OV|1", f"TURN|{self.turn}", "ALIVE|2",
                     "PLAYER|0|CIVILIZATION_ROME",
                     "PLAYER|1|CIVILIZATION_KOREA"]
+        if "PUPPET_PLAYERS = {}" in code:
+            # the injected mod source (D9): execution succeeds silently
+            return [f"MOD_LOADED|{self.version}"]
         if "Puppeteer.Handshake" in code:
             return [
                 "MOD_PRESENT|true",
@@ -128,13 +131,13 @@ class FakeMod:
         if m:
             return [f"FINISHED_MOVES|{m.group(1)}|0"]
         if "UI.RequestAction(ActionTypes.ACTION_ENDTURN)" in code:
-            # D7-H1 rehearsal: the engine honors the end-turn request —
-            # the lease drops (OnPlayerTurnDeactivated) and the turn only
-            # advances when the driver simulates it.
-            m = re.search(r"Puppeteer\.WithPlayerContext\(\s*(\d+)", code)
-            if m and self.lease and self.lease["player"] == int(m.group(1)):
-                self.lease = None
-            return ["PUPPET_ACTIVE|false"]
+            # D7-H1 rehearsal: the LOCAL player's end-turn via the UI bus
+            # (InGame VM — no Puppeteer, no SetLocalPlayerAndObserver
+            # there, live-learned). The engine honors it; the lease drops
+            # (OnPlayerTurnDeactivated) and the turn advances only when
+            # the driver simulates it.
+            self.lease = None
+            return ["PUPPET_ACTIVE|false", "ENDTURN_SENT|0"]
         if "Puppeteer.RestoreUnit" in code:
             return []  # silent, like the mod
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
@@ -159,6 +162,16 @@ class FakeMod:
             if self.puppets.get(pid):
                 self.lease = {"player": pid, "turn": self.turn}
             return []  # hook print is unsolicited => drained: no rows
+        m = re.search(r"Simulate\.TurnStartAt\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
+        if m:
+            # targeted variant: the engine reached this turn and the hook
+            # fired for the puppet (the attach-while-parked path)
+            pid, turn = int(m.group(1)), int(m.group(2))
+            if turn > self.turn:
+                self.turn = turn
+            if self.puppets.get(pid):
+                self.lease = {"player": pid, "turn": turn}
+            return []
         m = re.search(r"Simulate\.TurnDeactivated\(\s*(\d+)\s*\)", code)
         if m:
             pid = int(m.group(1))

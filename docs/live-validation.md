@@ -267,6 +267,54 @@ EMPTY stub — no Proton prefix exists; the Aspyr-native row of the §1
 table remains the expected AppOptions route, to be confirmed the moment
 `aspyr-media` materializes.
 
+### 2026-08-30 — THE MAKE-OR-BREAK PASSED: exclusive control CLEAN on the real engine
+
+`live-exclusive-005`: **`clean: True, violations: 0, drift: False,
+final_turn: 8`** — `MATCH_START → LEASE_GRANT → AMBIENT → LEASE_RELEASE →
+TURN_END → TOOL pair (end_turn) → MATCH_END`, the exact sim event shape,
+driven against live Civ VI. The freeze engaged at the player's
+PlayerTurnStartComplete (upstream open question 1: ANSWERED — catchable),
+nothing undeclared mutated during the held lease (open question 3:
+suppressed), the held state was digest-identical from engagement to the
+pre-endturn seal, and the programmatic end-turn (H1) worked.
+
+The trajectory that got here — five runs, four live-only defects, each
+fixed at the seam and recorded:
+
+| run | outcome | the finding |
+|---|---|---|
+| 001 | crash at end_phase | GameCore and InGame are SEPARATE Lua VMs: `UI` nil in GameCore, `Puppeteer` nil in InGame — cross-VM commands must be self-contained |
+| 002 | engage timeout (120s) | human-paced turn ends need a longer window (`--engage-timeout`) |
+| 003 | crash at end_phase | `SetLocalPlayerAndObserver` exists ONLY in GameCore; but the local player's ENDTURN needs no switch — bare `UI.RequestAction` in InGame |
+| 004 | full cycle, drift=true | the engine applies turn-end effects AFTER the end-turn command (gold income +5, completed production, the next player's whole turn) — the digest seal now brackets the held lease (pre-endturn), not the engine's post-processing |
+| 005 | **CLEAN** | — |
+
+Also proven this session (the D9 architecture shift): the mod needs NO
+modinfo/Additional Content at all — gameplay-script globals never reach
+the tuner VM, but `GameEvents` subscriptions made FROM the tuner fire on
+the engine's dispatch (live-proven: hooks fired for every AI player and
+the local one). The adapter now INJECTS PuppeteerMod.lua into the
+GameCore VM at attach, with re-injection hygiene (old hooks retired).
+The mod file stays the source of truth; the .modinfo is a packaging
+artifact.
+
+GameCore API surface (live-verified 2026-08-30): `GetMovesRemaining` /
+`GetDamage` (NOT GetMovementRemaining/GetHP; no fortified accessor);
+`GetGoldBalance` (NOT GetGold); `PlayerManager.GetAliveMajors`,
+`IsMajor`/`IsAlive`/`IsBarbarian` (with per-entry nil guards — some
+Players entries lack methods entirely); `UnitManager.FinishMoves`/
+`RestoreMovement`/`RestoreUnitAttacks`/`MoveUnit`, `FindID`,
+`SetLocalPlayerAndObserver` (GameCore only), `UI.RequestAction`+
+`ActionTypes.ACTION_ENDTURN` (InGame only). The tuner's Lua lexer
+rejects backslash escapes in patterns; multi-line prints arrive as one
+payload (parser flattens).
+
+Remaining for the leg (M14c–f): visibility isolation, action tools +
+sequential dispatch (H2 FinishMoves is the non-local turn-end path),
+restart/resume over autosaves, replay. After that: glm-5.3 enters as the
+live-leg LLM opponent (config-only), and the human-policy agent so the
+operator can play against the models.
+
 Post-M14 backlog (decided with the operator, 2026-08-30): once the live
 control plane is proven, **glm-5.3 (Z.AI) enters as the live-leg LLM
 opponent** — config-only per the M14 lane exploration (own `llm:` block,

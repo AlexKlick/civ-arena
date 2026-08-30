@@ -78,7 +78,7 @@ def filter_digest_rows(digest: str, owner: int) -> list[str]:
 # rehearsal mode. Hook prints are unsolicited and drained in the real wire,
 # so engine-side events exist for the adapter only through their effect on
 # the next Status/Digest poll.
-SimulateHook = Callable[[str, int], str]
+SimulateHook = Callable[[str, int, int], str]
 
 
 class _LiveStateView:
@@ -179,6 +179,26 @@ class FireTunerAdapter:
         lines = await self._conn.execute_read(lua_translator.mod_handshake())
         return response_parser.parse_handshake(lines)
 
+    async def inject_mod(self, lua_text: str) -> dict[str, Any]:
+        """D9 (live-proven 2026-08-30): gameplay-script globals are INVISIBLE
+        to the tuner VM — a conventionally loaded mod can never answer
+        FireTuner calls. But ``GameEvents`` subscriptions made FROM the
+        tuner VM fire on the engine's own dispatch, so the mod is EXECUTED
+        into the GameCore VM at attach instead. The mod file stays the
+        source of truth; the .modinfo is a packaging artifact. Returns the
+        post-injection handshake (the same fail-closed gate)."""
+        payload = lua_text + (
+            "\nprint('MOD_LOADED|' .. tostring(Puppeteer ~= nil "
+            "and Puppeteer.version or 'NIL'))\nprint('---END---')\n")
+        lines = await self._conn.execute_read(payload, timeout=15.0)
+        marker = next(
+            (ln for ln in response_parser._split_lines(lines)
+             if ln.startswith("MOD_LOADED|")), None)
+        if marker is None or marker == "MOD_LOADED|NIL":
+            raise RuntimeError(
+                f"mod injection failed: {marker!r} from {lines[:3]!r}")
+        return await self.require_mod()
+
     async def require_mod(self) -> dict[str, Any]:
         """Phase-1 live gate (docs/live-validation.md §3.1): refuse to drive
         a live match unless the mod reports freeze AND ledger AND digest —
@@ -203,22 +223,22 @@ class FireTunerAdapter:
         if self._phase_open != -1:
             raise RuntimeError(
                 f"phase already open for player {self._phase_open}")
-        await self._await(
-            lambda p: int(p.get("TURN", -1)) == turn,
-            f"engine to reach turn {turn}")
+        # SetPuppet BEFORE any turn wait (live-learned 2026-08-30): attaching
+        # while the target player's turn is already parked means this turn's
+        # hook has FIRED — the lease engages at the player's NEXT natural
+        # turn start, so the puppet must be configured first and the caller
+        # targets the next turn. Engagement for anyone else, or a stale
+        # turn, is a refusal (Codex P1-3). A timeout here IS the finding.
         await self._conn.execute_read(
             lua_translator.set_puppet(player_id, True))
-        await self._fire_simulate("turn_start", player_id)
-        # The make-or-break wait (upstream open question 1): the hook must
-        # engage the freeze BEFORE the stock AI acts, for THIS player at THIS
-        # turn — an engaged lease for anyone else is a refusal, not a pass
-        # (Codex P1-3). A timeout here IS the finding — record it, stop.
+        await self._fire_simulate("turn_start", player_id, turn)
         await self._await(
             lambda p: (p.get("PUPPET_ACTIVE") is True
                        and p.get("LEASE_PLAYER") == player_id
                        and p.get("LEASE_TURN") == turn),
             f"lease to engage for player {player_id} at turn {turn} "
-            "(PlayerTurnStartComplete timing)")
+            "(PlayerTurnStartComplete timing)",
+            timeout_s=self._turn_wait_s)
         # Declared ambient window: snapshot -> diff -> manifest rows
         await self._conn.execute_read(
             lua_translator.begin_ambient_window(player_id))
@@ -241,6 +261,15 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"end_phase turn mismatch: mirror {self._turn_mirror}, "
                 f"asked {turn}")
+        # SEAL the HELD state BEFORE issuing the end-turn (live-learned
+        # 2026-08-30, run live-exclusive-004): the engine applies turn-end
+        # effects AFTER the end-turn command — gold income (+5), completed
+        # production, the next player's whole turn — and a post-command
+        # digest poll races all of it. The sealed hash must bracket the
+        # lease WE held (owner-scoped, Codex P1-4), not the engine's
+        # post-processing.
+        await self._refresh_digest()
+        self._sealed_hash = self.state_hash()
         if self._strategy == "h1":
             await self._conn.execute_write(
                 lua_translator.request_end_turn(player_id))
@@ -248,7 +277,7 @@ class FireTunerAdapter:
             await self._conn.execute_read(
                 lua_translator.finish_all_moves(player_id))
         # h3: no explicit command — wait for the engine to release on its own
-        await self._fire_simulate("turn_deactivated", player_id)
+        await self._fire_simulate("turn_deactivated", player_id, turn)
         await self._await(
             lambda p: (p.get("PUPPET_ACTIVE") is False
                        or int(p.get("TURN", -1)) > turn),
@@ -260,12 +289,6 @@ class FireTunerAdapter:
         ledger = await self._conn.execute_read(lua_translator.dump_ledger())
         for doc in response_parser.parse_ledger_lines(ledger):
             self._journal.append(MutationRecord.from_doc(doc))
-        # SEAL the phase-end hash while the owner scope is still set: the
-        # digest refresh races the next player's first mutations in live
-        # play, so the hash is fixed here — owner-scoped, immune to foreign
-        # activity (Codex P1-4) — and served to the referee's post-hash call
-        await self._refresh_digest()
-        self._sealed_hash = self.state_hash()
         self._hash_owner = None
         self._phase_open = -1
         # rehearsal-only: the real engine advances on its own after release
@@ -281,6 +304,15 @@ class FireTunerAdapter:
         if "TURN" in parsed:
             self._turn_mirror = int(parsed["TURN"])
         return parsed
+
+    def expect_turn(self, turn: int) -> None:
+        """Advance the turn mirror to the turn the coordinator targets.
+        Attach-while-parked: the engine sits one turn BEHIND the target and
+        only advances through the lease engagement begin_phase waits for —
+        the referee's pre-check would otherwise refuse on a stale mirror.
+        Every Status poll re-syncs the mirror to the engine's truth."""
+        if turn > self._turn_mirror:
+            self._turn_mirror = turn
 
     async def refresh_digest(self) -> str:
         """Poll the whole-board digest and return the new state hash."""
@@ -304,10 +336,12 @@ class FireTunerAdapter:
                 raise RuntimeError(f"timed out waiting for {what}: {parsed}")
             await asyncio.sleep(self._poll_interval_s)
 
-    async def _fire_simulate(self, event: str, player_id: int) -> None:
+    async def _fire_simulate(self, event: str, player_id: int,
+                             turn: int = 0) -> None:
         if self._simulate is None:
             return
-        await self._conn.execute_read(self._simulate(event, player_id))
+        await self._conn.execute_read(
+            self._simulate(event, player_id, turn))
 
     # -- observation ----------------------------------------------------------
     async def observe(self, req: ObserveRequest) -> Any:

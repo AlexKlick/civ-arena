@@ -47,14 +47,17 @@ local ambient_snapshot = nil       -- BeginAmbientWindow's per-player snapshot
 local function ifloor(v) return string.format("%d", math.floor(v or 0)) end
 local function boolstr(v) return tostring(v and true or false) end
 
+-- live-learned 2026-08-30: the GameCore unit object exposes
+-- GetMovesRemaining / GetDamage — NOT GetMovementRemaining / GetHP, and no
+-- fortified accessor at all (dropped from snapshots/digest accordingly).
 local function snapshot_units(playerID)
     local snap = {}
     local pUnits = Players[playerID]:GetUnits()
     for _, unit in pUnits:Members() do
         snap[unit:GetID()] = {
             x = unit:GetX(), y = unit:GetY(),
-            movement = unit:GetMovementRemaining(),
-            hp = unit:GetHP(), fortified = unit:IsFortified(),
+            moves = unit:GetMovesRemaining(),
+            damage = unit:GetDamage(),
         }
     end
     return snap
@@ -75,7 +78,6 @@ local function snapshot_player(playerID)
         for _, city in Players[playerID]:GetCities():Members() do
             snap.cities[city:GetID()] = {
                 population = city:GetPopulation(),
-                production = tostring(city:GetProductionName()),
             }
         end
     end)
@@ -83,7 +85,8 @@ local function snapshot_player(playerID)
         local p = Players[playerID]
         local tech = p:GetTechs():GetResearchingTech()
         snap.player = {
-            gold = math.floor(p:GetTreasury():GetGold()),
+            -- live-learned: GetGoldBalance, not GetGold (GameCore treasury)
+            gold = math.floor(p:GetTreasury():GetGoldBalance()),
             researching = (tech ~= nil) and tech or -1,
         }
     end)
@@ -119,16 +122,13 @@ local function diff_player(playerID, before, book)
                 book("unit.moved", "unit", id, "pos",
                      b.x .. "," .. b.y, u.x .. "," .. u.y)
             end
-            if ifloor(u.movement) ~= ifloor(b.movement) then
-                book("unit.movement", "unit", id, "movement",
-                     ifloor(b.movement), ifloor(u.movement))
+            if ifloor(u.moves) ~= ifloor(b.moves) then
+                book("unit.moves", "unit", id, "moves",
+                     ifloor(b.moves), ifloor(u.moves))
             end
-            if ifloor(u.hp) ~= ifloor(b.hp) then
-                book("unit.hp", "unit", id, "hp", ifloor(b.hp), ifloor(u.hp))
-            end
-            if u.fortified ~= b.fortified then
-                book("unit.fortified", "unit", id, "fortified",
-                     boolstr(b.fortified), boolstr(u.fortified))
+            if ifloor(u.damage) ~= ifloor(b.damage) then
+                book("unit.damage", "unit", id, "damage",
+                     ifloor(b.damage), ifloor(u.damage))
             end
         end
     end
@@ -166,16 +166,8 @@ local function diff_player(playerID, before, book)
                  tostring(after.player.researching))
         end
     end
-    if after.cities ~= nil and before.cities ~= nil then
-        for cid, c in pairs(after.cities) do
-            local b = before.cities[cid]
-            if b ~= nil and c.production ~= b.production then
-                book("city.production_set", "city", "c" .. cid,
-                     "production", tostring(b.production),
-                     tostring(c.production))
-            end
-        end
-    end
+    -- production-name coverage DEFERRED: no accessor in GameCore
+    -- (GetProductionName is UI-context only) — recorded in §6
 end
 
 -- -- handshake -------------------------------------------------------------
@@ -258,8 +250,16 @@ function Puppeteer.Release(playerID)
     print("---END---")
 end
 
+-- Re-injection hygiene (D9): the adapter re-executes this file at every
+-- attach — retire the PREVIOUS injection's hooks first or both live on
+-- and fight over one `lease`.
+if type(PUPPETEER_CLEANUP) == "function" then PUPPETEER_CLEANUP() end
 GameEvents.PlayerTurnStartComplete.Add(OnPlayerTurnStartComplete)
 Events.PlayerTurnDeactivated.Add(OnPlayerTurnDeactivated)
+PUPPETEER_CLEANUP = function()
+    GameEvents.PlayerTurnStartComplete.Remove(OnPlayerTurnStartComplete)
+    Events.PlayerTurnDeactivated.Remove(OnPlayerTurnDeactivated)
+end
 
 -- -- ambient windows: the load-bearing contract ---------------------------------
 -- Engine effects that happen INSIDE a window are booked as ambient (declared
@@ -286,7 +286,7 @@ end
 -- -- verification digest -----------------------------------------------------------
 
 -- Deterministic whole-board digest over sorted rows for every ALIVE MAJOR:
---   u<unitID>|<owner>|<x>|<y>|<movement>|<hp>|<fortified>
+--   u<unitID>|<owner>|<x>|<y>|<movesRemaining>|<damage>
 --   c<cityID>|<owner>|<population>
 --   p<playerID>|<gold>|<researchingTechID or -1>
 -- Integers are floored (canonical JSON rejects floats); this is the live
@@ -296,10 +296,10 @@ function Puppeteer.Digest()
     for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         local pid = p:GetID()
         for _, unit in p:GetUnits():Members() do
-            table.insert(rows, string.format("u%d|%d|%d|%d|%d|%d|%s",
+            table.insert(rows, string.format("u%d|%d|%d|%d|%d|%d",
                 unit:GetID(), pid, unit:GetX(), unit:GetY(),
-                math.floor(unit:GetMovementRemaining()),
-                math.floor(unit:GetHP()), boolstr(unit:IsFortified())))
+                math.floor(unit:GetMovesRemaining()),
+                math.floor(unit:GetDamage())))
         end
         for _, city in p:GetCities():Members() do
             table.insert(rows, string.format("c%d|%d|%d",
@@ -307,7 +307,7 @@ function Puppeteer.Digest()
         end
         local tech = p:GetTechs():GetResearchingTech()
         table.insert(rows, string.format("p%d|%d|%d",
-            pid, math.floor(p:GetTreasury():GetGold()),
+            pid, math.floor(p:GetTreasury():GetGoldBalance()),
             (tech ~= nil) and tech or -1))
     end
     table.sort(rows)

@@ -77,10 +77,10 @@ class TapConnection(GameConnection):
         await super().disconnect()
 
 
-def _fake_hook(event: str, player_id: int) -> str:
+def _fake_hook(event: str, player_id: int, turn: int = 0) -> str:
     """Rehearsal-only engine events (FakeMod Simulate.*)."""
     return {
-        "turn_start": f"Simulate.TurnStart({player_id})",
+        "turn_start": f"Simulate.TurnStartAt({player_id}, {turn})",
         "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",
         "advance_turn": "Simulate.AdvanceTurn()",
     }[event]
@@ -160,13 +160,20 @@ class LiveDriver:
         self.log.close()
 
 
-async def phase_probe(spec: MatchSpec, adapter: FireTunerAdapter) -> int:
-    """Phase 1 gate: connect, mod handshake, status poll. Read-only."""
+MOD_DEFAULT = (Path(__file__).resolve().parents[4] / "mods" / "PuppeteerMod"
+               / "PuppeteerMod.lua")
+
+
+async def phase_probe(
+    spec: MatchSpec, adapter: FireTunerAdapter, mod_lua: str,
+) -> int:
+    """Phase 1 gate: connect, inject the mod, verify the capability
+    handshake, poll status."""
     await adapter.setup({})
-    caps = await adapter.require_mod()
+    caps = await adapter.inject_mod(mod_lua)
     status = await adapter.poll_status()
-    print(f"PROBE ok: mod={caps['mod_version']} freeze+ledger+digest ok, "
-          f"engine turn {status.get('TURN')}, "
+    print(f"PROBE ok: injected mod={caps['mod_version']} "
+          f"freeze+ledger+digest ok, engine turn {status.get('TURN')}, "
           f"puppet_active={status.get('PUPPET_ACTIVE')}")
     await adapter.teardown()
     return 0
@@ -174,7 +181,7 @@ async def phase_probe(spec: MatchSpec, adapter: FireTunerAdapter) -> int:
 
 async def phase_exclusive_control(
     spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
-    turns: int, strategy: str,
+    turns: int, strategy: str, mod_lua: str,
 ) -> int:
     """Phase 2 (the make-or-break): puppet ONE player, hold an idle lease,
     issue ZERO commands. Success = 0 violations and identical digests
@@ -192,13 +199,16 @@ async def phase_exclusive_control(
     driver = LiveDriver(spec, adapter, run_dir,
                         f"{spec.match_id}-i{os.getpid()}")
     await adapter.setup({})
-    await adapter.require_mod()
+    await adapter.inject_mod(mod_lua)
     per_turn: list[dict[str, Any]] = []
     await driver.match_start()
     try:
         for _ in range(turns):
             status = await adapter.poll_status()  # engine turn is authority
-            turn = int(status["TURN"])
+            # attach-while-parked: this turn's hook already fired, so the
+            # lease engages at the player's NEXT natural turn start
+            turn = int(status["TURN"]) + 1
+            adapter.expect_turn(turn)  # mirror leads; Status polls re-sync
             lease = driver.referee.grant_lease(
                 agent.player_id, agent.agent_id, turn)
             await driver.referee.begin_turn(
@@ -253,12 +263,18 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=4318)
     ap.add_argument("--strategy", default="h1", choices=["h1", "h2", "h3"],
                     help="D7 turn-end experiment")
+    ap.add_argument("--engage-timeout", type=int, default=120,
+                    help="seconds to wait for the lease to engage (a parked "
+                         "human turn ends on human time — raise this)")
     ap.add_argument("--runs-root", default="runs",
                     help="run dirs root (tests point this at a tmp dir)")
+    ap.add_argument("--mod-path", type=Path, default=MOD_DEFAULT,
+                    help="PuppeteerMod.lua to inject at attach (D9)")
     ap.add_argument("--fake", action="store_true",
                     help="rehearse against an in-process FakeTunerServer")
     opts = ap.parse_args()
     spec = load_config(opts.config)
+    mod_lua = opts.mod_path.read_text(encoding="utf-8")
 
     async def run() -> int:
         if opts.fake:
@@ -268,7 +284,7 @@ def main() -> None:
                 "127.0.0.1", port,
                 simulate_hook=_fake_hook, poll_timeout_s=2.0)
             try:
-                return await _dispatch(spec, adapter, opts)
+                return await _dispatch(spec, adapter, opts, mod_lua)
             finally:
                 await server.stop()
         run_dir = Path(opts.runs_root) / (opts.run_id or spec.match_id)
@@ -276,19 +292,20 @@ def main() -> None:
         adapter = FireTunerAdapter(
             opts.host, opts.port,
             conn=TapConnection(opts.host, opts.port, run_dir / "wire.jsonl"),
-            end_phase_strategy=opts.strategy)
-        return await _dispatch(spec, adapter, opts)
+            end_phase_strategy=opts.strategy,
+            turn_wait_s=float(opts.engage_timeout))
+        return await _dispatch(spec, adapter, opts, mod_lua)
 
     raise SystemExit(asyncio.run(run()))
 
 
 async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
-                    opts: argparse.Namespace) -> int:
+                    opts: argparse.Namespace, mod_lua: str) -> int:
     if opts.phase == "probe":
-        return await phase_probe(spec, adapter)
+        return await phase_probe(spec, adapter, mod_lua)
     run_dir = Path(opts.runs_root) / (opts.run_id or spec.match_id)
     return await phase_exclusive_control(
-        spec, adapter, run_dir, opts.turns, opts.strategy)
+        spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
 
 
 if __name__ == "__main__":

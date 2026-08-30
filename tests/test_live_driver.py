@@ -28,9 +28,9 @@ REPO = Path(__file__).resolve().parents[1]
 CONFIG = REPO / "configs" / "live-duel.yaml"
 
 
-def fake_hook(event: str, player_id: int) -> str:
+def fake_hook(event: str, player_id: int, turn: int = 0) -> str:
     return {
-        "turn_start": f"Simulate.TurnStart({player_id})",
+        "turn_start": f"Simulate.TurnStartAt({player_id}, {turn})",
         "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",
         "advance_turn": "Simulate.AdvanceTurn()",
     }[event]
@@ -194,10 +194,21 @@ async def test_end_phase_strategies_rehearsed(tmp_path):
 
 
 async def test_turn_mismatch_is_loud():
-    adapter, server = await _adapter_with()
+    """The lease engaging at the WRONG turn is a refusal (Codex P1-3's
+    LEASE_TURN half): the hook fires five turns ahead of the target."""
+    def ahead_hook(event: str, player_id: int, turn: int = 0) -> str:
+        return {
+            "turn_start": f"Simulate.TurnStartAt({player_id}, {turn + 5})",
+            "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",
+            "advance_turn": "Simulate.AdvanceTurn()",
+        }[event]
+
+    server = FakeTunerServer(mod=FakeMod())
+    port = await server.start()
+    adapter = FireTunerAdapter("127.0.0.1", port, simulate_hook=ahead_hook,
+                               poll_timeout_s=1.0)
     try:
         await adapter.setup({})
-        # engine sits at turn 1; asking for turn 3 must time out loudly
         with pytest.raises(RuntimeError, match="timed out"):
             await adapter.begin_phase(0, 3)
     finally:
@@ -208,7 +219,7 @@ async def test_lease_for_the_wrong_player_is_refused():
     """Codex P1-3: an engaged lease for ANYONE else (or a stale turn) is a
     refusal — begin_phase must verify LEASE_PLAYER/LEASE_TURN, not just
     PUPPET_ACTIVE."""
-    def wrong_player_hook(event: str, player_id: int) -> str:
+    def wrong_player_hook(event: str, player_id: int, turn: int = 0) -> str:
         return {
             "turn_start": "Simulate.TurnStart(1)",  # the OTHER player's hook
             "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",

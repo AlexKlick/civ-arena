@@ -24,6 +24,9 @@ from civ_arena.game.civ6.firetuner import FireTunerAdapter
 
 STAGE_EXIT = {"S1": 10, "S2": 20, "S3": 30, "S4": 40, "S5": 50, "S6": 60}
 
+MOD_DEFAULT = Path(__file__).resolve().parents[1] / "mods" / "PuppeteerMod" \
+    / "PuppeteerMod.lua"
+
 
 class Smoke:
     """Runs the six stages against one adapter, recording per-stage results.
@@ -32,8 +35,10 @@ class Smoke:
     timing/recording so a failing stage can never corrupt another's row.
     """
 
-    def __init__(self, adapter: FireTunerAdapter) -> None:
+    def __init__(self, adapter: FireTunerAdapter,
+                 mod_lua: str | None = None) -> None:
         self.adapter = adapter
+        self.mod_lua = mod_lua
         self.results: list[dict[str, Any]] = []
         self._mod_version: str | None = None
 
@@ -59,11 +64,16 @@ class Smoke:
         return "ok", f"alive_majors={alive}"
 
     async def s4_mod_handshake(self) -> tuple[str, str]:
-        doc = await self.adapter.mod_handshake()
+        if self.mod_lua is not None:
+            # D9: the mod is INJECTED at attach (gameplay-script globals
+            # never reach the tuner VM); a fresh attach is mod-less by design
+            doc = await self.adapter.inject_mod(self.mod_lua)
+        else:
+            doc = await self.adapter.mod_handshake()
+            if not doc["supports_freeze"] or not doc["supports_ledger"]:
+                raise RuntimeError(f"mod gate failed: {doc}")
         self._mod_version = doc["mod_version"]
-        if not doc["supports_freeze"] or not doc["supports_ledger"]:
-            raise RuntimeError(f"mod gate failed: {doc}")
-        return "ok", f"mod={doc['mod_version']} freeze+ledger ok"
+        return "ok", f"mod={doc['mod_version']} freeze+ledger+digest ok"
 
     async def s5_mod_digest(self) -> tuple[str, str]:
         lines = await self.adapter.read_raw(lua_translator.mod_digest())
@@ -107,7 +117,8 @@ async def fake_mode(as_json: bool) -> int:
     server = FakeTunerServer(mod=FakeMod())
     port = await server.start()
     try:
-        smoke = Smoke(FireTunerAdapter("127.0.0.1", port))
+        smoke = Smoke(FireTunerAdapter("127.0.0.1", port),
+                      mod_lua=MOD_DEFAULT.read_text(encoding="utf-8"))
         rc = await smoke.run()
         report(smoke, rc, "fake", as_json)
         return rc
@@ -115,8 +126,9 @@ async def fake_mode(as_json: bool) -> int:
         await server.stop()
 
 
-async def live_mode(host: str, port: int, as_json: bool) -> int:
-    smoke = Smoke(FireTunerAdapter(host, port))
+async def live_mode(host: str, port: int, as_json: bool,
+                    mod_lua: str | None) -> int:
+    smoke = Smoke(FireTunerAdapter(host, port), mod_lua=mod_lua)
     rc = await smoke.run()
     report(smoke, rc, "live", as_json)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -146,9 +158,16 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=4318)
     ap.add_argument("--json", action="store_true",
                     help="print one machine-readable summary doc")
+    ap.add_argument("--mod-path", type=Path, default=None,
+                    help="inject this PuppeteerMod.lua at S4 (D9); "
+                         "default: the repo's mods/ copy")
     opts = ap.parse_args()
+    mod_lua = None
+    if opts.mod_path is not None or opts.live:
+        mod_path = opts.mod_path or MOD_DEFAULT
+        mod_lua = mod_path.read_text(encoding="utf-8")
     if opts.live:
-        rc = asyncio.run(live_mode(opts.host, opts.port, opts.json))
+        rc = asyncio.run(live_mode(opts.host, opts.port, opts.json, mod_lua))
     else:
         rc = asyncio.run(fake_mode(opts.json))
     raise SystemExit(rc)
