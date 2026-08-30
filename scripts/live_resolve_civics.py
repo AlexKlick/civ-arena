@@ -132,8 +132,8 @@ async def main() -> int:
 
     async def blockers() -> list[str]:
         lines = await conn.execute_write(BLOCKER_QUERY)
-        return [l for l in response_parser._split_lines(lines)  # noqa: SLF001
-                if l.startswith("BLOCKING|")]
+        rows = response_parser._split_lines(lines)  # noqa: SLF001
+        return [r for r in rows if r.startswith("BLOCKING|")]
 
     before = await blockers()
     print("blockers:", before or ["none"])
@@ -144,10 +144,10 @@ async def main() -> int:
 
     if any(b.endswith("ENDTURN_BLOCKING_CIVIC") for b in before):
         out = await conn.execute_read(SET_CIVIC)
-        print("civic:", [l for l in out if not l.endswith("---END---")])
+        print("civic:", [r for r in out if not r.endswith("---END---")])
     if any("FILL_CIVIC_SLOT" in b for b in before):
         out = await conn.execute_write(FILL_SLOTS)
-        print("policies:", [l for l in out if not l.endswith("---END---")])
+        print("policies:", [r for r in out if not r.endswith("---END---")])
     after = await blockers()
     print("blockers after:", after or ["none"])
     await conn.disconnect()
