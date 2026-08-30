@@ -58,10 +58,14 @@ class Smoke:
     async def s3_overview(self) -> tuple[str, str]:
         overview = await self.adapter.observe(
             ObserveRequest(kind=ObserveKind.OVERVIEW, player_id=0))
-        alive = overview.get("ALIVE")
-        if not isinstance(alive, int) or alive < 2:
-            raise RuntimeError(f"expected >= 2 alive majors, got {alive}")
-        return "ok", f"alive_majors={alive}"
+        # M14d shape: turn + players dict (the sim-OVERVIEW shape)
+        players = overview.get("players", {})
+        if len(players) < 2:
+            raise RuntimeError(f"expected >= 2 alive majors, got {len(players)}")
+        turn = overview.get("turn")
+        if not isinstance(turn, int) or turn < 1:
+            raise RuntimeError(f"turn not parsed: {turn}")
+        return "ok", f"alive_majors={len(players)} turn={turn}"
 
     async def s4_mod_handshake(self) -> tuple[str, str]:
         if self.mod_lua is not None:

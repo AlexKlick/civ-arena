@@ -340,3 +340,63 @@ already supports two LLM agents). Also discussed: a **human-policy
 agent** so the operator can play against the LLMs live — the mod only
 puppets configured players, so the human's turn flows naturally and the
 driver just waits for turn end; a small driver extension post-M14d.
+
+### 2026-08-30 — M14d code leg: action surface + dispatch (fake-rehearsed)
+
+The seven action tools + the six sim-shaped observes + the driver's
+`--phase dispatch`, all rehearsed game-free through the real referee
+machinery over the FakeTunerServer mini-engine (29/29 on the live-driver
+file; full-suite count in the M14d commit):
+
+- **The reconciliation seam (mod v0.3 `DiffSinceLast`)**: commanded
+  effects must satisfy the watchdog's EXACT-key multiset diff
+  (`entity_type, entity_id, attr, canonical(before), canonical(after)`),
+  so allowed records must be THE SAME ROWS the release re-diff books.
+  The mod's lease snapshot is now a ROLLING baseline: each accepted act
+  drains `DiffSinceLast` (rows since the previous call, or lease start)
+  and advances the baseline; `Release` re-diffs from the same baseline,
+  booking only what no command covered. The adapter journals the drained
+  rows as both the command's mutations and actuals — identical by
+  construction.
+- **Freeze-then-act discipline**: the lease freezes every unit at
+  engagement, so each unit-tool act first restores exactly that unit
+  (`RestoreUnit`), and a REJECTED act re-freezes it (`FreezeUnit`, new in
+  v0.3) — otherwise the restored-but-unused movement would book as an
+  undeclared actual at release.
+- **Injection guard**: agent-supplied ids are interpolated into Lua
+  source, so the adapter re-validates strict spellings (`u\d+`, `c\d+`,
+  `[A-Z0-9_]+`, `-?\d+,-?\d+`) before any builder runs — a hostile
+  `tech_id` never reaches the wire. Rejection tokens map to the
+  RejectionReason ENUM (unknown token = loud failure).
+- **The M14d visibility declaration**: `visibility_for` returns EMPTY
+  sets until M14c's revealed-tiles read — the projection hides every
+  FOREIGN entity (the safe side of the no-leak contract); own entities
+  are ownership-based. Consequence, declared: driven agents cannot see
+  or attack the opponent's units in M14d games (the turtler fortifies
+  instead of attacking; an LLM sees only its own empire).
+- **Coordinate mapping HYPOTHESIS**: the sim speaks axial hex; the engine
+  speaks odd-q offset. `q = x, r = y - floor(x/2)` (bijection pinned by
+  test). If the stagger parity is wrong for this engine, the only effect
+  is REJECTED moves (never corrupted state); the first live dispatch
+  decides it.
+- **Declared read limitations**: production-queue readback is a pcall'd
+  `GetBuildQueue():GetCurrentProductionType()` chain — if the GameCore
+  accessor is absent the queue reads empty and the turtler re-issues
+  production each turn (EXCLUSIVE replace keeps that legal); city
+  hp/buckets/buildings are placeholder constants that only own-city
+  pass-through projection ever carries (foreign cities are hidden under
+  the empty visibility sets).
+- **The first live 1v1 shape** (`--phase dispatch`): the driver drives
+  ONE seat — agents[0], ANY policy including `llm` — through the real
+  PlayerSession/Referee/tool surface while the engine's own AI plays the
+  other seat. Integrity per turn: the digest moves IFF mutations were
+  authorized (`unexpected` flag), plus the standing watchdog sweep.
+- **Tourney configs** (operator request, 2026-08-30): `live-tourney-
+  glm53` (Z.AI), `live-tourney-minimax-m3`, `live-tourney-qwen38`
+  (text-main :18000 — its Anthropic-compat `/messages` path gets a curl
+  probe before that match; llama-server key env may be empty). Live
+  LLM-vs-LLM (both seats driven) needs the hotseat/H2 lane — next.
+
+Live validation pending: dispatch with the turtler first, then the
+tourney games (each LLM vs the engine AI), observable on the gaming
+session.

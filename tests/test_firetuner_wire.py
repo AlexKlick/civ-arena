@@ -112,7 +112,7 @@ async def test_firetuner_adapter_poll_and_overview():
         adapter = FireTunerAdapter("127.0.0.1", port)
         await adapter.setup({})
         caps = adapter.capabilities()
-        assert caps.acts is False and caps.rollback is False and caps.turn_events
+        assert caps.acts and caps.rollback is False and caps.turn_events
         assert caps.state_hash, "M14b: the digest hash is live"
 
         # async by seam contract; body is the local mirror (no wire traffic)
@@ -120,49 +120,44 @@ async def test_firetuner_adapter_poll_and_overview():
         assert phase["turn"] == 7
         assert phase["phase_player"] == -1
 
+        # M14d: OVERVIEW is the sim shape (turn + players dict) — the
+        # projection consumes exactly this
         overview = await adapter.observe(
             ObserveRequest(kind=ObserveKind.OVERVIEW, player_id=0))
-        assert overview["TURN"] == 7
-        assert overview["ALIVE"] == 2
+        assert overview["turn"] == 7
+        assert overview["players"]["0"]["civ_name"] == "CIVILIZATION_ROME"
+        assert overview["players"]["1"]["gold"] == 100
         await adapter.teardown()
 
     responses = STATUS_DIGEST_CANNED + [
         (0, "TS|", TURN_LINES),
-        (0, "OV|", ["OV|1", "TURN|7", "ALIVE|2",
-                   "PLAYER|0|CIVILIZATION_ROME", "PLAYER|1|CIVILIZATION_KOREA"]),
+        (0, "OVX|", ["OVX|1", "TURN|7",
+                     "OVROW|0|CIVILIZATION_ROME|120|-",
+                     "OVROW|1|CIVILIZATION_KOREA|100|-"]),
     ]
     await with_server(responses, check)
 
 
 async def test_adapter_gaps_point_at_live_validation_doc():
     """The NOT-YET-implemented surface stays pinned to the doc; landed
-    surface (phases, digest hash, mutation journal) must NOT raise."""
+    surface (phases, digest hash, mutation journal, observes, acts) must
+    NOT raise."""
     async def check(port: int, _server: FakeTunerServer):
         adapter = FireTunerAdapter("127.0.0.1", port)
         await adapter.setup({})
         for call in (
             adapter.snapshot,
             adapter.export_state,
-            lambda: adapter.visibility_for(0),
+            lambda: adapter.restore(None),
             lambda: adapter.import_state({}),
         ):
             with pytest.raises(NotImplementedError, match="live-validation"):
                 call()
-        for async_call in (
-            lambda: adapter.act(None),
-            lambda: adapter.observe(ObserveRequest(
-                kind=ObserveKind.UNITS, player_id=0)),
-            lambda: adapter.observe(ObserveRequest(
-                kind=ObserveKind.CITIES, player_id=0)),
-            lambda: adapter.observe(ObserveRequest(
-                kind=ObserveKind.VISIBLE_MAP, player_id=0)),
-            lambda: adapter.observe(ObserveRequest(
-                kind=ObserveKind.AVAILABLE_RESEARCH, player_id=0)),
-            lambda: adapter.observe(ObserveRequest(
-                kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=0)),
-        ):
-            with pytest.raises(NotImplementedError, match="live-validation"):
-                await async_call()
+        # M14d declaration: visibility_for returns EMPTY sets (the safe
+        # side of no-leak) instead of raising — pinned so the declaration
+        # cannot silently become an error path again
+        observable, remembered = adapter.visibility_for(0)
+        assert observable == frozenset() and remembered == frozenset()
         await adapter.teardown()
 
     await with_server(STATUS_DIGEST_CANNED, check)

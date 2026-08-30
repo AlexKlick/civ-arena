@@ -1,0 +1,33 @@
+# M14d tourney leg 1: glm-5.3 (Z.AI) drives the LOCAL seat vs the engine's
+# own AI. Observable live on the gaming session; every call legality-checked
+# through the real referee. Key never inline — env var name only.
+match:
+  match_id: live-tourney-glm53
+  seed: 811001
+  max_turns: 10
+  checkpoint_every: 1
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: glm-5.3
+    player_id: 0
+    policy: llm
+    seed: 1101
+    llm:
+      base_url: "https://api.z.ai/api/anthropic"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_ZAI"
+      model_id: "glm-5.3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: engine-ai          # the engine's own AI plays this seat
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []

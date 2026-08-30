@@ -8,6 +8,8 @@ through this driver — with zero changes in ``arena/``, ``session/``, or
     python -m civ_arena.game.civ6.live_driver configs/live-duel.yaml --phase probe
     python -m civ_arena.game.civ6.live_driver configs/live-duel.yaml \
         --phase exclusive-control --turns 1
+    python -m civ_arena.game.civ6.live_driver configs/live-duel.yaml \
+        --phase dispatch --turns 10   # the live 1v1: seat 0 driven, AI opp
 
 ``--fake`` rehearses every phase against an in-process FakeTunerServer +
 FakeMod (the same entrypoint the live run uses; ``Simulate.*`` engine events
@@ -25,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from civ_arena.agents.runtime import AgentProfile, build_runtime
 from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
 from civ_arena.arena.referee import Referee, RefereeConfig
@@ -34,6 +37,7 @@ from civ_arena.config import MatchSpec, load_config
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.vendor.connection import GameConnection
+from civ_arena.session.player_session import PlayerSession
 from civ_arena.session.tools import SessionCtx
 from civ_arena.strategy.store import StrategyStore
 
@@ -187,13 +191,7 @@ async def phase_exclusive_control(
     issue ZERO commands. Success = 0 violations and identical digests
     bracketing the lease."""
     events = run_dir / "events.jsonl"
-    if events.exists() and events.stat().st_size > 0:
-        # ANY prior content refuses the rerun (Codex P1-5): a partial log
-        # from a timed-out attempt must never gain a second MATCH_START —
-        # replay and projection would consume a mixed pair of attempts
-        raise RuntimeError(
-            f"{events} already exists — appending would corrupt the trust "
-            "root (partial or finished); use a fresh --run-id")
+    _refuse_rerun(events)
     run_dir.mkdir(parents=True, exist_ok=True)
     agent = spec.agents[0]
     driver = LiveDriver(spec, adapter, run_dir,
@@ -251,11 +249,99 @@ async def phase_exclusive_control(
         await adapter.teardown()
 
 
+async def phase_dispatch(
+    spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
+    turns: int, strategy: str, mod_lua: str,
+) -> int:
+    """Phase 4 (M14d, the first live 1v1): drive ONE seat — the LOCAL
+    player — through the real PlayerSession/Referee/tool surface while the
+    ENGINE'S OWN AI plays the other seat naturally between our turns. The
+    policy's every tool call is legality-checked, deduped, hashed, and
+    watchdog-diffed exactly as in the simulator; commanded effects
+    reconcile through the mod's DiffSinceLast seam (v0.3)."""
+    events = run_dir / "events.jsonl"
+    _refuse_rerun(events)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    agent = spec.agents[0]
+    profile = AgentProfile(
+        agent_id=agent.agent_id, player_id=agent.player_id,
+        policy=agent.policy, seed=agent.seed, model=agent.model,
+        llm=agent.llm)
+    runtime = build_runtime(profile)
+    driver = LiveDriver(spec, adapter, run_dir,
+                        f"{spec.match_id}-i{os.getpid()}")
+    session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
+    await adapter.setup({})
+    await adapter.inject_mod(mod_lua)
+    per_turn: list[dict[str, Any]] = []
+    await driver.match_start()
+    try:
+        for _ in range(turns):
+            status = await adapter.poll_status()  # engine turn is authority
+            turn = int(status["TURN"]) + 1  # attach-while-parked targeting
+            adapter.expect_turn(turn)
+            lease = driver.referee.grant_lease(
+                agent.player_id, agent.agent_id, turn)
+            await driver.referee.begin_turn(
+                agent.player_id, agent.agent_id, turn)
+            digest_open = await adapter.refresh_digest()
+            allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
+            # THE TURN: the policy acts through the bound ToolFacade —
+            # every call flows observe/execute/end_turn through the referee
+            await session.take_turn(lease, runtime)
+            # CACHED close hash: end_phase sealed it before the end-turn
+            # command, so the engine's post-processing cannot race it
+            digest_close = adapter.state_hash()
+            allowed = driver.referee._ls.allowed[allowed_open:]  # noqa: SLF001
+            row = {
+                "turn": turn,
+                "allowed_mutations": len(allowed),
+                "digest_changed": digest_open != digest_close,
+                "mutated": bool(allowed),
+                "violations": driver.referee.violation_count(),
+            }
+            # integrity: the digest moves IFF something was authorized — a
+            # change with no mutations is undeclared drift; equal digests
+            # with mutations booked would mean the diff missed them
+            row["unexpected"] = row["digest_changed"] != row["mutated"]
+            per_turn.append(row)
+            print(f"dispatch turn {turn}: allowed={row['allowed_mutations']} "
+                  f"digest_changed={row['digest_changed']} "
+                  f"violations={row['violations']}")
+            if row["unexpected"] or row["violations"]:
+                print("ANOMALY — stopping (record dated in §6)")
+                break
+        final_turn = per_turn[-1]["turn"] if per_turn else 0
+        ok = bool(per_turn) and all(
+            not r["unexpected"] and r["violations"] == 0 for r in per_turn) \
+            and len(per_turn) == turns
+        await driver.match_end(final_turn, {
+            "phase": "dispatch", "strategy": strategy,
+            "per_turn": per_turn, "clean": ok,
+        })
+        print(f"DISPATCH {'CLEAN' if ok else 'ANOMALOUS'} "
+              f"({len(per_turn)}/{turns} turns, "
+              f"violations={driver.referee.violation_count()})")
+        return 0 if ok else 1
+    finally:
+        await adapter.teardown()
+
+
+def _refuse_rerun(events: Path) -> None:
+    if events.exists() and events.stat().st_size > 0:
+        # ANY prior content refuses the rerun (Codex P1-5): a partial log
+        # from a timed-out attempt must never gain a second MATCH_START —
+        # replay and projection would consume a mixed pair of attempts
+        raise RuntimeError(
+            f"{events} already exists — appending would corrupt the trust "
+            "root (partial or finished); use a fresh --run-id")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("config", type=Path)
     ap.add_argument("--phase", required=True,
-                    choices=["probe", "exclusive-control"])
+                    choices=["probe", "exclusive-control", "dispatch"])
     ap.add_argument("--turns", type=int, default=1)
     ap.add_argument("--run-id", default=None,
                     help="run dir name under runs/ (default: match_id)")
@@ -304,7 +390,9 @@ async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
     if opts.phase == "probe":
         return await phase_probe(spec, adapter, mod_lua)
     run_dir = Path(opts.runs_root) / (opts.run_id or spec.match_id)
-    return await phase_exclusive_control(
+    phase = phase_exclusive_control if opts.phase == "exclusive-control" \
+        else phase_dispatch
+    return await phase(
         spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
 
 

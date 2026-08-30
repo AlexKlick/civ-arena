@@ -25,6 +25,18 @@
 --   * Digest() covers ALL alive majors (the whole-board analogue of the
 --     simulator's state hash), integers floored, rows sorted.
 --
+-- v0.3 (M14d):
+--   * DiffSinceLast() — the commanded-effects seam. The freeze snapshot is
+--     now a ROLLING baseline: each DiffSinceLast call returns the player's
+--     drift since the previous call (or lease start) as LEDGER rows and
+--     advances the baseline, so Release's final re-diff books only what no
+--     command ever covered. The Python adapter journals the returned rows
+--     as BOTH the command's mutations (allowed) and actuals — the
+--     watchdog's multiset diff then matches commanded effects exactly.
+--   * FreezeUnit(id) — the undo for RestoreUnit when the command that
+--     followed was rejected: re-freeze so the restore never books as
+--     undeclared movement at release.
+--
 -- Known live risks (upstream docs/agent-vs-agent.md open questions 1-2):
 --   * does GameEvents.PlayerTurnStartComplete fire before the built-in AI
 --     acts? If not, the freeze here is too late and the watchdog will say so.
@@ -32,10 +44,11 @@
 --     context? If not, write paths must run entirely in InGame state.
 
 Puppeteer = {}
-Puppeteer.version = "0.2.0-draft"
+Puppeteer.version = "0.3.0-draft"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
+Puppeteer.supports_command_diff = true
 
 local PUPPET_PLAYERS = {}          -- set[playerID] = true; configured via SetPuppet
 local lease = nil                  -- { playerID, turn, snapshot = {unitId -> state} }
@@ -170,6 +183,19 @@ local function diff_player(playerID, before, book)
     -- (GetProductionName is UI-context only) — recorded in §6
 end
 
+-- v0.3: same diff, but the rows are COLLECTED and returned as one string
+-- (the commanded-effects seam the Python adapter reads after each act).
+local function diff_rows(playerID, before)
+    local rows = {}
+    local function collect(kind, entity_type, entity_id, attr, b, a)
+        table.insert(rows, string.format(
+            "LEDGER|%s|%s|%s|%s|%s|%s", kind, entity_type, entity_id, attr,
+            tostring(b), tostring(a)))
+    end
+    diff_player(playerID, before, collect)
+    return rows
+end
+
 -- -- handshake -------------------------------------------------------------
 
 function Puppeteer.Handshake()
@@ -177,6 +203,7 @@ function Puppeteer.Handshake()
     print("SUPPORTS_FREEZE|" .. boolstr(Puppeteer.supports_freeze))
     print("SUPPORTS_LEDGER|" .. boolstr(Puppeteer.supports_ledger))
     print("SUPPORTS_DIGEST|" .. boolstr(Puppeteer.supports_digest))
+    print("SUPPORTS_COMMAND_DIFF|" .. boolstr(Puppeteer.supports_command_diff))
     print("---END---")
 end
 
@@ -237,9 +264,38 @@ function Puppeteer.RestoreUnit(unitId)
     end
 end
 
+-- v0.3: the undo for RestoreUnit when the command that followed was
+-- rejected — re-freeze so the restored-but-unused movement never books as
+-- an undeclared actual at release.
+function Puppeteer.FreezeUnit(unitId)
+    if lease == nil then
+        return
+    end
+    local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
+    if unit ~= nil then
+        UnitManager.FinishMoves(unit)
+    end
+    print("FROZEN|" .. unitId)
+    print("---END---")
+end
+
+-- v0.3: the commanded-effects seam. Diffs the player since the PREVIOUS
+-- call (or lease start), advances the rolling baseline, and RETURNS the
+-- rows as one string. Release's final re-diff therefore books only what no
+-- command ever covered.
+function Puppeteer.DiffSinceLast()
+    if lease == nil or lease.snapshot == nil then
+        return ""
+    end
+    local rows = diff_rows(lease.playerID, lease.snapshot)
+    lease.snapshot = snapshot_player(lease.playerID)
+    return table.concat(rows, "\n")
+end
+
 function Puppeteer.Release(playerID)
-    -- Re-diff the whole lease: anything the referee never declared lands in
-    -- the command ledger as an undeclared actual (the watchdog flags it).
+    -- Re-diff from the ROLLING baseline (v0.3): anything no command ever
+    -- covered lands in the command ledger as an undeclared actual — the
+    -- watchdog flags it.
     if lease ~= nil and lease.playerID == playerID and lease.snapshot ~= nil then
         diff_player(playerID, lease.snapshot, book_actual)
     end

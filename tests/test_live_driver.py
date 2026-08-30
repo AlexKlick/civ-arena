@@ -364,3 +364,285 @@ def test_rollback_mode_refused(tmp_path):
     with pytest.raises(ValueError, match="rollback"):
         live_driver.LiveDriver(
             spec, FireTunerAdapter("127.0.0.1", 1), tmp_path, "x-i1")
+
+
+# -- M14d: action surface + dispatch -----------------------------------------
+
+from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest  # noqa: E402
+
+
+def _cmd(tool: str, args: dict, player_id: int = 0) -> ActionCommand:
+    return ActionCommand(tool=tool, args=args, player_id=player_id,
+                         idempotency_key=f"k-{tool}", lease_id="lease-1")
+
+
+def test_axial_offset_roundtrip():
+    """The odd-q hypothesis is at least a bijection for the whole map range
+    (which stagger parity is RIGHT is the live-dispatch question; a wrong
+    parity only yields rejected moves)."""
+    for x in range(0, 24):
+        for y in range(0, 24):
+            q, r = lua_translator.xy_to_axial(x, y)
+            assert lua_translator.axial_to_xy(q, r) == (x, y)
+
+
+def test_translator_act_routing_pins():
+    """Every InGame tool emits its own Request* token and NO GameCore-only
+    token; set_research is the inverse. The standing SetCivic prohibition
+    (permanently breaks AI civics) covers the whole module."""
+    ingame = {
+        "move_unit": lua_translator.move_unit("u1", "2,3"),
+        "attack": lua_translator.attack("u1", "u2"),
+        "fortify": lua_translator.fortify("u1"),
+        "found_city": lua_translator.found_city("u1"),
+        "set_city_production": lua_translator.set_city_production("c1", "WARRIOR"),
+        "purchase": lua_translator.purchase("c1", "MONUMENT"),
+    }
+    for tool, lua in ingame.items():
+        assert "RequestOperation" in lua or "RequestCommand" in lua, tool
+        assert "Puppeteer." not in lua, f"{tool}: Puppeteer is GameCore-only"
+        assert "MoveUnit" not in lua, f"{tool}: MoveUnit is GameCore-only"
+        assert "SetResearchingTech" not in lua, tool
+        assert f"arena:tool={tool}" in lua, f"{tool}: fake marker"
+    research = lua_translator.set_research(0, "MINING")
+    assert "SetResearchingTech" in research and "CanResearch" in research
+    assert "UI.RequestAction" not in research and "RequestOperation" not in research
+    for name in dir(lua_translator):
+        obj = getattr(lua_translator, name)
+        if callable(obj) and not name.startswith("_"):
+            try:
+                out = obj() if obj.__code__.co_argcount == 0 else None
+            except TypeError:
+                out = None
+            if isinstance(out, str):
+                assert "SetCivic" not in out, f"{name} emits the forbidden SetCivic"
+
+
+def test_act_args_injection_guard():
+    """Agent-supplied ids are interpolated into Lua source — only strict
+    spellings cross (defense in depth beyond the referee's type checks)."""
+    from civ_arena.game.civ6.firetuner import _arg_violation
+
+    assert _arg_violation("set_research", {"tech_id": "MINING"}) is None
+    assert _arg_violation("move_unit", {"unit_id": "u7", "dest": "-3,4"}) is None
+    for tool, bad in (
+        ("set_research", {"tech_id": "MINING'] Evil() --"}),
+        ("move_unit", {"unit_id": "u7", "dest": "1,2); Evil("}),
+        ("attack", {"unit_id": "u7'", "target_id": "u1"}),
+        ("purchase", {"city_id": "c1", "item_id": "lower_case"}),
+    ):
+        assert _arg_violation(tool, bad) is not None, (tool, bad)
+
+
+def test_parse_act_verdicts():
+    from civ_arena.game.civ6.response_parser import parse_act
+
+    assert parse_act(["ACT|move_unit|OK|4,5", "---END---"]) == {
+        "tool": "move_unit", "status": "accepted", "detail": "4,5"}
+    assert parse_act(["ACT|purchase|ERR|INSUFFICIENT_GOLD|120gt100"]) == {
+        "tool": "purchase", "status": "rejected",
+        "rejection": "INSUFFICIENT_GOLD", "detail": "120gt100"}
+    with pytest.raises(ValueError, match="no ACT row"):
+        parse_act(["TURN|3"])
+    with pytest.raises(ValueError, match="two ACT rows"):
+        parse_act(["ACT|a|OK|1", "ACT|a|OK|2"])
+
+
+def test_parse_observes_are_sim_shaped():
+    from civ_arena.game.civ6.response_parser import (
+        parse_available_production,
+        parse_available_research,
+        parse_cities,
+        parse_overview,
+        parse_units,
+    )
+
+    units = parse_units([
+        "UNITROW|2|0|WARRIOR|5|2|100|2|2|20|0|false",
+        "UNITROW|1|1|ARCHER|1|1|70|1|2|15|15|true",
+    ])
+    # every key the projection reads for OWN units must be present
+    assert set(units[0]) == {
+        "unit_id", "owner", "type", "q", "r", "hp", "movement",
+        "max_movement", "strength", "ranged_strength", "fortified"}
+    # numeric-id sort regardless of row order
+    assert units[0]["unit_id"] == "u1" and units[0]["owner"] == 1
+    assert units[1]["unit_id"] == "u2" and units[1]["owner"] == 0
+    assert units == sorted(units, key=lambda u: int(u["unit_id"][1:]))
+    cities = parse_cities(["CITYROW|1|0|ARENA|2|1|3|MONUMENT"])
+    assert cities[0]["production_queue"] == ["MONUMENT"]
+    assert parse_cities(["CITYROW|1|0|ARENA|2|1|3|-"])[0][
+        "production_queue"] == []
+    overview = parse_overview([
+        "TURN|7", "OVROW|0|CIVILIZATION_ROME|120|MINING",
+        "OVROW|1|CIVILIZATION_KOREA|100|-",
+        "OVRESEARCHED|0|MINING;POTTERY",
+    ])
+    assert overview["turn"] == 7
+    assert overview["players"]["0"]["researching"] == "MINING"
+    assert overview["players"]["0"]["researched"] == ["MINING", "POTTERY"]
+    assert overview["players"]["1"]["researching"] is None
+    research = parse_available_research(["TECHROW|MINING|25"])
+    assert research == [{"tech_id": "MINING", "cost": 25}]
+    production = parse_available_production(["ITEMROW|building|WALLS|70|12",
+                                             "ITEMROW|unit|WARRIOR|40|5"])
+    assert [p["item_id"] for p in production] == ["WARRIOR", "WALLS"]
+    assert production[0]["kind"] == "unit"
+
+
+async def test_observes_over_fake_and_foreign_projection():
+    """The six observes run over the fake wire; with the M14d empty
+    visibility sets the REAL projection hides foreign entities (the safe
+    side of no-leak) and keeps own entities fully projected."""
+    from civ_arena.arena.visibility import Scope
+
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        units = await adapter.observe(
+            ObserveRequest(kind=ObserveKind.UNITS, player_id=0))
+        assert any(u["owner"] == 1 for u in units), "omniscient read"
+        assert any(u["type"] == "SETTLER" for u in units)
+        cities = await adapter.observe(
+            ObserveRequest(kind=ObserveKind.CITIES, player_id=0))
+        assert cities and cities[0]["city_id"] == "c1"
+        research = await adapter.observe(
+            ObserveRequest(kind=ObserveKind.AVAILABLE_RESEARCH, player_id=0))
+        assert {"tech_id": "MINING", "cost": 25} in research
+        production = await adapter.observe(ObserveRequest(
+            kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=0,
+            subject_id="c1"))
+        assert {"item_id": "MONUMENT", "cost": 60, "turns": 10,
+                "kind": "building"} in production
+        vmap = await adapter.observe(
+            ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
+        assert vmap["tiles"] == {}
+        # the projection with the adapter's own visibility ground truth
+        policy = VisibilityPolicy()
+        observable, remembered = adapter.visibility_for(0)
+        projected = policy.project(units, "units", 0, observable, remembered,
+                                   Scope.PRIVATE_PLAYER)
+        owners = {u["owner_id"] for u in projected}
+        assert owners == {0}, "foreign units must be hidden, own present"
+    finally:
+        await server.stop()
+
+
+async def test_act_accepted_books_commanded_rows_and_refreshes_digest():
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        await adapter.begin_phase(0, 1)
+        commands: list[str] = []
+        received = server.received_commands
+        del received[:]
+        received_callbacks = received  # alias: appended per command below
+        _ = received_callbacks, commands
+        pre_hash = adapter.state_hash()
+        res = await adapter.act(_cmd("move_unit", {
+            "unit_id": "u2", "dest": "5,4"}))
+        assert res.status == "accepted", res
+        kinds = [(m.kind, m.entity_id) for m in res.mutations]
+        assert ("unit.moved", "u2") in kinds, kinds
+        assert ("unit.moves", "u2") in kinds, kinds
+        # the journal holds THE SAME records (allowed == actual multiset)
+        drained = adapter.drain_mutations()
+        assert [(m.kind, m.entity_id, m.attr, m.before, m.after)
+                for m in drained] == [
+            (m.kind, m.entity_id, m.attr, m.before, m.after)
+            for m in res.mutations]
+        assert all(m.origin == "command" for m in drained)
+        # Codex P2-10: the digest refreshed — post-act hash moved
+        assert adapter.state_hash() != pre_hash
+        # restore ran BEFORE the move command (unfreeze-then-act)
+        lua_sequence = [c for c in server.received_commands
+                        if "Puppeteer.RestoreUnit" in c or "MOVE_TO" in c]
+        assert lua_sequence and "RestoreUnit" in lua_sequence[0]
+        await adapter.end_phase(0, 1)
+    finally:
+        await server.stop()
+
+
+async def test_act_rejected_refreezes_and_books_nothing():
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        await adapter.begin_phase(0, 1)
+        pre_hash = adapter.state_hash()
+        res = await adapter.act(_cmd("move_unit", {
+            "unit_id": "u999", "dest": "5,4"}))
+        assert res.status == "rejected" and res.rejection == "unknown_entity"
+        assert res.mutations == () and adapter.drain_mutations() == []
+        assert adapter.state_hash() == pre_hash
+        # the undo: FreezeUnit ran AFTER the failed command
+        lua_sequence = [c for c in server.received_commands
+                        if "FreezeUnit" in c or "MOVE_TO" in c]
+        assert lua_sequence and "FreezeUnit" in lua_sequence[-1]
+        await adapter.end_phase(0, 1)
+    finally:
+        await server.stop()
+
+
+async def test_act_out_of_phase_refused():
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        res = await adapter.act(_cmd("fortify", {"unit_id": "u2"}))
+        assert res.status == "rejected" and res.rejection == "no_lease"
+        # unknown tool with a VALID open phase -> not_implemented (the
+        # no-lease guard is checked first by design)
+        await adapter.begin_phase(0, 1)
+        res = await adapter.act(_cmd("spawn_dragons", {}))
+        assert res.status == "rejected" and res.rejection == "not_implemented"
+        await adapter.end_phase(0, 1)
+    finally:
+        await server.stop()
+
+
+async def test_act_injection_guard_blocks_hostile_ids():
+    """A hostile id never reaches Lua — the rejection happens adapter-side."""
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        await adapter.begin_phase(0, 1)
+        res = await adapter.act(_cmd("set_research", {
+            "tech_id": "MINING'] Evil() --"}))
+        assert res.status == "rejected" and res.rejection == "args_invalid"
+        assert not any("Evil" in c for c in server.received_commands)
+        await adapter.end_phase(0, 1)
+    finally:
+        await server.stop()
+
+
+def test_dispatch_rehearsal_end_to_end(tmp_path):
+    """The M14d milestone rehearsal: the turtler takes real turns through
+    the REAL referee over the fake wire — observes, acts, reconciliation,
+    end turns — and the watchdog stays clean."""
+    runs_root = tmp_path / "runs"
+    cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
+           str(CONFIG), "--phase", "dispatch", "--fake", "--turns", "5",
+           "--runs-root", str(runs_root)]
+    proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
+                          timeout=180.0)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    run_dir = runs_root / "live-duel-001"
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["phase"] == "dispatch"
+    assert summary["clean"] is True
+    assert summary["violations_total"] == 0
+    assert len(summary["per_turn"]) == 5
+    # turn 1 books real commanded effects (research + founding at least)
+    assert summary["per_turn"][0]["allowed_mutations"] > 0
+    assert summary["per_turn"][0]["digest_changed"] is True
+    records = [json.loads(line) for line in
+               (run_dir / "events.jsonl").read_text().splitlines()]
+    tools = [r["tool"] for r in records if r["kind"] == "TOOL_CALL"]
+    for expected in ("get_overview", "get_units", "get_cities",
+                     "get_available_research", "get_available_production",
+                     "set_research", "set_city_production", "found_city",
+                     "fortify", "move_unit", "purchase", "end_turn"):
+        assert expected in tools, f"{expected} never rehearsed: {sorted(set(tools))}"
+    # every tool call has its result pair (the log's replay contract)
+    results = [r for r in records if r["kind"] == "TOOL_RESULT"]
+    assert len(results) == len([r for r in records
+                                if r["kind"] == "TOOL_CALL"])

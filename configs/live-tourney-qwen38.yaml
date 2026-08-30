@@ -1,0 +1,34 @@
+# M14d tourney leg 1: the host's own Qwen3.8-27B (text-main :18000) drives
+# the LOCAL seat vs the engine's own AI. The arena client speaks the
+# Anthropic protocol (base_url + /messages); llama-server's compat path is
+# VERIFIED with a curl before the match (see docs/live-validation.md §6).
+match:
+  match_id: live-tourney-qwen38
+  seed: 811003
+  max_turns: 10
+  checkpoint_every: 1
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: qwen3.8-27b
+    player_id: 0
+    policy: llm
+    seed: 1103
+    llm:
+      base_url: "http://127.0.0.1:18000/v1"
+      api_key_env: "LOCAL_TEXT_MAIN_KEY"   # llama-server key; empty ok
+      model_id: "Qwen/Qwen3.8-27B"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: engine-ai
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []

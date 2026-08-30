@@ -8,8 +8,8 @@ Two response sources, first match wins:
 
 1. the canned ``(state_index, substring) -> lines`` list (explicit,
    per-test overrides), then
-2. an optional :class:`FakeMod` — a scripted PuppeteerMod state machine
-   that rehearses mod-shaped commands game-free.
+2. an optional :class:`FakeMod` — a scripted PuppeteerMod stand-in that
+   rehearses mod-shaped commands game-free.
 
 Anything else is ``ERR:FAKE unknown command``.
 """
@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import re
 
+from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.vendor import tuner_client
 
 APP_IDENTITY = "FakeSidMeiersCivilizationVI"
@@ -27,24 +28,41 @@ APP_IDENTITY = "FakeSidMeiersCivilizationVI"
 LUA_STATES = {0: "GameCore_Tuner", 1: "InGame"}
 
 
-class FakeMod:
-    """Scripted PuppeteerMod stand-in (mod >= 0.2 shapes).
+def _ax(x: int, y: int) -> tuple[int, int]:
+    return lua_translator.xy_to_axial(x, y)
 
-    Answers the pipe rows the real mod prints, keeps puppet/lease state
-    across commands, and exposes ``Simulate.*`` FAKE-ONLY commands tests
-    use to fire engine-side events the wire cannot (turn-start hooks,
-    engine drift, ledger/ambient rows). Faithful to D3 (poll, never
-    push): hook-driven prints are UNSOLICITED in the real wire and get
-    drained, so ``Simulate.TurnStart`` changes state silently and the
-    change surfaces only via the next Status/Digest poll — exactly the
-    discipline the live driver must use.
+
+class FakeMod:
+    """Scripted PuppeteerMod stand-in (mod >= 0.3 shapes) over a MINI
+    ENGINE (a tiny fixed board: 2 majors, a few units, 1-2 cities).
+
+    Answers the pipe rows the real mod prints, keeps puppet/lease/mark
+    state across commands, and exposes ``Simulate.*`` FAKE-ONLY commands
+    tests use to fire engine-side events the wire cannot. Faithful to D3
+    (poll, never push): hook-driven prints are UNSOLICITED in the real wire
+    and get drained, so ``Simulate.TurnStart`` changes state silently and
+    the change surfaces only via the next Status/Digest poll.
+
+    The act handlers parse the SAME Lua the translator emits (keyed by the
+    inert ``-- arena:tool=`` marker) and mutate the mini engine the way the
+    real one would — so observes, digests, and the DiffSinceLast
+    reconciliation rehearse the full M14d dispatch path game-free.
     """
+
+    # the mini engine's catalogs (doctrine vocabulary, already normalized)
+    TECHS = {"MINING": 25, "POTTERY": 25, "ARCHERY": 35, "BRONZE_WORKING": 45}
+    BUILDABLE = {
+        "WARRIOR": (40, "unit"), "SETTLER": (80, "unit"),
+        "MONUMENT": (60, "building"), "WALLS": (70, "building"),
+    }
+    PURCHASE_GOLD_PREMIUM = 2
 
     def __init__(
         self,
-        version: str = "0.2.0-rehearsal",
+        version: str = "0.3.0-rehearsal",
         has_status: bool = True,
         has_digest: bool = True,
+        has_command_diff: bool = True,
         supports_freeze: bool = True,
         supports_ledger: bool = True,
         auto_ambient: tuple | None = None,
@@ -52,6 +70,7 @@ class FakeMod:
         self.version = version
         self.has_status = has_status
         self.has_digest = has_digest
+        self.has_command_diff = has_command_diff
         self.supports_freeze = supports_freeze
         self.supports_ledger = supports_ledger
         # engine effect that lands inside every ambient window:
@@ -60,15 +79,113 @@ class FakeMod:
         self.puppets: dict[int, bool] = {}
         self.turn = 1
         self.lease: dict[str, int] | None = None
+        self.mark: dict[str, object] | None = None  # rolling DiffSinceLast baseline
         self.ledger_rows: list[str] = []
         self.ambient_rows: list[str] = []
         self.state_nonce = 0
+        self.act_log: list[tuple[str, str]] = []  # (tool, status) per command
+        self.reset_board()
 
-    # -- digest: ENGINE STATE ONLY (zero-drift rehearses as equal). Puppet
-    # bookkeeping is mod state, not engine state — the real Digest reads
-    # units/cities/treasury, none of which SetPuppet/Release move.
+    # -- the mini engine ---------------------------------------------------
+    def reset_board(self) -> None:
+        self.players = {
+            0: {"gold": 100, "researching": "", "researched": []},
+            1: {"gold": 100, "researching": "", "researched": []},
+        }
+        self.units: dict[int, dict] = {
+            # owner 0: a far settler (founds turn 1), a warrior (fortifies),
+            # a near settler (marches), an archer (attack-path tests)
+            1: {"owner": 0, "type": "SETTLER", "x": 10, "y": 10,
+                "moves": 2, "damage": 0, "fortified": False},
+            2: {"owner": 0, "type": "WARRIOR", "x": 5, "y": 5,
+                "moves": 2, "damage": 0, "fortified": False},
+            4: {"owner": 0, "type": "SETTLER", "x": 3, "y": 2,
+                "moves": 2, "damage": 0, "fortified": False},
+            5: {"owner": 0, "type": "ARCHER", "x": 6, "y": 6,
+                "moves": 2, "damage": 0, "fortified": False},
+            3: {"owner": 1, "type": "WARRIOR", "x": 30, "y": 30,
+                "moves": 2, "damage": 0, "fortified": False},
+        }
+        self.cities: dict[int, dict] = {
+            1: {"owner": 0, "name": "ARENA", "x": 2, "y": 2,
+                "pop": 1, "queue": ""},
+        }
+        self.next_city_id = 2
+
+    def _snapshot(self, pid: int) -> dict[str, object]:
+        """The mod's snapshot_player parity: units(pos/moves/damage),
+        cities(population), player(gold, researching)."""
+        return {
+            "units": {uid: (u["x"], u["y"], u["moves"], u["damage"])
+                      for uid, u in self.units.items() if u["owner"] == pid},
+            "cities": {cid: c["pop"] for cid, c in self.cities.items()
+                       if c["owner"] == pid},
+            "player": (self.players[pid]["gold"],
+                       self.players[pid]["researching"]),
+        }
+
+    def _diff(self, pid: int, before: dict[str, object]) -> list[str]:
+        """The mod's diff_player parity — SAME code path shapes both the
+        commanded rows (DiffSinceLast) and the release drift, which is the
+        invariant that makes the watchdog's exact-key diff reconcile."""
+        rows: list[str] = []
+        b_units: dict[int, tuple] = before["units"]  # type: ignore[assignment]
+        b_cities: dict[int, int] = before["cities"]  # type: ignore[assignment]
+        b_gold, b_res = before["player"]  # type: ignore[misc]
+        for uid, u in sorted(self.units.items()):
+            if u["owner"] != pid:
+                continue
+            b = b_units.get(uid)
+            if b is None:
+                rows.append(f"LEDGER|unit.spawned|unit|u{uid}|exists"
+                            f"|false|true")
+                continue
+            if (u["x"], u["y"]) != (b[0], b[1]):
+                rows.append(f"LEDGER|unit.moved|unit|u{uid}|pos|{b[0]},{b[1]}"
+                            f"|{u['x']},{u['y']}")
+            if u["moves"] != b[2]:
+                rows.append(f"LEDGER|unit.moves|unit|u{uid}|moves|{b[2]}"
+                            f"|{u['moves']}")
+            if u["damage"] != b[3]:
+                rows.append(f"LEDGER|unit.damage|unit|u{uid}|damage|{b[3]}"
+                            f"|{u['damage']}")
+        for uid in sorted(set(b_units) - {u for u, x in self.units.items()
+                                          if x["owner"] == pid}):
+            rows.append(f"LEDGER|unit.despawned|unit|u{uid}|exists|true|false")
+        for cid, c in sorted(self.cities.items()):
+            if c["owner"] != pid:
+                continue
+            if cid not in b_cities:
+                rows.append(f"LEDGER|city.founded|city|c{cid}|exists|false|true")
+            elif c["pop"] != b_cities[cid]:
+                rows.append(f"LEDGER|city.growth|city|c{cid}|population|"
+                            f"{b_cities[cid]}|{c['pop']}")
+        for cid in sorted(set(b_cities) - {c for c, x in self.cities.items()
+                                           if x["owner"] == pid}):
+            rows.append(f"LEDGER|city.lost|city|c{cid}|exists|true|false")
+        gold = self.players[pid]["gold"]
+        res = self.players[pid]["researching"]
+        if gold != b_gold:
+            rows.append(f"LEDGER|player.gold|player|p{pid}|gold|{b_gold}|{gold}")
+        if res != b_res:
+            rows.append(f"LEDGER|player.research_set|player|p{pid}"
+                        f"|researching|{b_res}|{res}")
+        return rows
+
+    # digest: ENGINE STATE ONLY over the mini board (+ a nonce row for the
+    # Simulate.Mutate drift fixture; unattributed, so owner-scoped hashes
+    # filter it out exactly like a foreign row would be).
     def _digest(self) -> str:
-        return f"DIGEST|rehearsal|turn={self.turn}|nonce={self.state_nonce}"
+        rows = []
+        for uid, u in sorted(self.units.items()):
+            rows.append(f"u{uid}|{u['owner']}|{u['x']}|{u['y']}"
+                        f"|{u['moves']}|{u['damage']}")
+        for cid, c in sorted(self.cities.items()):
+            rows.append(f"c{cid}|{c['owner']}|{c['pop']}")
+        for pid, p in sorted(self.players.items()):
+            rows.append(f"p{pid}|{p['gold']}|{p['researching'] or -1}")
+        rows.append(f"nonce{self.state_nonce}")
+        return "DIGEST|fake|" + ";".join(rows)
 
     def _status_rows(self) -> list[str]:
         # ONE embedded-newline row: the real mod's Status() RETURNS its
@@ -82,15 +199,157 @@ class FakeMod:
             f"\nLEASE_PLAYER|{player}\nLEASE_TURN|{turn}"
         ]
 
+    # -- act handlers: parse the translator's own Lua -----------------------
+    def _act(self, tool: str, code: str) -> list[str] | None:
+        def num(pat: str) -> int:
+            m = re.search(pat, code)
+            return int(m.group(1)) if m else -1
+
+        def token(pat: str) -> str:
+            m = re.search(pat, code)
+            return m.group(1) if m else ""
+
+        me = 0
+        if tool == "move_unit":
+            uid = num(r"UnitManager\.GetUnit\(me, (\d+)\)")
+            x = num(r"PARAM_X\] = (-?\d+)")
+            y = num(r"PARAM_Y\] = (-?\d+)")
+            u = self.units.get(uid)
+            if u is None or u["owner"] != me:
+                return [f"ACT|move_unit|ERR|UNKNOWN_ENTITY|u{uid}", "---END---"]
+            if u["moves"] <= 0:
+                return [f"ACT|move_unit|ERR|NO_MOVEMENT|u{uid}", "---END---"]
+            u["x"], u["y"], u["moves"] = x, y, 0
+            return [f"ACT|move_unit|OK|{x},{y}", "---END---"]
+        if tool == "attack":
+            uid = num(r"UnitManager\.GetUnit\(me, (\d+)\)")
+            tid = num(r"UnitManager\.GetUnit\(i, (\d+)\)")
+            if uid not in self.units or tid not in self.units:
+                return [f"ACT|attack|ERR|UNKNOWN_ENTITY|u{tid}", "---END---"]
+            if self.units[uid]["moves"] <= 0:
+                return [f"ACT|attack|ERR|CANNOT_ATTACK|u{tid}", "---END---"]
+            self.units[uid]["moves"] = 0
+            self.units[tid]["damage"] = min(
+                100, self.units[tid]["damage"] + 30)
+            return ["ACT|attack|OK|hit", "---END---"]
+        if tool == "fortify":
+            uid = num(r"UnitManager\.GetUnit\(me, (\d+)\)")
+            if uid not in self.units:
+                return [f"ACT|fortify|ERR|UNKNOWN_ENTITY|u{uid}", "---END---"]
+            if self.units[uid]["fortified"]:
+                return ["ACT|fortify|OK|already", "---END---"]
+            self.units[uid]["fortified"] = True
+            return ["ACT|fortify|OK|fortified", "---END---"]
+        if tool == "found_city":
+            uid = num(r"UnitManager\.GetUnit\(me, (\d+)\)")
+            u = self.units.get(uid)
+            if u is None:
+                return [f"ACT|found_city|ERR|UNKNOWN_ENTITY|u{uid}", "---END---"]
+            if u["type"] != "SETTLER":
+                return ["ACT|found_city|ERR|ILLEGAL_MOVE|not-a-settler",
+                        "---END---"]
+            cid = self.next_city_id
+            self.next_city_id += 1
+            self.cities[cid] = {"owner": u["owner"], "name": f"NEW{cid}",
+                                "x": u["x"], "y": u["y"], "pop": 1, "queue": ""}
+            del self.units[uid]
+            return [f"ACT|found_city|OK|{self.cities[cid]['x']},"
+                    f"{self.cities[cid]['y']}", "---END---"]
+        if tool == "set_research":
+            pid = num(r"Players\[(\d+)\]")
+            tech = token(r"GameInfo\.Technologies\['TECH_([A-Z0-9_]+)'\]")
+            p = self.players.get(pid)
+            if tech not in self.TECHS:
+                return [f"ACT|set_research|ERR|ARGS_INVALID|{tech}", "---END---"]
+            if p is None:
+                return ["ACT|set_research|ERR|UNKNOWN_ENTITY|player", "---END---"]
+            if p["researching"] == tech:
+                return [f"ACT|set_research|ERR|ALREADY|{tech}", "---END---"]
+            p["researching"] = tech
+            return [f"ACT|set_research|OK|{tech}", "---END---"]
+        if tool == "set_city_production":
+            cid = num(r"CityManager\.GetCity\(me, (\d+)\)")
+            item = token(r"GameInfo\.Units\['UNIT_([A-Z0-9_]+)'\]") or \
+                token(r"GameInfo\.Buildings\['BUILDING_([A-Z0-9_]+)'\]")
+            c = self.cities.get(cid)
+            if c is None or c["owner"] != me:
+                return [f"ACT|set_city_production|ERR|UNKNOWN_ENTITY|c{cid}",
+                        "---END---"]
+            if item not in self.BUILDABLE:
+                return [f"ACT|set_city_production|ERR|ARGS_INVALID|{item}",
+                        "---END---"]
+            c["queue"] = item
+            return [f"ACT|set_city_production|OK|{item}|10", "---END---"]
+        if tool == "purchase":
+            cid = num(r"CityManager\.GetCity\(me, (\d+)\)")
+            item = token(r"GameInfo\.Units\['UNIT_([A-Z0-9_]+)'\]") or \
+                token(r"GameInfo\.Buildings\['BUILDING_([A-Z0-9_]+)'\]")
+            c = self.cities.get(cid)
+            if c is None or c["owner"] != me:
+                return [f"ACT|purchase|ERR|UNKNOWN_ENTITY|c{cid}", "---END---"]
+            if item not in self.BUILDABLE:
+                return [f"ACT|purchase|ERR|ARGS_INVALID|{item}", "---END---"]
+            cost = self.BUILDABLE[item][0] * self.PURCHASE_GOLD_PREMIUM
+            p = self.players[me]
+            if cost > p["gold"]:
+                return [f"ACT|purchase|ERR|INSUFFICIENT_GOLD|{cost}gt{p['gold']}",
+                        "---END---"]
+            p["gold"] -= cost
+            return [f"ACT|purchase|OK|{item}|{cost}", "---END---"]
+        return None
+
     def respond(self, code: str) -> list[str] | None:
         """Rows for a command's Lua code, or None if not mod-shaped."""
         # game-level probes (the fake IS the whole game, mod included)
         if 'print("TS|1")' in code:
             return [f"TURN|{self.turn}", "LOCAL|0", "PUPPET_ACTIVE|false"]
-        if 'print("OV|1")' in code:
-            return ["OV|1", f"TURN|{self.turn}", "ALIVE|2",
-                    "PLAYER|0|CIVILIZATION_ROME",
-                    "PLAYER|1|CIVILIZATION_KOREA"]
+        # -- M14d observes over the mini engine --
+        if 'print("OVX|1")' in code:
+            rows = [f"TURN|{self.turn}"]
+            for pid, p in sorted(self.players.items()):
+                rows.append(f"OVROW|{pid}|CIVILIZATION_FAKE{pid}|{p['gold']}"
+                            f"|{p['researching'] or '-'}")
+                if p["researched"]:
+                    rows.append("OVRESEARCHED|" + str(pid) + "|"
+                                + ";".join(sorted(p["researched"])))
+            return rows + ["---END---"]
+        if 'print("UNITS|1")' in code:
+            rows = []
+            for uid, u in sorted(self.units.items()):
+                q, r = _ax(u["x"], u["y"])
+                combat, ranged = (20, 0) if u["type"] == "WARRIOR" else \
+                    (15, 15) if u["type"] == "ARCHER" else (0, 0)
+                rows.append(
+                    f"UNITROW|{uid}|{u['owner']}|{u['type']}|{q}|{r}"
+                    f"|{100 - u['damage']}|{u['moves']}|2|{combat}|{ranged}"
+                    f"|{str(u['fortified']).lower()}")
+            return ["UNITS|1", *rows, "---END---"]
+        if 'print("CITIES|1")' in code:
+            rows = []
+            for cid, c in sorted(self.cities.items()):
+                q, r = _ax(c["x"], c["y"])
+                rows.append(f"CITYROW|{cid}|{c['owner']}|{c['name']}|{q}|{r}"
+                            f"|{c['pop']}|{c['queue'] or '-'}")
+            return ["CITIES|1", *rows, "---END---"]
+        if 'print("VMAP|1")' in code:
+            return ["VMAP|1", f"TURN|{self.turn}", "---END---"]
+        if 'print("AVRES|1")' in code:
+            pid = int(re.search(r"Players\[(\d+)\]", code).group(1))
+            p = self.players.get(pid, {"researched": []})
+            rows = [f"TECHROW|{t}|{cost}" for t, cost in sorted(self.TECHS.items())
+                    if t not in p["researched"]]
+            return ["AVRES|1", *rows, "---END---"]
+        if 'print("AVPROD|1")' in code:
+            rows = [f"ITEMROW|{kind}|{item}|{cost}|10"
+                    for item, (cost, kind) in sorted(self.BUILDABLE.items())]
+            return ["AVPROD|1", *rows, "---END---"]
+        # -- M14d acts (the translator's inert marker identifies the tool) --
+        m = re.search(r"-- arena:tool=(\w+)", code)
+        if m is not None:
+            out = self._act(m.group(1), code)
+            if out is not None:
+                self.act_log.append((m.group(1), out[0].split("|")[2]))
+                return out
         if "PUPPET_PLAYERS = {}" in code:
             # the injected mod source (D9): execution succeeds silently
             return [f"MOD_LOADED|{self.version}"]
@@ -101,6 +360,7 @@ class FakeMod:
                 f"SUPPORTS_FREEZE|{str(self.supports_freeze).lower()}",
                 f"SUPPORTS_LEDGER|{str(self.supports_ledger).lower()}",
                 "SUPPORTS_DIGEST|true",
+                f"SUPPORTS_COMMAND_DIFF|{str(self.has_command_diff).lower()}",
             ]
         m = re.search(
             r"Puppeteer\.SetPuppet\(\s*(\d+)\s*,\s*(true|false)\s*\)", code)
@@ -118,6 +378,15 @@ class FakeMod:
             if not self.has_digest:
                 return ["MOD_DIGEST|unavailable"]
             return [self._digest()]
+        if "Puppeteer.DiffSinceLast" in code:
+            if not self.has_command_diff:
+                return ["MOD_DIFF|unavailable"]
+            if self.lease is None or self.mark is None:
+                return ["---END---"]
+            rows = self._diff(self.lease["player"], self.mark)
+            self.mark = self._snapshot(self.lease["player"])
+            # ONE embedded-newline payload: the mod RETURNS the rows joined
+            return ["\n".join(rows)] if rows else ["---END---"]
         if "Puppeteer.DumpLedger" in code:
             rows, self.ledger_rows = self.ledger_rows, []
             return rows
@@ -125,8 +394,27 @@ class FakeMod:
             rows, self.ambient_rows = self.ambient_rows, []
             return rows
         if "Puppeteer.Release" in code:
+            # mod v0.3 parity: book only drift no DiffSinceLast covered
+            if self.lease is not None and self.mark is not None:
+                self.ledger_rows.extend(
+                    self._diff(self.lease["player"], self.mark))
+                self.mark = None
             self.lease = None
             return ["PUPPET_ACTIVE|false"]
+        if "Puppeteer.FreezeUnit" in code:
+            m = re.search(r"Puppeteer\.FreezeUnit\(\s*(\d+)\s*\)", code)
+            if m:
+                u = self.units.get(int(m.group(1)))
+                if u is not None:
+                    u["moves"] = 0
+            return []  # silent, like the mod (it prints FROZEN| live)
+        if "Puppeteer.RestoreUnit" in code:
+            m = re.search(r"Puppeteer\.RestoreUnit\(\s*(\d+)\s*\)", code)
+            if m:
+                u = self.units.get(int(m.group(1)))
+                if u is not None:
+                    u["moves"] = 2
+            return []  # silent, like the mod
         m = re.search(r"Puppeteer\.FinishAllMoves\(\s*(\d+)\s*\)", code)
         if m:
             return [f"FINISHED_MOVES|{m.group(1)}|0"]
@@ -138,8 +426,6 @@ class FakeMod:
             # the driver simulates it.
             self.lease = None
             return ["PUPPET_ACTIVE|false", "ENDTURN_SENT|0"]
-        if "Puppeteer.RestoreUnit" in code:
-            return []  # silent, like the mod
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
             return [f"AMBIENT_WINDOW|open|{m.group(1)}"]
@@ -161,6 +447,7 @@ class FakeMod:
             pid = int(m.group(1))
             if self.puppets.get(pid):
                 self.lease = {"player": pid, "turn": self.turn}
+                self.mark = self._snapshot(pid)
             return []  # hook print is unsolicited => drained: no rows
         m = re.search(r"Simulate\.TurnStartAt\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
         if m:
@@ -171,6 +458,7 @@ class FakeMod:
                 self.turn = turn
             if self.puppets.get(pid):
                 self.lease = {"player": pid, "turn": turn}
+                self.mark = self._snapshot(pid)
             return []
         m = re.search(r"Simulate\.TurnDeactivated\(\s*(\d+)\s*\)", code)
         if m:
@@ -180,6 +468,13 @@ class FakeMod:
             return []
         if "Simulate.AdvanceTurn" in code:
             self.turn += 1
+            # engine turn-end effects: per-OWNER-city income lands with the
+            # advance (AFTER the adapter's pre-endturn seal — the live
+            # run-004 bracket)
+            for pid, p in self.players.items():
+                owned = sum(1 for c in self.cities.values()
+                            if c["owner"] == pid)
+                p["gold"] += 5 * owned
             return []
         if "Simulate.Mutate" in code:
             self.state_nonce += 1

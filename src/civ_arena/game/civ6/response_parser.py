@@ -63,6 +63,10 @@ def parse_handshake(lines: list[str]) -> dict[str, Any]:
         "supports_freeze": present and parsed.get("SUPPORTS_FREEZE") is True,
         "supports_ledger": present and parsed.get("SUPPORTS_LEDGER") is True,
         "supports_digest": present and parsed.get("SUPPORTS_DIGEST") is True,
+        # mod >= 0.3: without the rolling DiffSinceLast seam, act() cannot
+        # reconcile commanded effects and the live driver refuses to dispatch
+        "supports_command_diff": present
+        and parsed.get("SUPPORTS_COMMAND_DIFF") is True,
     }
 
 
@@ -116,3 +120,181 @@ def parse_digest(lines: list[str]) -> str:
         if line.startswith("DIGEST|"):
             return line[len("DIGEST|"):]
     raise ValueError(f"no DIGEST| row in {lines!r}")
+
+
+# -- sim-shape observation parses (M14d: shape parity with SimulatorAdapter) --
+
+
+def parse_units(lines: list[str]) -> list[dict[str, Any]]:
+    """UNITROW|uid|pid|type|q|r|hp|moves|maxmoves|combat|ranged|fortified ->
+    the omniscient UNITS doc (projection consumes q/r/owner/hp/movement/
+    max_movement/strength/ranged_strength/fortified; ownership checks read
+    owner). Sorted by numeric engine id — the sim's deterministic order."""
+    out: list[dict[str, Any]] = []
+    for line in _split_lines(lines):
+        line = line.strip()
+        if not line or line.startswith(("UNITS|", "---END---")):
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix != "UNITROW":
+            raise ValueError(f"non-unit row in units read: {line!r}")
+        parts = rest.split("|")
+        if len(parts) != 11:
+            raise ValueError(f"malformed UNITROW (want 11 fields): {line!r}")
+        (uid, pid, type_, q, r, hp, moves, maxmoves, combat, ranged,
+         fortified) = parts
+        out.append({
+            "unit_id": f"u{int(uid)}",
+            "owner": _coerce_strict(pid),
+            "type": type_,
+            "q": _coerce_strict(q),
+            "r": _coerce_strict(r),
+            "hp": _coerce_strict(hp),
+            "movement": _coerce_strict(moves),
+            "max_movement": _coerce_strict(maxmoves),
+            "strength": _coerce_strict(combat),
+            "ranged_strength": _coerce_strict(ranged),
+            "fortified": _coerce(fortified),
+        })
+    return sorted(out, key=lambda u: int(u["unit_id"][1:]))
+
+
+def parse_cities(lines: list[str]) -> list[dict[str, Any]]:
+    """CITYROW|cid|pid|name|q|r|population|queue -> the omniscient CITIES
+    doc. production_queue is a 0/1-length list (the sim's shape); the
+    placeholder hp/buckets/buildings keys exist because foreign-city
+    projection (post-M14c visibility) reads them — declared approximations
+    until a live accessor is verified."""
+    out: list[dict[str, Any]] = []
+    for line in _split_lines(lines):
+        line = line.strip()
+        if not line or line.startswith(("CITIES|", "---END---")):
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix != "CITYROW":
+            raise ValueError(f"non-city row in cities read: {line!r}")
+        parts = rest.split("|")
+        if len(parts) != 7:
+            raise ValueError(f"malformed CITYROW (want 7 fields): {line!r}")
+        cid, pid, name, q, r, pop, queue = parts
+        out.append({
+            "city_id": f"c{int(cid)}",
+            "owner": _coerce_strict(pid),
+            "name": name,
+            "q": _coerce_strict(q),
+            "r": _coerce_strict(r),
+            "population": _coerce_strict(pop),
+            "production_queue": [] if queue == "-" else [queue],
+            "hp": 100,
+            "food_bucket": 0,
+            "production_bucket": 0,
+            "buildings": [],
+        })
+    return sorted(out, key=lambda c: int(c["city_id"][1:]))
+
+
+def parse_overview(lines: list[str]) -> dict[str, Any]:
+    """OVX read -> the sim OVERVIEW shape the projection consumes: turn +
+    players{str(pid): {player_id, civ_name, gold, researched, researching,
+    alive}}. researched rides OVRESEARCHED|pid|A;B rows (';'-joined — a
+    tech name never contains one)."""
+    turn: int | None = None
+    rows: dict[int, dict[str, Any]] = {}
+    for line in _split_lines(lines):
+        line = line.strip()
+        if not line or line.startswith(("OVX|", "---END---")):
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix == "TURN" and turn is None:
+            turn = int(_coerce_strict(rest))
+        elif prefix == "OVROW":
+            parts = rest.split("|")
+            if len(parts) != 4:
+                raise ValueError(f"malformed OVROW (want 4 fields): {line!r}")
+            pid, civ, gold, res = parts
+            rows[int(pid)] = {
+                "player_id": int(pid),
+                "civ_name": civ,
+                "gold": _coerce_strict(gold),
+                "researched": [],
+                "researching": None if res == "-" else res,
+                "alive": True,
+            }
+        elif prefix == "OVRESEARCHED":
+            pid_s, _, names = rest.partition("|")
+            player = rows.get(int(pid_s))
+            if player is None:
+                raise ValueError(f"OVRESEARCHED for unknown player: {line!r}")
+            player["researched"] = names.split(";") if names else []
+        else:
+            raise ValueError(f"non-overview row in overview read: {line!r}")
+    if turn is None:
+        raise ValueError(f"no TURN row in overview read: {lines!r}")
+    return {"turn": turn,
+            "players": {str(pid): doc for pid, doc in sorted(rows.items())}}
+
+
+def parse_available_research(lines: list[str]) -> list[dict[str, Any]]:
+    """TECHROW|tech_id|cost -> [{tech_id, cost}] sorted by tech_id."""
+    out: list[dict[str, Any]] = []
+    for line in _split_lines(lines):
+        line = line.strip()
+        if not line or line.startswith(("AVRES|", "---END---")):
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix != "TECHROW":
+            raise ValueError(f"non-tech row in research read: {line!r}")
+        parts = rest.split("|")
+        if len(parts) != 2:
+            raise ValueError(f"malformed TECHROW (want 2 fields): {line!r}")
+        out.append({"tech_id": parts[0], "cost": _coerce_strict(parts[1])})
+    return sorted(out, key=lambda t: t["tech_id"])
+
+
+def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
+    """ITEMROW|kind|item_id|cost|turns -> [{item_id, cost, turns, kind}],
+    units before buildings (the sim's grouping), id-sorted within each."""
+    out: list[dict[str, Any]] = []
+    for line in _split_lines(lines):
+        line = line.strip()
+        if not line or line.startswith(("AVPROD|", "---END---")):
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix != "ITEMROW":
+            raise ValueError(f"non-item row in production read: {line!r}")
+        parts = rest.split("|")
+        if len(parts) != 4:
+            raise ValueError(f"malformed ITEMROW (want 4 fields): {line!r}")
+        kind, item_id, cost, turns = parts
+        if kind not in ("unit", "building"):
+            raise ValueError(f"unknown production kind: {line!r}")
+        out.append({"item_id": item_id, "cost": _coerce_strict(cost),
+                    "turns": _coerce_strict(turns), "kind": kind})
+    order = {"unit": 0, "building": 1}
+    return sorted(out, key=lambda i: (order[i["kind"]], i["item_id"]))
+
+
+def parse_act(lines: list[str]) -> dict[str, Any]:
+    """ACT|tool|OK|detail | ACT|tool|ERR|REASON|detail -> the act verdict.
+    Exactly one ACT row per command; missing = fail loud (a torn response
+    must never read as success)."""
+    row: dict[str, Any] | None = None
+    for line in _split_lines(lines):
+        line = line.strip()
+        if line.startswith("ACT|"):
+            if row is not None:
+                raise ValueError(f"two ACT rows in one response: {lines!r}")
+            parts = line.split("|")
+            if len(parts) not in (4, 5) or parts[2] not in ("OK", "ERR"):
+                raise ValueError(f"malformed ACT row: {line!r}")
+            row = {"tool": parts[1], "status":
+                   "accepted" if parts[2] == "OK" else "rejected"}
+            if parts[2] == "OK":
+                row["detail"] = parts[3]
+            else:
+                row["rejection"] = parts[3]
+                row["detail"] = parts[4] if len(parts) == 5 else ""
+    if row is None:
+        raise ValueError(f"no ACT row in act response: {lines!r}")
+    return row
+

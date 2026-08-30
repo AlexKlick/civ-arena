@@ -1,0 +1,32 @@
+# M14d tourney leg 1: MiniMax-M3 drives the LOCAL seat vs the engine's own
+# AI (the M10/M11 sim opponent, now on the live board).
+match:
+  match_id: live-tourney-minimax-m3
+  seed: 811002
+  max_turns: 10
+  checkpoint_every: 1
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: minimax-m3
+    player_id: 0
+    policy: llm
+    seed: 1102
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: engine-ai
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []

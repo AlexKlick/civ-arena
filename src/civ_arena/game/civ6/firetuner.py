@@ -1,44 +1,53 @@
-"""FireTunerAdapter — the live Civ VI leg (M14b: phase surface + watchdog).
+"""FireTunerAdapter — the live Civ VI leg (M14d: action surface + dispatch).
 
 Working: connect (vendored wire layer), the mod handshake gate, turn/lease
 polling (D3: poll, never push — the wire drains unsolicited output around
 every command), phase open/close over the declared ambient window, a
-buffered mutation journal fed by the mod's ledgers, and the whole-board
-digest as the state-hash source.
+buffered mutation journal fed by the mod's ledgers, the whole-board digest
+as the state-hash source, the six sim-shaped observes, and the seven
+action tools routed GameCore/InGame per the live-probed table
+(docs/live-validation.md §6).
 
-Still NotImplementedError: the 5 non-OVERVIEW observes, ``visibility_for``,
-``act``, ``snapshot``/``restore``, ``export_state``/``import_state`` — each
-lands per docs/live-validation.md §4 (one translator entry + one parser
-entry + one fake test; zero changes in ``arena/``, ``session/``, or
-``agents/``).
+Still NotImplementedError: ``snapshot``/``restore``, ``export_state``/
+``import_state`` (live save/load is M14e), and ground-truth visibility
+(``visibility_for`` returns EMPTY sets — the M14d declaration below).
 
 Design notes that cost nothing to forget:
 
 - ``current_phase``/``state_hash`` are SYNC by seam contract, so the
   adapter keeps a mirror (open player, engine turn) and a digest cache,
   refreshed after every state-relevant wire operation (setup, begin_phase,
-  end_phase). Pre-hash of command N is exactly post-hash of command N-1 —
-  the invariant the log's hash trail relies on.
+  end_phase, act). Pre-hash of command N is exactly post-hash of command
+  N-1 — the invariant the log's hash trail relies on (Codex P2-10: a
+  landed act MUST end with a digest refresh).
 - ``end_phase`` strategy is the D7 experiment (h1 UI ENDTURN / h2
-  FinishMoves / h3 release-only); outcomes are recorded dated in
-  docs/live-validation.md §6 and the winner becomes the default.
+  FinishMoves / h3 release-only); h1 is live-proven for the LOCAL seat.
 - ``simulate_hook`` is REHEARSAL ONLY (FakeMod ``Simulate.*`` commands);
   never attached against a real game.
+- Commanded-effect reconciliation (mod v0.3): every accepted act drains
+  ``Puppeteer.DiffSinceLast`` and journals the SAME records as the
+  command's mutations and as actuals — the watchdog's exact-key multiset
+  diff then matches them. Rejected unit-acts re-freeze the unit so the
+  restore can never book as undeclared movement at release.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Callable
 from typing import Any
 
 from civ_arena.canonical import state_hash as _sha
 from civ_arena.game.adapter import (
+    ActionCommand,
+    ActionResult,
     AdapterCapabilities,
     MutationRecord,
     ObserveKind,
     ObserveRequest,
+    RejectionReason,
 )
 from civ_arena.game.civ6 import lua_translator, response_parser
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
@@ -47,6 +56,19 @@ _LIVE_POINTER = (
     "live FireTuner support is not implemented yet — see "
     "docs/live-validation.md §'extending the adapter'"
 )
+
+# agent-supplied ids/coords are INTERPOLATED into Lua source — only these
+# spellings may cross the boundary (defense in depth beyond the referee's
+# type checks; a hostile tech_id like "MINING'] Evil() --" dies here).
+_UNIT_ID = re.compile(r"^u\d+$")
+_CITY_ID = re.compile(r"^c\d+$")
+_TOKEN = re.compile(r"^[A-Z0-9_]+$")
+_COORD = re.compile(r"^-?\d+,-?\d+$")
+
+# tools that operate on a unit: restore its movement before the command
+# (the lease froze every unit at engagement), re-freeze on rejection so
+# the release diff sees the frozen baseline.
+_UNIT_TOOLS = frozenset({"move_unit", "attack", "fortify", "found_city"})
 
 
 def _row_owner(row: str) -> int | None:
@@ -73,6 +95,56 @@ def filter_digest_rows(digest: str, owner: int) -> list[str]:
     immediately, so a phase's hashes must not cover foreign activity
     (Codex P1-4) — the whole board hashes only when no phase is open."""
     return sorted(r for r in digest.split(";") if r and _row_owner(r) == owner)
+
+
+# --------------------------------------------------------------------------
+# M14d action routing (live-probed 2026-08-30, docs/live-validation.md §6).
+# Every builder returns (lua, ingame): ingame=True -> execute_write (the
+# InGame VM: RequestOperation/RequestCommand/UI), False -> execute_read
+# (GameCore: research setters — the InGame player-op silently no-ops).
+# --------------------------------------------------------------------------
+
+
+def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
+    """Adapter-side arg re-check (defense in depth): these values are
+    interpolated into Lua source, so only strict spellings cross."""
+    checks = {
+        "unit_id": _UNIT_ID, "target_id": _UNIT_ID, "city_id": _CITY_ID,
+        "tech_id": _TOKEN, "item_id": _TOKEN, "dest": _COORD,
+    }
+    for key, pattern in checks.items():
+        value = args.get(key)
+        if value is not None and not pattern.match(str(value)):
+            return f"{tool}.{key}={value!r} fails the canonical spelling"
+    return None
+
+
+def _rejection_value(token: str) -> str:
+    """The act Lua emits UPPERCASE reason tokens; the seam contract is the
+    RejectionReason VALUE (lowercase). An unknown token fails LOUD — a
+    typo'd reason must never reach the event log as a free string."""
+    try:
+        return RejectionReason[token].value
+    except KeyError as exc:
+        raise RuntimeError(
+            f"unknown rejection token on the wire: {token!r}") from exc
+
+
+_ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
+    "move_unit": lambda _pid, a: (lua_translator.move_unit(
+        a["unit_id"], a["dest"]), True),
+    "attack": lambda _pid, a: (lua_translator.attack(
+        a["unit_id"], a["target_id"]), True),
+    "fortify": lambda _pid, a: (lua_translator.fortify(a["unit_id"]), True),
+    "found_city": lambda _pid, a: (lua_translator.found_city(
+        a["unit_id"], a.get("name")), True),
+    "set_research": lambda pid, a: (lua_translator.set_research(
+        pid, a["tech_id"]), False),
+    "set_city_production": lambda _pid, a: (lua_translator.set_city_production(
+        a["city_id"], a["item_id"]), True),
+    "purchase": lambda _pid, a: (lua_translator.purchase(
+        a["city_id"], a["item_id"]), True),
+}
 
 # (event, player_id) -> fake-side Lua; the driver attaches this ONLY in
 # rehearsal mode. Hook prints are unsolicited and drained in the real wire,
@@ -202,7 +274,8 @@ class FireTunerAdapter:
     async def require_mod(self) -> dict[str, Any]:
         """Phase-1 live gate (docs/live-validation.md §3.1): refuse to drive
         a live match unless the mod reports freeze AND ledger AND digest —
-        state_hash cannot operate without the digest (Codex P2-8)."""
+        state_hash cannot operate without the digest (Codex P2-8) — and,
+        for dispatch, the v0.3 DiffSinceLast seam."""
         doc = await self.mod_handshake()
         if not (doc["supports_freeze"] and doc["supports_ledger"]
                 and doc["supports_digest"]):
@@ -210,11 +283,15 @@ class FireTunerAdapter:
                 f"PuppeteerMod handshake gate failed: {doc} — "
                 "freeze+ledger+digest required (docs/live-validation.md §3.1)"
             )
+        if not doc["supports_command_diff"]:
+            raise RuntimeError(
+                f"PuppeteerMod handshake gate failed: {doc} — command_diff "
+                "required for M14d dispatch (mod >= 0.3)")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
         return AdapterCapabilities(
-            rollback=False, save_load=False, acts=False, state_hash=True,
+            rollback=False, save_load=False, acts=True, state_hash=True,
             turn_events=True,
         )
 
@@ -345,25 +422,124 @@ class FireTunerAdapter:
 
     # -- observation ----------------------------------------------------------
     async def observe(self, req: ObserveRequest) -> Any:
+        # OMNISCIENT by seam contract — the referee projects scope AFTER this
+        # returns. Reads are GameCore (verified accessors), except
+        # AVAILABLE_PRODUCTION whose CanStartOperation gate is InGame-only.
         if req.kind is ObserveKind.OVERVIEW:
-            lines = await self._conn.execute_read(lua_translator.overview_read())
-            return response_parser.parse_kv_lines(lines)
-        raise NotImplementedError(
-            f"observe {req.kind.value} over FireTuner: {_LIVE_POINTER}"
-        )
+            lines = await self._conn.execute_read(
+                lua_translator.overview_read())
+            return response_parser.parse_overview(lines)
+        if req.kind is ObserveKind.UNITS:
+            lines = await self._conn.execute_read(lua_translator.units_read())
+            return response_parser.parse_units(lines)
+        if req.kind is ObserveKind.CITIES:
+            lines = await self._conn.execute_read(lua_translator.cities_read())
+            return response_parser.parse_cities(lines)
+        if req.kind is ObserveKind.VISIBLE_MAP:
+            # M14d declaration: no per-tile read until M14c's revealed-tiles
+            # query; under the empty visibility sets the projection emits no
+            # tiles anyway — this preserves the shape contract only.
+            lines = await self._conn.execute_read(
+                lua_translator.visible_map_read())
+            parsed = response_parser.parse_kv_lines(lines)
+            return {"turn": int(parsed.get("TURN", self._turn_mirror)),
+                    "tiles": {}}
+        if req.kind is ObserveKind.AVAILABLE_RESEARCH:
+            lines = await self._conn.execute_read(
+                lua_translator.available_research_read(req.player_id))
+            return response_parser.parse_available_research(lines)
+        if req.kind is ObserveKind.AVAILABLE_PRODUCTION:
+            if req.subject_id is None:
+                raise ValueError(
+                    "AVAILABLE_PRODUCTION requires subject_id (city_id)")
+            lines = await self._conn.execute_write(
+                lua_translator.available_production_read(
+                    int(req.subject_id[1:])))
+            return response_parser.parse_available_production(lines)
+        raise ValueError(f"unknown observe kind: {req.kind}")
 
     def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
-        raise NotImplementedError(
-            f"visibility_for over FireTuner: {_LIVE_POINTER}. The mod's "
-            "revealed-tiles query supplies remembered/observable sets."
-        )
+        """M14d DECLARATION (docs/live-validation.md §6): until M14c's
+        revealed-tiles read, the live adapter reports NO observable and NO
+        remembered tiles. The projection therefore hides EVERY foreign
+        entity — the safe side of the no-leak contract (under-visibility,
+        never over-visibility); own entities are ownership-based and
+        unaffected. A side effect the driver records: driven agents cannot
+        see or attack the opponent's units in M14d games."""
+        _ = player_id
+        return frozenset(), frozenset()
 
     # -- action -----------------------------------------------------------------
-    async def act(self, cmd: Any) -> Any:
-        # M14d contract: a landed act MUST end with await self._refresh_digest()
-        # (Codex P2-10) — otherwise execute()'s post-hash is the PRE-command
-        # digest and the log's hash trail goes stale mid-lease.
-        raise NotImplementedError(f"act over FireTuner: {_LIVE_POINTER}")
+    async def act(self, cmd: ActionCommand) -> ActionResult:
+        if self._phase_open != cmd.player_id:
+            return ActionResult(
+                status="rejected", result=None, mutations=(),
+                rejection="no_lease",
+                error=f"phase belongs to player {self._phase_open}")
+        builder = _ACT_BUILDERS.get(cmd.tool)
+        if builder is None:
+            return ActionResult(
+                status="rejected", result=None, mutations=(),
+                rejection="not_implemented",
+                error=f"{cmd.tool} over FireTuner: {_LIVE_POINTER}")
+        bad = _arg_violation(cmd.tool, cmd.args)
+        if bad is not None:
+            return ActionResult(
+                status="rejected", result=None, mutations=(),
+                rejection="args_invalid", error=bad)
+        unit_id = cmd.args.get("unit_id")
+        if cmd.tool in _UNIT_TOOLS:
+            # unfreeze exactly this unit (the lease froze all of them at
+            # engagement; NEVER bulk-restore)
+            await self._conn.execute_read(
+                lua_translator.restore_unit(unit_id))
+        lua, ingame = builder(cmd.player_id, cmd.args)
+        lines = await (self._conn.execute_write(lua) if ingame
+                       else self._conn.execute_read(lua))
+        verdict = response_parser.parse_act(lines)
+        if verdict["status"] == "rejected":
+            if cmd.tool in _UNIT_TOOLS:
+                # undo the restore: re-freeze so the restored-but-unused
+                # movement never books as undeclared drift at release
+                await self._conn.execute_read(
+                    lua_translator.freeze_unit(unit_id))
+            return ActionResult(
+                status="rejected", result=verdict, mutations=(),
+                rejection=_rejection_value(verdict["rejection"]),
+                error=verdict["detail"])
+        # Codex P2-10: a landed act MUST refresh the digest before returning
+        # — otherwise execute()'s post-hash is the PRE-command digest and the
+        # log's hash trail goes stale mid-lease.
+        await self._refresh_digest()
+        muts = await self._drain_command_diff(cmd.player_id)
+        return ActionResult(
+            status="accepted",
+            result={"tool": cmd.tool, "detail": verdict["detail"]},
+            mutations=tuple(muts))
+
+    async def _drain_command_diff(self, player_id: int) -> list[MutationRecord]:
+        """The commanded-effects seam (mod v0.3): journal DiffSinceLast's
+        rows as BOTH the command's mutations (allowed, via the returned
+        records) and actuals (via the journal the referee drains) — the
+        exact-key multiset diff then reconciles them. Rows the diff never
+        covers (production, promotions — declared recorder limitations)
+        simply book nothing, on both sides."""
+        lines = await self._conn.execute_read(
+            lua_translator.diff_since_last())
+        if any(ln.startswith("MOD_DIFF|unavailable") for ln in lines):
+            raise RuntimeError(
+                "mod has no DiffSinceLast (need >= 0.3) — commanded effects "
+                "cannot be reconciled; refusing to continue this lease")
+        records = [
+            MutationRecord(
+                kind=doc["kind"], entity_type=doc["entity_type"],
+                entity_id=doc["entity_id"], attr=doc["attr"],
+                before=doc["before"], after=doc["after"],
+                origin="command")
+            for doc in response_parser.parse_ledger_lines(lines)
+        ]
+        self._journal.extend(records)
+        return records
 
     # -- watchdog / persistence ----------------------------------------------
     def snapshot(self) -> Any:
