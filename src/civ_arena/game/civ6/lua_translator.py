@@ -659,9 +659,11 @@ def purchase(city_id: str, item_id: str) -> str:
     cid = city_id[1:]
     # hoisted: the bail detail embeds Lua string concat, which cannot sit
     # inside an f-string replacement field (3.12 tokenizer)
+    # the detail must be a self-contained Lua expression with BALANCED
+    # quotes: reopen the print-string at the start AND reclose at the end
     _insufficient = _bail(
         "purchase", "INSUFFICIENT_GOLD",
-        "' .. tostring(cost) .. 'gt' .. tostring(balance)")
+        "' .. tostring(cost) .. 'gt' .. tostring(balance) .. '")
     return f"""{_resolve_item_lua(item_id, "purchase")}
 local me = Game.GetLocalPlayer()
 local pCity = CityManager.GetCity(me, {cid})

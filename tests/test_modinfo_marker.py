@@ -103,3 +103,69 @@ def test_mod_lua_parses():
          str(repo / "mods" / "PuppeteerMod" / "PuppeteerMod.lua")],
         capture_output=True, text=True, timeout=60.0)
     assert "PARSE_OK" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_every_translator_output_parses():
+    """EVERY Lua builder's output must parse — the fake cannot catch syntax
+    (it pattern-matches, never executes), and the purchase builder shipped
+    unparsed for hours because nothing luac'd it (live run 012)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from civ_arena.game.civ6 import lua_translator
+
+    luatex = shutil.which("luatex")
+    if luatex is None:
+        pytest.skip("no luatex on this host for the Lua parse gate")
+    repo = Path(__file__).resolve().parents[1]
+    checker = repo / "tests" / "_lua_parse_check2.lua"
+    checker.write_text(
+        "local chunk, err = loadfile(arg[1])\n"
+        "if not chunk then print('PARSE_FAIL|' .. tostring(err)) os.exit(1) end\n"
+        "print('PARSE_OK')\n",
+        encoding="utf-8",
+    )
+    outputs = [
+        lua_translator.poll_turn_state(),
+        lua_translator.overview_read(),
+        lua_translator.units_read(),
+        lua_translator.cities_read(),
+        lua_translator.visible_map_read(),
+        lua_translator.available_research_read(0),
+        lua_translator.available_production_read(3),
+        lua_translator.mod_handshake(),
+        lua_translator.mod_status(),
+        lua_translator.mod_digest(),
+        lua_translator.mod_trace(),
+        lua_translator.diff_since_last("pos,moves", 4),
+        lua_translator.move_unit("u131073", "2,3"),
+        lua_translator.attack("u131073", "u65538"),
+        lua_translator.fortify("u131073"),
+        lua_translator.found_city("u131073", "Name"),
+        lua_translator.set_research(0, "MINING"),
+        lua_translator.set_city_production("c65536", "MONUMENT"),
+        lua_translator.purchase("c65536", "MONUMENT"),
+        lua_translator.request_end_turn(0),
+        lua_translator.finish_all_moves(0),
+        lua_translator.set_puppet(0, True),
+        lua_translator.release(0, 12),
+        lua_translator.restore_unit("u7"),
+        lua_translator.freeze_unit("u7"),
+        lua_translator.begin_ambient_window(0),
+        lua_translator.end_ambient_window(0),
+        lua_translator.dump_ledger(),
+        lua_translator.dump_ambient(),
+    ]
+    import tempfile
+
+    for lua in outputs:
+        with tempfile.NamedTemporaryFile("w", suffix=".lua",
+                                         delete=False) as fh:
+            fh.write(lua)
+            path = fh.name
+        proc = subprocess.run(
+            [luatex, "--luaonly", str(checker), path],
+            capture_output=True, text=True, timeout=60.0)
+        assert "PARSE_OK" in proc.stdout, (
+            f"Lua parse failure:\n{proc.stdout}{proc.stderr}\n---\n{lua}")
