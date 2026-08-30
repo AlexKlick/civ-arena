@@ -166,6 +166,7 @@ index; cross-match queries run over the agent/match spine.
   ignored (round-trip tested).
 - Diplomacy bus; `bilateral` scope is a stub.
 - The live FireTuner leg itself — see `docs/live-validation.md`.
-- In-game cross-match recall (`recall_lessons` riding the observed-digest
-  trick) — M13, gated on ≥3 claim-bearing matches (the graph currently
-  holds one; any M11-tools LLM match produces them cheaply).
+- ~~In-game cross-match recall~~ — **shipped as M13**
+  (`docs/recall-lane.md`): `recall_lessons` over prior runs' logs, the
+  `recalled` digest replay-COMPARED (an external corpus is not
+  state-derived), validated live in run 005.

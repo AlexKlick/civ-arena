@@ -1,0 +1,34 @@
+# M13 recall-lane validation: 40 turns, fresh seed, recall corpus = the
+# three claim-bearing matches (002/003/004 — 66 lessons). The paid leg:
+# does cross-match recall change behavior? Key never inline — env name.
+match:
+  match_id: llm-vs-turtler-005
+  seed: 571903
+  max_turns: 40
+  checkpoint_every: 1        # paid inference: lose at most one turn on resume
+  adapter: simulator
+  watchdog_mode: flag_and_continue
+  violation_limit: 5
+  recall_runs: [llm-vs-turtler-002, llm-vs-turtler-003, llm-vs-turtler-004]
+
+agents:
+  - agent_id: minimax-m3
+    player_id: 0
+    policy: llm
+    seed: 1101
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: korean-turtler
+    player_id: 1
+    policy: turtler
+    seed: 2202
+
+chaos: []
