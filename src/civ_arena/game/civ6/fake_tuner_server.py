@@ -93,6 +93,7 @@ class FakeMod:
         self._diff_cache: str | None = None
         self._diff_cache_seq: int = -1
         self.trace: list[str] = []
+        self.pending_blockers: list[str] = []
         self._restored: set[int] = set()
         self.act_log: list[tuple[str, str]] = []  # (tool, status) per command
         self.reset_board()
@@ -415,6 +416,20 @@ class FakeMod:
             if not self.has_digest:
                 return ["MOD_DIGEST|unavailable"]
             return [self._digest()]
+        if "NotificationManager.GetList" in code:
+            if self.pending_blockers:
+                return [*self.pending_blockers, "---END---"]
+            return ["NONE", "---END---"]
+        if "SetProgressingCivic" in code:
+            self.pending_blockers = [
+                b for b in self.pending_blockers
+                if not b.endswith("ENDTURN_BLOCKING_CIVIC")]
+            return ["CIVIC_SET|CIVIC_FAKE", "---END---"]
+        if "RequestPolicyChanges" in code:
+            self.pending_blockers = [
+                b for b in self.pending_blockers
+                if "FILL_CIVIC_SLOT" not in b]
+            return ["POLICIES_SET|1|0:POLICY_FAKE", "---END---"]
         if "Puppeteer.Trace" in code:
             # the mod v0.3.1 hook ring (minimal model: the turn-start /
             # lease / deactivate events the driver's targeting reads)

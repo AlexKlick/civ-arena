@@ -700,3 +700,16 @@ async def test_attach_does_not_reinject_over_live_mod():
         assert doc["supports_command_diff"] is True
     finally:
         await server.stop()
+
+
+def test_dispatch_targeting_rules_and_blockers():
+    """The blocker housekeeping runs at lease start and clears the
+    civic/policy pair (the fresh-game CODE_OF_LAWS wedge, run 011)."""
+    from civ_arena.game.civ6 import live_driver
+
+    assert live_driver._target_turn(
+        {"TURN": 9, "PUPPET_ACTIVE": False, "LEASE_PLAYER": -1,
+         "LEASE_TURN": -1, "TURN_ACTIVE": True}, 0) == 10
+    assert live_driver._last_deact_turn(
+        ["16|HOOK_DEACT|0", "16|HOOK_ENTER|0"]) == 16
+    assert live_driver._last_deact_turn([]) is None

@@ -156,6 +156,9 @@ def test_every_translator_output_parses():
         lua_translator.end_ambient_window(0),
         lua_translator.dump_ledger(),
         lua_translator.dump_ambient(),
+        lua_translator.blocker_query(),
+        lua_translator.resolve_civic(),
+        lua_translator.fill_policy_slots(),
     ]
     import tempfile
 

@@ -302,6 +302,113 @@ print("---END---")
 """
 
 
+# -- turn-blocker housekeeping (M14d; upstream civ6-mcp's notification
+# surface). A fresh game's free CODE_OF_LAWS completes during the engine's
+# end-of-turn processing and parks TWO ENDTURN_BLOCKING notifications on
+# the local player ("Choose a Civic" + "Fill Policy Slot"); a forced
+# end-turn bypasses their popups and the WHOLE turn cycle freezes
+# (live-learned 2026-08-30, run 011). These run at LEASE START — inside
+# our own turn, where policy changes are legal — so the cycle never
+# wedges mid-game. SetCivic is NEVER emitted (forbidden: it permanently
+# breaks AI civics); the civic choice is SetProgressingCivic.
+
+
+def blocker_query() -> str:
+    """InGame: one BLOCKING|<TYPE> row per distinct end-turn blocker."""
+    return """
+local me = Game.GetLocalPlayer()
+local list = NotificationManager.GetList(me)
+local seen = {}
+local found = 0
+if list then
+    for _, nid in ipairs(list) do
+        local entry = NotificationManager.Find(me, nid)
+        if entry and not entry:IsDismissed() then
+            local bt = entry:GetEndTurnBlocking()
+            if bt and bt ~= 0 then
+                local typeName = "UNKNOWN"
+                for k, v in pairs(EndTurnBlockingTypes) do
+                    if v == bt then typeName = k break end
+                end
+                if not seen[typeName] then
+                    seen[typeName] = true
+                    print("BLOCKING|" .. typeName)
+                    found = found + 1
+                end
+            end
+        end
+    end
+end
+if found == 0 then print("NONE") end
+print("---END---")
+"""
+
+
+def resolve_civic() -> str:
+    """GameCore: set the first not-yet-researched civic as progressing
+    (upstream's gate; CanProgress is not a culture-object method)."""
+    return """
+local me = Game.GetLocalPlayer()
+local cu = Players[me]:GetCulture()
+for row in GameInfo.Civics() do
+    local has = true
+    pcall(function() has = cu:HasCivic(row.Index) end)
+    if not has then
+        cu:SetProgressingCivic(row.Index)
+        print("CIVIC_SET|" .. row.CivicType)
+        print("---END---")
+        return
+    end
+end
+print("CIVIC_FAIL|none-available")
+print("---END---")
+"""
+
+
+def fill_policy_slots() -> str:
+    """InGame: fill every EMPTY slot with the first unlocked type-matching
+    policy via UNLOCK_POLICIES + RequestPolicyChanges (upstream's exact
+    sequence — the clear list MUST include every touched slot)."""
+    return """
+local me = Game.GetLocalPlayer()
+local cu = Players[me]:GetCulture()
+local slotTypeMap = {SLOT_ECONOMIC=0, SLOT_MILITARY=1, SLOT_DIPLOMATIC=2,
+                     SLOT_WILDCARD=3, SLOT_GREAT_PERSON=4}
+local n = 0
+pcall(function() n = cu:GetNumPolicySlots() end)
+if n <= 0 then print("SLOTS_NONE|0") print("---END---") return end
+local addList = {}
+local clearList = {}
+local picks = {}
+for i = 0, n - 1 do
+    local cur = -1
+    pcall(function() cur = cu:GetSlotPolicy(i) end)
+    if cur == -1 or cur == nil or cur == 0 then
+        local st = 3
+        pcall(function() st = cu:GetSlotType(i) end)
+        for row in GameInfo.Policies() do
+            local unlocked = false
+            pcall(function() unlocked = cu:IsPolicyUnlocked(row.Index) end)
+            local ptype = slotTypeMap[row.GovernmentSlotType or "SLOT_WILDCARD"] or 3
+            if unlocked and (ptype == st or st == 3 or ptype == 3) then
+                table.insert(clearList, i)
+                addList[i] = row.Hash
+                table.insert(picks, i .. ":" .. row.PolicyType)
+                break
+            end
+        end
+    end
+end
+local count = 0
+for _ in pairs(addList) do count = count + 1 end
+if count == 0 then print("SLOTS_NONE|" .. count) print("---END---") return end
+UI.RequestPlayerOperation(me, PlayerOperations.UNLOCK_POLICIES, {})
+cu:RequestPolicyChanges(clearList, addList)
+print("POLICIES_SET|" .. count .. "|" .. table.concat(picks, ","))
+print("---END---")
+"""
+
+
 def lua_error_probe() -> str:
     """Deliberately erroneous Lua used to verify the error path."""
     return "this is not ( valid lua"

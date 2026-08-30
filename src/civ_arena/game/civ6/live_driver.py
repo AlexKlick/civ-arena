@@ -34,7 +34,7 @@ from civ_arena.arena.referee import Referee, RefereeConfig
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import MatchSpec, load_config
-from civ_arena.game.civ6 import lua_translator
+from civ_arena.game.civ6 import lua_translator, response_parser
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.vendor.connection import GameConnection
@@ -325,6 +325,7 @@ async def phase_dispatch(
             await driver.referee.begin_turn(
                 agent.player_id, agent.agent_id, turn)
             digest_open = await adapter.refresh_digest()
+            await _resolve_blockers(adapter, turn)
             allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
             # THE TURN: the policy acts through the bound ToolFacade —
             # every call flows observe/execute/end_turn through the referee
@@ -441,6 +442,34 @@ def _target_turn(status: dict[str, Any], player_id: int,
             status.get("TURN", -1)):
         return int(status["TURN"]) + 1
     return int(status["TURN"])
+
+
+async def _resolve_blockers(adapter: FireTunerAdapter, turn: int) -> None:
+    """Turn-blocker housekeeping at LEASE START (inside our own turn, where
+    civic/policy changes are legal): a completed civic parks 'Choose a
+    Civic' + 'Fill Policy Slot' on the local player, and a forced end-turn
+    past them freezes the whole engine cycle (live-learned run 011).
+    Resolved with the engine's own safe primitives (SetProgressingCivic,
+    NEVER SetCivic; UNLOCK_POLICIES + RequestPolicyChanges). Both attrs
+    are outside the recorder's coverage, so nothing here enters the
+    watchdog ledgers — the wire transcript is the record."""
+    rows = response_parser._split_lines(  # noqa: SLF001
+        await adapter.write_raw(lua_translator.blocker_query()))
+    blockers = [r for r in rows if r.startswith("BLOCKING|")]
+    for b in blockers:
+        if b.endswith("ENDTURN_BLOCKING_CIVIC"):
+            out = await adapter.read_raw(lua_translator.resolve_civic())
+            print(f"blocker[{turn}]: civic -> "
+                  f"{[r for r in out if not r.endswith('---END---')]}")
+        elif "FILL_CIVIC_SLOT" in b:
+            out = await adapter.write_raw(lua_translator.fill_policy_slots())
+            print(f"blocker[{turn}]: policies -> "
+                  f"{[r for r in out if not r.endswith('---END---')]}")
+        else:
+            # unknown blocker: report it loudly — the run must not freeze
+            # silently on something this housekeeping does not cover
+            print(f"blocker[{turn}]: UNHANDLED {b} (manual resolution "
+                  "may be needed)")
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,
