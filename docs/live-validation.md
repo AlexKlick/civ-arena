@@ -233,8 +233,45 @@ clicked in the graphical session (the protocol's R10 path). AppOptions
 path still unconfirmed — §6 runbook step 2 pending the first successful
 launch.
 
+### 2026-08-30 — the gaming-session platform facts (learned the hard way)
+
+The host's games run inside a **systemd-managed dedicated X session**:
+`headless-gaming.service` → `xinit ~/.local/bin/headless-gaming-session`
+→ Xorg **:1** (vt8) + openbox + Sunshine (local mode drives the real
+monitor when plugged; headless mode is a virtual 2944x1840 for
+Moonlight). It is NOT an OS-level sandbox — same filesystem, same
+network namespace — so `:4318` and `~/.local/share/aspyr-media` are
+directly reachable from any shell. But Steam must live INSIDE that
+session's environment, and three traps bit:
+
+1. **Second Steam instances are poison**: a `steam.sh` started outside
+   the session (even with DISPLAY=:1) fights the resident client — the
+   resident one lost its CM login and entered a `LogonFailure No
+   Connection` loop (network was fine the whole time; the store was
+   reachable by curl). Never spawn a second Steam; ask the operator to
+   drive the resident one.
+2. **The harness HOME trap**: `/usr/games/steam` resolves `.steam`
+   through `$HOME`, and an automation shell whose HOME is a scratch dir
+   silently launches Steam against a FAKE Steam root. Always export
+   `HOME=/home/alexk` explicitly.
+3. **Killing the session's Steam costs the saved login** (and a blind
+   `pkill -f steam` can self-match the calling shell, exit 144). Kill
+   by explicit PID list only; after a kill, expect
+   `SetLoginState: WaitingForCredentials` — the operator re-enters
+   credentials.
+
+Current state at this entry: Steam restarted correctly inside the
+session (HOME fixed), waiting at the login prompt; operator logging in,
+then Play. The `compatdata/289070` directory that appeared is a 4KB
+EMPTY stub — no Proton prefix exists; the Aspyr-native row of the §1
+table remains the expected AppOptions route, to be confirmed the moment
+`aspyr-media` materializes.
+
 Post-M14 backlog (decided with the operator, 2026-08-30): once the live
 control plane is proven, **glm-5.3 (Z.AI) enters as the live-leg LLM
 opponent** — config-only per the M14 lane exploration (own `llm:` block,
 Z.AI base URL, key env var name; the arena's per-agent client wiring
-already supports two LLM agents).
+already supports two LLM agents). Also discussed: a **human-policy
+agent** so the operator can play against the LLMs live — the mod only
+puppets configured players, so the human's turn flows naturally and the
+driver just waits for turn end; a small driver extension post-M14d.
