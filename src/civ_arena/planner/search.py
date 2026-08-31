@@ -32,6 +32,7 @@ from civ_arena.game.sim.state import SimState
 from civ_arena.game.sim.value import value_of
 from civ_arena.planner.belief import PlannerBelief, build_state_doc
 from civ_arena.planner.options import OPTIONS, Option
+from civ_arena.planner.uncertainty import STALENESS_PENALTY_PER_TURN
 
 UCT_C = 140.0  # exploration constant, on the value_of scale
 
@@ -134,6 +135,14 @@ def _simulate_epoch(state: SimState, pid: int, option: Option, turns: int,
         for opp in opp_ids:
             run_ambient(state, opp)
             stock_ai_turn(state, opp)
+        # knowledge ages inside the rollout exactly as it would at the
+        # runtime's next rebuild (Codex M16c P1): a target one turn from
+        # falling below the confidence floor must not fund a multi-turn
+        # continuation the live planner cannot execute
+        for u in state.units.values():
+            if u["owner"] != pid and "confidence" in u:
+                u["confidence"] = max(
+                    0, u["confidence"] - STALENESS_PENALTY_PER_TURN)
         state.turn += 1
 
 
@@ -145,13 +154,19 @@ class _Node:
     def total(self) -> int:
         return sum(self.visits.values())
 
-    def uct_pick(self, candidates: list[str]) -> str:
+    def uct_pick(self, order: list[str], tiebreak: list[str]) -> str:
+        """Untried candidates expand in ``order`` (the prior-ordered visit
+        sequence — the proposer's entire influence); EVALUATED candidates
+        compare over ``tiebreak`` (the canonical sorted set), so equal
+        scores resolve canonically and the prior never decides a tie among
+        already-visited options (Codex M16b P2)."""
+        for oid in order:
+            if self.visits.get(oid, 0) == 0:
+                return oid
         n_total = self.total() + 1
         best: tuple[float, str] | None = None
-        for oid in candidates:
-            n = self.visits.get(oid, 0)
-            if n == 0:
-                return oid  # expand untried options first, candidate order
+        for oid in tiebreak:
+            n = self.visits[oid]
             q = self.values[oid] / n
             score = q + UCT_C * math.sqrt(math.log(n_total) / n)
             if best is None or score > best[0]:
@@ -208,7 +223,7 @@ def search_option(
 
     for i in range(budget):
         world = SimState.from_doc(build_state_doc(belief, seed * 10_007 + i + 1))
-        oid1 = root.uct_pick(root_candidates)
+        oid1 = root.uct_pick(root_candidates, candidate_set)
         _simulate_epoch(world, pid, OPTIONS[oid1], epoch_turns,
                         skip_first_ambient=True)
 
@@ -222,7 +237,7 @@ def search_option(
         node = children.setdefault(key, _Node())
 
         mid_candidates = _candidates(world, pid) or ["tech_race"]
-        oid2 = node.uct_pick(mid_candidates)
+        oid2 = node.uct_pick(mid_candidates, mid_candidates)
         _simulate_epoch(world, pid, OPTIONS[oid2], epoch_turns)
 
         value = value_of(world, pid)

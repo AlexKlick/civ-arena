@@ -52,7 +52,8 @@ def unit_confidence(belief: Any, uid: str, turn: int) -> int:
 def confident_foreign_units(state: Any, pid: int, floor: int) -> list[dict]:
     """Foreign units from the determinized doc at or above the confidence
     floor — the consumer-side filter every gated predicate uses. Own
-    entities and prior-roster units carry no key (= CONF_MAX semantics:
-    full setup knowledge, deliberately not decayed)."""
+    entities carry no key (= CONF_MAX: full self-knowledge); last-seen
+    entries and prior-roster units both decay (a missing key on a FOREIGN
+    unit is legacy test-fixture state treated as certain)."""
     return [u for u in state.units.values()
             if u["owner"] != pid and u.get("confidence", CONF_MAX) >= floor]

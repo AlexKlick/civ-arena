@@ -321,10 +321,12 @@ OPTIONS: dict[str, Option] = {o.option_id: o for o in (
            _defend_step),
     Option("rush",
            lambda s, p: len(_military(s, p)) >= 2 and bool(_foreign_coords(s, p)),
-           # units only: the sim has no city capture, so a known foreign
-           # CITY would make a coords-based termination unreachable forever
-           lambda s, p: not any(u["owner"] != p for u in s.units.values())
-           or not _military(s, p),
+           # symmetric with initiation (Codex M16c P1), units-only (the
+           # sim has no city capture, so a city condition would make
+           # termination unreachable — M15d's finding stands): rush ends
+           # when the CONFIDENT unit targets are gone or the force is dead
+           lambda s, p: not _military(s, p)
+           or not confident_foreign_units(s, p, RUSH_CONF_MIN),
            _rush_step),
     Option("scout_frontier",
            lambda s, p: bool(_own_units(s, p, ("SCOUT",)))

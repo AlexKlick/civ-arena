@@ -134,6 +134,67 @@ async def test_full_match_with_scripted_proposer(tmp_path):
         f"replay diverged at comparable-event {result['first_divergence']}")
 
 
+async def test_malformed_reply_and_budget_degrade_fail_soft():
+    """P1-3 + P1-2 regressions: a 200-reply with a non-string text block
+    (TypeError at the client seam) and an exhausted runtime-side budget
+    BOTH degrade to unprimed — nothing escapes the proposer boundary."""
+
+    class GarbageModel:
+        async def create(self, **_kw):
+            class R:
+                content = [{"type": "text", "text": 7}]
+            return R()
+
+    state = base_state()
+    bot = PlannerRuntime(0, 7, proposer=GarbageModel())
+    prior, doc = await bot._propose(state, 4)
+    assert prior is None and doc["error"] == "model_unavailable"
+
+    bot2 = PlannerRuntime(0, 7, proposer=GarbageModel())
+    bot2.proposer_posts = bot2.proposer_posts + 10_000  # over any cap
+    prior2, doc2 = await bot2._propose(state, 4)
+    assert prior2 is None and doc2["error"] == "proposer_budget_exhausted"
+
+
+def test_proposer_budget_survives_restore(tmp_path):
+    """P1-2: the posts counter is journaled with the belief snapshot, so a
+    restored runtime cannot reset its match budget."""
+    from civ_arena.planner.journal import PlannerJournal
+
+    j = PlannerJournal(tmp_path / "j" / "p0-journal.jsonl")
+    j.append(4, {"turn": 4, "belief": {
+        "own_player": {"player_id": 0, "civ_name": "ROME", "gold": 50,
+                       "researched": [], "researching": ""},
+        "public_players": {1: {"civ_name": "KOREA", "alive": True}},
+        "own_units": {}, "own_cities": {}, "foreign_units": {},
+        "foreign_cities": {}, "tiles": {}, "turn": 4},
+        "active": "rush", "chosen_at_turn": 4, "proposer_posts": 9})
+    fresh = PlannerRuntime(0, 7)
+    fresh.journal = j
+    fresh._restore_from_journal(5)
+    assert fresh.proposer_posts == 9
+    assert fresh.active == "rush"
+
+
+async def test_prior_does_not_break_evaluated_ties() -> None:
+    """P2: the prior orders untried visits ONLY — once every candidate is
+    evaluated, equal scores resolve in canonical order, not prior order."""
+    from civ_arena.planner.search import _Node
+
+    node = _Node()
+    for oid in ("rush", "develop"):
+        node.record(oid, 100)  # equal visits, equal values
+    picked = node.uct_pick(order=["rush", "develop"],
+                           tiebreak=["develop", "rush"])
+    assert picked == "develop"  # canonical first on a tie
+    picked2 = node.uct_pick(order=["develop", "x"][:1] + ["rush"],
+                            tiebreak=["develop", "rush"])
+    assert picked2 == "develop"  # order cannot flip an evaluated tie
+    node2 = _Node()
+    assert node2.uct_pick(order=["rush", "develop"],
+                          tiebreak=["develop", "rush"]) == "rush"  # untried: order rules
+
+
 async def test_dead_proposer_degrades_to_unprimed(tmp_path):
     from civ_arena.agents.llm.client import ModelUnavailable
 

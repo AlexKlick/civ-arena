@@ -292,6 +292,10 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
                 "movement": spec["mv"], "max_movement": spec["mv"],
                 "hp": 100, "strength": spec["strength"],
                 "ranged_strength": spec["ranged"], "fortified": False,
+                # setup knowledge decays like a turn-1 sighting (Codex M16c
+                # P2): complete ignorance must never target with MORE
+                # confidence than partial observation — scout before rush
+                "confidence": staleness_confidence(1, belief.turn),
             }
 
     players: dict[str, dict[str, Any]] = {}

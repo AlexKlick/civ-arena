@@ -12,15 +12,20 @@ search trace accumulates on ``self.trace`` as canonical-ready docs
 ``runs/<id>/planner/`` side artifact — the arena log never carries it.
 
 M16a — resume without amnesia: the runtime journals each completed
-turn's projected observations plus its option state to a side artifact
+turn's END-of-turn belief snapshot plus option state to a side artifact
 (``PlannerJournal``, injected through the coordinator's service binder)
-and rebuilds the belief at the first post-resume turn by replaying the
-journal through the SAME ``observe_*`` methods — rebuilt == live by
-construction. A resumed planner is therefore bit-deterministic with its
-uninterrupted twin (test-pinned via final_state_hash); the journal is
-advisory only (see planner/journal.py for the trust model). The
-per-decision search trace stays in-memory — it is an analysis artifact,
-not gameplay state, and the harness persists it separately.
+and restores it exactly at the first post-resume turn (rewind-aware).
+With NO live proposer a resumed planner is bit-deterministic with its
+uninterrupted twin (test-pinned via final_state_hash). DECLARED LIMIT
+(Codex M16b P1-1): a LIVE proposer breaks resume-determinism — the
+model is re-asked at post-resume reselections and may rank differently,
+so proposer matches are replay-safe (the log re-issues recorded calls)
+but not resume-identical; completed turns are never re-asked (the
+restored option state carries them), so the exposure is bounded to
+genuinely new decisions. Proposer spend is capped runtime-side and
+JOURNALED, so resume cannot reset the budget. The journal is advisory
+only (see planner/journal.py for the trust model). The per-decision
+search trace stays in-memory — analysis artifact, not gameplay state.
 """
 
 from __future__ import annotations
@@ -40,6 +45,10 @@ SEARCH_METHOD = "mcgs"
 SEARCH_BUDGET = 12
 EPOCH_TURNS = 3
 RESELECT_EVERY = 3
+# Runtime-side proposer spend authority (the HTTP client enforces its own
+# LLMSpec budget too): the counter is JOURNALED with the belief snapshot,
+# so a resumed proposer cannot reset its match budget (Codex M16b P1-2).
+PROPOSER_POST_CAP = 64
 
 
 class PlannerRuntime:
@@ -59,21 +68,27 @@ class PlannerRuntime:
         self.journal: Any = None  # PlannerJournal, injected via bind_services
         self._processed_through = 0  # last turn this runtime completed
         self.proposer = proposer  # ModelClient | None (M16b, untrusted prior)
+        self.proposer_posts = 0   # journaled; resume cannot reset the budget
 
     async def _propose(self, bstate: SimState, turn: int) -> tuple[
             list[str] | None, dict[str, Any]]:
         """Ask the untrusted proposer for a ranking; compile it to a LEGAL
-        prior. ModelUnavailable / unparseable replies degrade to no prior —
-        the proposer never blocks or breaks the match."""
+        prior. ANY failure at the model boundary degrades to no prior —
+        ModelUnavailable, malformed provider shapes (TypeError/ValueError/
+        KeyError from a non-string text block), budget exhaustion — the
+        proposer never blocks or breaks the match."""
         from civ_arena.agents.llm.client import ModelUnavailable, text_of
 
+        if self.proposer_posts >= PROPOSER_POST_CAP:
+            return None, {"turn": turn, "error": "proposer_budget_exhausted"}
         req = build_request(bstate, self.player_id)
         try:
             reply = await self.proposer.create(
                 system=req["system"], messages=req["messages"], tools=[])
             text = text_of(reply)
-        except ModelUnavailable:
+        except (ModelUnavailable, TypeError, ValueError, KeyError):
             return None, {"turn": turn, "error": "model_unavailable"}
+        self.proposer_posts += 1
         proposal = compile_proposal(text, bstate, self.player_id)
         doc: dict[str, Any] = {"turn": turn, "ranked": proposal.ranked,
                                "assumptions": proposal.raw_assumptions,
@@ -127,6 +142,7 @@ class PlannerRuntime:
         self.belief = belief
         self.active = last["active"]
         self.chosen_at_turn = last["chosen_at_turn"]
+        self.proposer_posts = int(last.get("proposer_posts", 0))
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()
@@ -182,4 +198,5 @@ class PlannerRuntime:
                     "tiles": b.tiles, "turn": b.turn,
                 },
                 "active": self.active, "chosen_at_turn": self.chosen_at_turn,
+                "proposer_posts": self.proposer_posts,
             })
