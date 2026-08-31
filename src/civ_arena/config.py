@@ -89,10 +89,12 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
 class AgentSpec:
     agent_id: str
     player_id: int
-    policy: str  # "expansionist" | "turtler" | "llm"
+    policy: str  # "expansionist" | "turtler" | "llm" | "planner"
     seed: int
     model: str | None = None  # display hint; parsed and ignored
     llm: LLMSpec | None = None
+    # M16b: untrusted LLM strategy proposer for policy "planner" only.
+    proposer: LLMSpec | None = None
 
 
 @dataclass
@@ -165,6 +167,8 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             seed=int(entry.get("seed", seed * 10 + i)),
             model=entry.get("model"),  # display hint; parsed and ignored
             llm=_parse_llm(entry["llm"], where) if "llm" in entry else None,
+            proposer=_parse_llm(entry["proposer"], f"{where}.proposer")
+            if "proposer" in entry else None,
         )
         if agent.policy not in VALID_POLICIES:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
@@ -174,6 +178,11 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             raise ConfigError(
                 f"{where}: llm: block on policy {agent.policy!r} — remove it "
                 "or set policy: llm (fail loudly, never silently ignore)"
+            )
+        if agent.policy != "planner" and agent.proposer is not None:
+            raise ConfigError(
+                f"{where}: proposer: block on policy {agent.policy!r} — the "
+                "proposer rides the planner's search (set policy: planner)"
             )
         if agent.player_id in seen_players:
             raise ConfigError(f"{where}: duplicate player_id {agent.player_id}")

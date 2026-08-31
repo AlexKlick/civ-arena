@@ -129,12 +129,14 @@ class Arena:
                     agent_id=agent_spec.agent_id, player_id=agent_spec.player_id,
                     policy=agent_spec.policy, seed=agent_spec.seed,
                     model=agent_spec.model, llm=agent_spec.llm,
+                    proposer=agent_spec.proposer,
                 )
                 self.runtimes[agent_spec.player_id] = build_runtime(
                     profile, telemetry=self.telemetry, diary=self.diary,
                     strategy=self.strategy,
                     on_post=(self._spend_sink(agent_spec)
-                             if agent_spec.policy == "llm" else None))
+                             if agent_spec.policy == "llm"
+                             or agent_spec.proposer is not None else None))
             self.sessions[agent_spec.player_id] = PlayerSession(
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
         # Arena-owned services reach EVERY opted-in runtime, injected ones

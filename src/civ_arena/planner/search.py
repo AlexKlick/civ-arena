@@ -45,6 +45,7 @@ class SearchResult:
     seed: int
     budget: int
     epoch_turns: int
+    prior: list[str]
     root_visits: dict[str, int]
     root_values: dict[str, int]
     rollouts: int
@@ -58,7 +59,7 @@ class SearchResult:
             "candidates": list(self.candidates),
             "root_key": self.root_key,
             "seed": self.seed, "budget": self.budget,
-            "epoch_turns": self.epoch_turns,
+            "epoch_turns": self.epoch_turns, "prior": list(self.prior),
             "root_visits": dict(sorted(self.root_visits.items())),
             "root_values": dict(sorted(self.root_values.items())),
             "rollouts": self.rollouts, "nodes_expanded": self.nodes_expanded,
@@ -168,6 +169,18 @@ def _candidates(state: SimState, pid: int) -> list[str]:
             if OPTIONS[oid].initiation(state, pid)]
 
 
+def _prior_order(candidates: list[str], prior: list[str] | None) -> list[str]:
+    """Reorder candidates so prior-ranked options are visited FIRST under
+    the untried-first rule (stable within groups; unknown ids ignored —
+    the prior can only permute, never add). This is the M16b proposer's
+    entire authority: with a budget below the candidate count it decides
+    what gets explored; with a full budget it fades to visit order."""
+    if not prior:
+        return candidates
+    rank = {oid: i for i, oid in enumerate(prior)}
+    return sorted(candidates, key=lambda oid: (rank.get(oid, len(rank)), oid))
+
+
 def search_option(
     belief: PlannerBelief,
     pid: int,
@@ -176,11 +189,13 @@ def search_option(
     budget: int = 16,
     epoch_turns: int = 3,
     seed: int = 0,
+    prior: list[str] | None = None,
 ) -> SearchResult:
     """Pick the next option for ``pid`` under the given rollout budget."""
     assert method in ("mcts", "mcgs")
     root_state = SimState.from_doc(build_state_doc(belief, seed))
-    root_candidates = _candidates(root_state, pid) or ["tech_race"]
+    candidate_set = _candidates(root_state, pid) or ["tech_race"]
+    root_candidates = _prior_order(candidate_set, prior)
 
     root = _Node()
     children: dict[str, _Node] = {}
@@ -219,9 +234,10 @@ def search_option(
                                   root.values.get(oid, 0), oid))
     return SearchResult(
         method=method, chosen=chosen,
-        candidates=list(root_candidates),
+        candidates=list(candidate_set),
         root_key=abstract_key(root_state, pid),
         seed=seed, budget=budget, epoch_turns=epoch_turns,
+        prior=list(prior or []),
         root_visits=dict(root.visits), root_values=dict(root.values),
         rollouts=budget,
         nodes_expanded=1 + len(children),

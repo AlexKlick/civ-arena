@@ -19,6 +19,7 @@ class AgentProfile:
     seed: int
     model: str | None = None  # display hint only; the wire label is LLMSpec.model_id
     llm: Any = None  # config.LLMSpec when policy == "llm"
+    proposer: Any = None  # config.LLMSpec when policy == "planner" + proposer block
 
 
 @dataclass
@@ -58,7 +59,14 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
     if profile.policy == "planner":
         from civ_arena.planner.runtime import PlannerRuntime
 
-        return PlannerRuntime(profile.player_id, profile.seed)
+        proposer_client = None
+        if profile.proposer is not None:
+            from civ_arena.agents.llm.client import MiniMaxMessagesClient
+
+            proposer_client = MiniMaxMessagesClient(
+                profile.proposer, on_post=on_post)
+        return PlannerRuntime(profile.player_id, profile.seed,
+                              proposer=proposer_client)
     raise ValueError(f"unknown policy: {profile.policy}")
 
 

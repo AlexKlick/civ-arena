@@ -32,6 +32,7 @@ from civ_arena.game.sim.state import SimState
 from civ_arena.planner.belief import PlannerBelief, build_state_doc
 from civ_arena.planner.executor import execute_plan
 from civ_arena.planner.options import OPTIONS
+from civ_arena.planner.proposer import build_request, compile_proposal
 from civ_arena.planner.search import search_option
 
 SEARCH_METHOD = "mcgs"
@@ -44,7 +45,8 @@ class PlannerRuntime:
     """Belief-fair option planner. Deterministic in (player_id, seed)."""
 
     def __init__(self, player_id: int, seed: int, *,
-                 method: str = SEARCH_METHOD, budget: int = SEARCH_BUDGET) -> None:
+                 method: str = SEARCH_METHOD, budget: int = SEARCH_BUDGET,
+                 proposer: Any = None) -> None:
         self.player_id = player_id
         self.rng = random.Random(seed)
         self.method = method
@@ -55,6 +57,33 @@ class PlannerRuntime:
         self.trace: list[dict[str, Any]] = []
         self.journal: Any = None  # PlannerJournal, injected via bind_services
         self._restored = False
+        self.proposer = proposer  # ModelClient | None (M16b, untrusted prior)
+
+    async def _propose(self, bstate: SimState, turn: int) -> tuple[
+            list[str] | None, dict[str, Any]]:
+        """Ask the untrusted proposer for a ranking; compile it to a LEGAL
+        prior. ModelUnavailable / unparseable replies degrade to no prior —
+        the proposer never blocks or breaks the match."""
+        from civ_arena.agents.llm.client import ModelUnavailable, text_of
+
+        req = build_request(bstate, self.player_id)
+        try:
+            reply = await self.proposer.create(
+                system=req["system"], messages=req["messages"], tools=[])
+            text = text_of(reply)
+        except ModelUnavailable:
+            return None, {"turn": turn, "error": "model_unavailable"}
+        proposal = compile_proposal(text, bstate, self.player_id)
+        doc: dict[str, Any] = {"turn": turn, "ranked": proposal.ranked,
+                               "assumptions": proposal.raw_assumptions,
+                               "contingencies": proposal.raw_contingencies}
+        return (proposal.ranked or None), doc
+
+    async def aclose(self) -> None:
+        if self.proposer is not None:
+            close = getattr(self.proposer, "aclose", None)
+            if callable(close):
+                await close()
 
     def bind_services(self, *, diary: Any = None, strategy: Any = None,
                       journal: Any = None) -> None:
@@ -99,12 +128,20 @@ class PlannerRuntime:
             or not OPTIONS[self.active].initiation(bstate, self.player_id)
             or turn - self.chosen_at_turn >= RESELECT_EVERY)
         if needs_choice:
+            prior: list[str] | None = None
+            proposal_doc: dict[str, Any] | None = None
+            if self.proposer is not None:
+                prior, proposal_doc = await self._propose(bstate, turn)
             result = search_option(
                 self.belief, self.player_id, method=self.method,
-                budget=self.budget, epoch_turns=EPOCH_TURNS, seed=turn)
+                budget=self.budget, epoch_turns=EPOCH_TURNS, seed=turn,
+                prior=prior)
             self.active = result.chosen
             self.chosen_at_turn = turn
-            self.trace.append({"turn": turn, **result.to_doc()})
+            entry = {"turn": turn, **result.to_doc()}
+            if proposal_doc is not None:
+                entry["proposal"] = proposal_doc
+            self.trace.append(entry)
 
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
         await execute_plan(facade, self.belief, self.player_id, plan, seed=turn)
