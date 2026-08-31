@@ -112,7 +112,10 @@ class SimState:
 
     @classmethod
     def from_doc(cls, doc: dict[str, Any]) -> SimState:
-        return cls(dict(doc))
+        """DEEP copy: restoring N times from one snapshot must yield
+        independent states — a shallow copy aliases every nested unit/city/
+        tile dict, so mutating the restored state corrupts the snapshot."""
+        return cls(copy.deepcopy(doc))
 
     # -- scalars ---------------------------------------------------------
     @property

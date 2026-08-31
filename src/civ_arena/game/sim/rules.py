@@ -150,6 +150,115 @@ def purchase_cost(state: SimState, item: str) -> int | None:
 
 
 # --------------------------------------------------------------------------
+# enumeration (M15a) — the planner-facing legal-action surface
+
+
+def _numeric(entity_id: str) -> int:
+    return int(entity_id[1:])
+
+
+def reachable_dests(state: SimState, unit: dict[str, Any]) -> dict[str, int]:
+    """Every tile key the unit may enter this turn, mapped to its path cost.
+
+    Same expansion rule as ``path_cost`` (impassable terrain and enemy-
+    occupied tiles never relax), bounded by the unit's remaining movement.
+    Includes the unit's own tile at cost 0 — a zero-cost move is legal.
+    """
+    budget = unit["movement"]
+    owner = unit["owner"]
+    start = (unit["q"], unit["r"])
+    dist: dict[str, int] = {tile_key(*start): 0}
+    heap: list[tuple[int, int, int]] = [(0, start[0], start[1])]
+    while heap:
+        d, q, r = heapq.heappop(heap)
+        if d > dist.get(tile_key(q, r), 1 << 30):
+            continue
+        for nq, nr in neighbors(q, r):
+            nkey = tile_key(nq, nr)
+            tile = state.tiles.get(nkey)
+            if tile is None:
+                continue
+            step = TERRAIN[tile["terrain"]]["move"]
+            if step == 0 or state.enemy_units_at(nq, nr, owner):
+                continue
+            nd = d + step
+            if nd <= budget and nd < dist.get(nkey, 1 << 30):
+                dist[nkey] = nd
+                heapq.heappush(heap, (nd, nq, nr))
+    return dist
+
+
+def _can_found(state: SimState, player_id: int, unit: dict[str, Any]) -> bool:
+    tile = state.tile(unit["q"], unit["r"])
+    if tile is None or tile["owner"] != -1:
+        return False
+    if TERRAIN[tile["terrain"]]["move"] == 0:
+        return False
+    for city in state.cities.values():
+        if hex_dist((city["q"], city["r"]), (unit["q"], unit["r"])) <= 2:
+            return False
+    return not state.enemy_units_at(unit["q"], unit["r"], player_id)
+
+
+def legal_actions(state: SimState, player_id: int) -> list[tuple[str, dict[str, Any]]]:
+    """Enumerate every action ``check_action`` would accept for this player.
+
+    Soundness (everything enumerated passes ``check_action``) and
+    completeness (everything that passes is enumerated) are test-pinned.
+    ``found_city`` is enumerated without the optional ``name`` arg — a named
+    variant is the same decision, not a different one. Order is
+    deterministic: a fixed tool ladder, numeric entity ids, sorted dests.
+    """
+    out: list[tuple[str, dict[str, Any]]] = []
+    my_units = sorted(
+        (u for u in state.units.values() if u["owner"] == player_id),
+        key=lambda u: _numeric(u["unit_id"]))
+    foreign_units = sorted(
+        (u for u in state.units.values() if u["owner"] != player_id),
+        key=lambda u: _numeric(u["unit_id"]))
+    my_cities = sorted(
+        (c for c in state.cities.values() if c["owner"] == player_id),
+        key=lambda c: _numeric(c["city_id"]))
+    player = state.player(player_id)
+
+    for unit in my_units:
+        if unit["movement"] > 0:
+            for dest in sorted(reachable_dests(state, unit)):
+                out.append(("move_unit", {"unit_id": unit["unit_id"], "dest": dest}))
+    for unit in my_units:
+        if unit["movement"] <= 0:
+            continue
+        if unit["strength"] <= 0 and unit["ranged_strength"] <= 0:
+            continue
+        ranged = unit["ranged_strength"] > 0
+        for target in foreign_units:
+            dist = hex_dist((unit["q"], unit["r"]), (target["q"], target["r"]))
+            if (dist <= 2) if ranged else (dist == 1):
+                out.append(("attack", {"unit_id": unit["unit_id"],
+                                       "target_id": target["unit_id"]}))
+    for unit in my_units:
+        if not unit["fortified"]:
+            out.append(("fortify", {"unit_id": unit["unit_id"]}))
+    for unit in my_units:
+        if unit["type"] == "SETTLER" and _can_found(state, player_id, unit):
+            out.append(("found_city", {"unit_id": unit["unit_id"]}))
+    for entry in available_research(state, player_id):
+        if entry["tech_id"] != player["researching"]:
+            out.append(("set_research", {"tech_id": entry["tech_id"]}))
+    for city in my_cities:
+        for entry in available_production(state, player_id, city["city_id"]):
+            out.append(("set_city_production",
+                        {"city_id": city["city_id"], "item_id": entry["item_id"]}))
+    for city in my_cities:
+        for entry in available_production(state, player_id, city["city_id"]):
+            cost = purchase_cost(state, entry["item_id"])
+            if cost is not None and player["gold"] >= cost:
+                out.append(("purchase",
+                            {"city_id": city["city_id"], "item_id": entry["item_id"]}))
+    return out
+
+
+# --------------------------------------------------------------------------
 # check
 
 
