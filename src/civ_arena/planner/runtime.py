@@ -95,6 +95,53 @@ class PlannerRuntime:
                                "contingencies": proposal.raw_contingencies}
         return (proposal.ranked or None), doc
 
+    async def _filter_to_wire_vocabulary(
+            self, facade: Any, bstate: Any,
+            plan: list[tuple[str, dict[str, Any]]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """The sim-to-real vocabulary seam (M17a): compiled plans carry
+        SIM-table ids, but the engine on the wire offers its own research
+        and production vocabulary (the fake's 4-tech subset today; Civ VI
+        ids on the real engine). An id the wire never offered is REPLACED
+        with the first offered id that passes sim prevalidation (prereq-
+        aware, deterministic) and dropped only when nothing substitutes.
+        The referee stays the authority; this filter stops known-dead
+        calls before they become referee spend."""
+        from civ_arena.game.sim.rules import check_action
+
+        try:
+            offered = sorted({e.get("tech_id") for e
+                              in await facade.get_available_research()} - {None})
+            prod: dict[str, list[str]] = {}
+            for cid in {a.get("city_id") for t, a in plan
+                        if t in ("set_city_production", "purchase") and a.get("city_id")}:
+                prod[cid] = sorted(
+                    {e.get("item_id") for e
+                     in await facade.get_available_production(cid)} - {None})
+        except Exception:
+            return plan  # an observation failure must not eat the turn
+        out: list[tuple[str, dict[str, Any]]] = []
+        for tool, args in plan:
+            if tool == "set_research" and args.get("tech_id") not in offered:
+                sub = next((x for x in offered if check_action(
+                    bstate, self.player_id, "set_research",
+                    {"tech_id": x}) is None), None)
+                if sub is None:
+                    continue
+                args = {**args, "tech_id": sub}
+            if (tool in ("set_city_production", "purchase")
+                    and args.get("city_id") in prod
+                    and args.get("item_id") not in prod[args["city_id"]]):
+                cid = args["city_id"]
+                sub = next((x for x in prod[cid] if check_action(
+                    bstate, self.player_id, tool,
+                    {**args, "item_id": x}) is None), None)
+                if sub is None:
+                    continue
+                args = {**args, "item_id": sub}
+            out.append((tool, args))
+        return out
+
     async def aclose(self) -> None:
         if self.proposer is not None:
             close = getattr(self.proposer, "aclose", None)
@@ -179,6 +226,7 @@ class PlannerRuntime:
             self.trace.append(entry)
 
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
+        plan = await self._filter_to_wire_vocabulary(facade, bstate, plan)
         await execute_plan(facade, self.belief, self.player_id, plan, seed=turn)
         await facade.end_turn()
         self._processed_through = turn

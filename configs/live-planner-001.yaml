@@ -1,0 +1,30 @@
+# M17a: the CivGraph planner on the live FireTuner leg (dispatch phase).
+# agents[0] is the driven seat (the LOCAL player); the engine's own AI
+# plays the other seat naturally between our turns. The planner's world
+# model is the M15b belief forward model (sim rules as approximation of
+# the real engine); the M15c executor's prevalidation + reconciliation
+# absorb sim-to-real divergence — a referee rejection is the absorb
+# mechanism on this leg, not a failure. Declared limitation (run 1):
+# visibility_for is the M14d EMPTY-set declaration, so the belief's map
+# is own-sight only; fog-memory options (rush/defend off stale intel)
+# underperform until M14c's revealed-tiles read lands.
+match:
+  match_id: live-planner-001
+  seed: 314159
+  max_turns: 30
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: live-planner
+    player_id: 0
+    policy: planner
+    seed: 7
+  - agent_id: engine-ai
+    player_id: 1
+    policy: turtler
+    seed: 22
+
+chaos: []

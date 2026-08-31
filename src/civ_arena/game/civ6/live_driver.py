@@ -268,17 +268,29 @@ async def phase_dispatch(
     profile = AgentProfile(
         agent_id=agent.agent_id, player_id=agent.player_id,
         policy=agent.policy, seed=agent.seed, model=agent.model,
-        llm=agent.llm)
+        llm=agent.llm, proposer=agent.proposer)
     runtime = build_runtime(profile)
     driver = LiveDriver(spec, adapter, run_dir,
                         f"{spec.match_id}-i{os.getpid()}")
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
     # Arena-owned services reach the runtime exactly as the coordinator
     # wires them (LLM runtimes read diary/strategy at turn start; without
-    # this an llm-policy seat would run with empty cross-turn memory)
+    # this an llm-policy seat would run with empty cross-turn memory).
+    # A planner seat also gets its belief journal (M17a) — the same side
+    # artifact the Arena wires, so live fog memory survives a driver
+    # relaunch the same way it survives a resume.
     bind = getattr(runtime, "bind_services", None)
     if bind is not None:
-        bind(diary=driver.referee.diary, strategy=driver.referee.strategy)
+        from civ_arena.planner.journal import PlannerJournal
+
+        journal = (PlannerJournal(run_dir / "planner"
+                                  / f"p{agent.player_id}-journal.jsonl")
+                   if agent.policy == "planner" else None)
+        if journal is not None:
+            bind(diary=driver.referee.diary, strategy=driver.referee.strategy,
+                 journal=journal)
+        else:
+            bind(diary=driver.referee.diary, strategy=driver.referee.strategy)
     await adapter.setup({})
     await adapter.inject_mod(mod_lua)
     # ARM THE PUPPET AT ATTACH (live-learned glm-g1): a turn whose

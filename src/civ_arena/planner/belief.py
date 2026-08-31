@@ -69,12 +69,17 @@ OWN_UNIT_FIELDS = frozenset({
     "max_movement", "strength", "ranged_strength", "fortified",
 })
 
-# Keys an own-city projection must carry (the full sim city doc + coord).
+# Keys an own-city projection must carry. Sim-INTERNAL keys the live
+# translator legitimately omits are not required — they are filled with
+# declared sim defaults at intake (the belief layer's job is normalizing
+# projections into sim-shaped belief; M17a's first sim-to-real seam).
 OWN_CITY_REQUIRED = frozenset({
     "city_id", "owner", "name", "coord", "q", "r", "population", "hp",
     "food_bucket", "production_bucket", "production_queue", "buildings",
-    "border_radius",
 })
+OWN_CITY_DEFAULTS: dict[str, Any] = {
+    "border_radius": 2,  # the sim's founded-city territory radius
+}
 
 
 def _hp_from_bucket(bucket: int) -> int:
@@ -123,8 +128,12 @@ class PlannerBelief:
             "player_id": you["player_id"],
             "civ_name": you["civ_name"],
             "gold": you["gold"],
-            "researched": list(you["researched"]),
-            "researching": you["researching"],
+            # live-wire normalization (M17a): the engine over the wire
+            # spells "no research" as null — the sim contract is "" — and
+            # an absent list as null; normalize at intake or every
+            # ""-comparing consumer silently skips forever
+            "researched": list(you["researched"] or []),
+            "researching": you["researching"] or "",
         }
         for p in doc.get("public", {}).get("players", []):
             self.public_players[p["player_id"]] = {
@@ -165,7 +174,10 @@ class PlannerBelief:
                     raise ValueError(
                         f"own city {c.get('city_id')} missing projection "
                         f"fields {sorted(missing)} — refusing")
-                own[c["city_id"]] = dict(c)
+                entry = dict(c)
+                for key, default in OWN_CITY_DEFAULTS.items():
+                    entry.setdefault(key, default)
+                own[c["city_id"]] = entry
                 continue
             extra = set(c) - FOREIGN_CITY_FIELDS
             if extra:
