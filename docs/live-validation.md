@@ -433,3 +433,37 @@ Tourney status: configs live (glm-5.3 / MiniMax-M3 / Qwen3.8-27B local);
 the first LLM game follows the turtler validation. The wedge must resolve
 first (or a fresh game is created for it — seven driven turtler turns
 already validate the milestone's core).
+
+### 2026-08-31 — M17: planner readied for the live leg; the launch ladder
+
+**M17a+b (committed 06e4d28)**: the CivGraph planner rehearsed
+end-to-end through the LIVE dispatch surface over the fake wire —
+3 turns clean, 0 violations, 0 rejections, journal landed. Three
+sim-to-real seams found by the rehearsal itself (border_radius
+defaults, researching null-vs-empty normalization, and the
+wire-vocabulary filter that substitutes the engine's offered ids).
+`scripts/screen_triage.py`: deterministic pixel-stats classification
+(full PNG adaptive-filter decoder) + frame-diff freeze watch.
+
+**M17c launch ladder (live-learned, this session)**:
+- URI launch through the RESIDENT client WORKS mechanically:
+  `HOME=/home/alexk DISPLAY=:1 /usr/games/steam
+  steam://rungameid/289070` had the day-old -silent client create
+  the Civ6 process tree at 14:13 (scout-on-soldier runtime).
+- The game stalled pre-window in the Steam IPC handshake: zero CPU,
+  no X socket, polling the client forever. The client had lost its
+  CM login (black 1706x932 window; no CM connections).
+- RETRY LESSON: relaunching while the first stalled game lives
+  bounces with AppError_16 — kill the Civ6 tree before retrying.
+- Graceful `steam -shutdown` (login-preserving, vs a kill) +
+  in-session relaunch of the exact session command works: client
+  back with connections in 10 s.
+- CURRENT BLOCK (operator gate): no saved credentials survive —
+  the login must be entered once in the Steam UI on :1. After
+  login: URI launch → :4318 up → smoke (`scripts/firetuner_smoke.py
+  --live`) → a game loaded to a map → planner dispatch with
+  configs/live-planner-001.yaml.
+- Tooling lesson: the agent harness's image PREVIEWS are unreliable
+  (cache-collided renders of a Steam UI never in the bytes); the
+  4B VL lane was RIGHT about every real capture. Ground-truth
+  pixels with local decoders (screen_triage / ffmpeg signalstats).
