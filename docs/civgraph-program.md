@@ -344,3 +344,48 @@ which at depth 2 degenerates to MCTS, i.e. this finding); a
 discriminative opponent (direct planner-vs-planner self-play arm — the
 turtler saturates); per-decision merge-dispersion instrumentation; and
 budgets ≥ 128. The LLM-proposer lane (M16) proceeds on the substrate.
+
+### 2026-08-31 — M16 BUILT: proposer, uncertainty, journal, mining (heads c3674db → 2016f7e)
+
+All four sub-milestones landed, each with a closed Codex round:
+
+- **M16a — resume without amnesia** (`c3674db` + fixes `456a27c`): the
+  `PlannerJournal` side artifact carries END-of-turn belief snapshots
+  (turn-start observations were unsound — the executor's mid-turn
+  reconciliations resurrected killed targets on resume); validation is
+  eager at construction (corrupt journals refuse before the resumed
+  Arena can truncate the authoritative log); restore is rewind-aware.
+  With no live proposer, a resumed match is BIT-IDENTICAL to its
+  uninterrupted twin (teeth proven red-without-restore at 40 turns —
+  shorter horizons were vacuous because mid-game plans read no fog
+  memory).
+- **M16b — the LLM proposer** (`7c22565` + fixes `2016f7e`): untrusted
+  JSON ranking compiled to a LEGAL, fail-soft prior (legality-
+  narrowing: the model can only permute the initiation-true candidate
+  set). Consumer = first-visit ordering under untried-first (budget <
+  candidates ⇒ the proposal literally chooses what gets explored; ties
+  among evaluated candidates resolve canonically). `proposer:` LLMSpec
+  on policy `planner` only; spend capped runtime-side and JOURNALED;
+  malformed replies degrade. DECLARED LIMIT: a live proposer is
+  replay-safe but not resume-identical (the model is re-asked at
+  genuinely-new decisions only).
+- **M16c — typed uncertainty with real consumers** (`6ad3d8f` + fixes
+  `2016f7e`): `staleness_confidence` (int 0..10000) stamped on
+  determinized foreign units; the no-expiry store invariant HOLDS (the
+  ghost materializes; only confidence decays). Consumers: rush unit
+  targets and defend threats gate at 5000/4000; setup-prior units
+  decay like turn-1 sightings (ignorance never out-confidence
+  observation); rollouts age confidences 2500/turn so search values
+  only continuations the runtime can execute; rush termination is
+  symmetric (units-only, confidence-gated).
+- **M16d — option mining** (`ecf5b4f`): `scripts/option_mining.py`
+  over the Experiment-3 corpus (240 matches): rush last-active mean
+  diff +556 (n=139) — the strongest closer; tech_race the dominant
+  default (1646 held spans); defend wins 7 of 3315 candidacies (dead
+  weight vs the turtler). Promote/demote compiler tuning is the
+  follow-on, evidence now on disk.
+
+Gates across the day: 426 → 431 → 436 → 439 → 444 passed (+1 skip),
+the same 2 pre-existing out-of-lane failures throughout. Codex rounds
+found real defects every time (2+1, 3+1+2) — the standing pattern
+since M15a.
