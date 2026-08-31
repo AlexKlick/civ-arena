@@ -10,6 +10,16 @@ the Experiment-3 harness varies them programmatically). The per-decision
 search trace accumulates on ``self.trace`` as canonical-ready docs
 (integers only); the experiment harness persists it as the
 ``runs/<id>/planner/`` side artifact — the arena log never carries it.
+
+DECLARED LIMITATION — amnesia on resume: checkpoints persist only the
+runtime rng (the coordinator contract), so a resumed planner starts with
+an empty belief, ``active=None``, and an empty trace. Fog memory
+(last-seen foreign entities, remembered-tile ownership) rebuilds only
+from post-resume observations, and the resumed trajectory may legally
+diverge from the uninterrupted one — the same class as the LLM runtime,
+whose conversation is also not restored. A from-log belief rebuild
+(the ``observed``-digest pattern) is M16 work; model-free replay is
+unaffected (replay never runs the planner).
 """
 
 from __future__ import annotations

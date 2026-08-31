@@ -108,6 +108,10 @@ class PlannerBelief:
         # tile key -> {"terrain": str} plus, when currently seen,
         # {"owner": int, "city": str}
         self.tiles: dict[str, dict[str, Any]] = {}
+        # the CURRENT observation's live sets (rebuilt per observe call):
+        # used to suppress last-seen entries a live observation contradicts
+        self.current_observable: set[str] = set()
+        self.current_foreign_ids: set[str] = set()
 
     # -- observation intake (the ONLY inputs this layer accepts) ----------
 
@@ -146,6 +150,8 @@ class PlannerBelief:
             self.foreign_units[u["unit_id"]] = {**u, "last_seen_turn": turn}
         # a units observation is complete for own units: replace wholesale
         self.own_units = own
+        self.current_foreign_ids = {
+            u["unit_id"] for u in docs if u["owner_id"] != self.player_id}
 
     def observe_cities(self, docs: list[dict[str, Any]], turn: int) -> None:
         self.turn = max(self.turn, turn)
@@ -171,6 +177,9 @@ class PlannerBelief:
 
     def observe_map(self, doc: dict[str, Any]) -> None:
         self.turn = max(self.turn, int(doc.get("turn") or 0))
+        self.current_observable = {
+            key for key, tile in doc.get("tiles", {}).items()
+            if "owner_id" in tile}
         for key, tile in doc.get("tiles", {}).items():
             entry: dict[str, Any] = {"terrain": tile["terrain"]}
             if "owner_id" in tile:  # currently observed: live ownership known
@@ -215,6 +224,15 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         }
     for uid in sorted(belief.foreign_units, key=lambda u: int(u[1:])):
         u = belief.foreign_units[uid]
+        # A live observation CONTRADICTS this entry: its recorded tile is
+        # currently observable but the unit was not in the current units
+        # observation — it died or moved; materializing it there would
+        # offer phantom attack targets and false blockers. The entry stays
+        # in the store (no-expiry: it may reappear elsewhere), it just
+        # does not reconstruct while contradicted.
+        if (u["coord"] in belief.current_observable
+                and uid not in belief.current_foreign_ids):
+            continue
         q, r = parse_key(u["coord"])
         spec = UNIT_TYPES[u["type"]]
         units[uid] = {

@@ -253,14 +253,27 @@ def _tech_step(state: SimState, pid: int) -> Plan:
     return plan
 
 
+def _building_buy(state: SimState, plan: Plan, by_tool: dict, item: str) -> Plan:
+    """A purchase of ``item`` whose city is NOT already producing it (queued
+    or planned this turn) — the engine appends duplicates on completion, so
+    buy-what-you-queued would double the building and its gold yield."""
+    producing = {a["city_id"] for t, a in plan
+                 if t == "set_city_production" and a["item_id"] == item}
+    for t, a in by_tool.get("purchase", []):
+        if a["item_id"] != item or a["city_id"] in producing:
+            continue
+        city = state.city(a["city_id"])
+        if city is not None and item in city["production_queue"]:
+            continue
+        return [(t, a)]
+    return []
+
+
 def _economy_step(state: SimState, pid: int) -> Plan:
     by_tool = _by_tool(state, pid)
     plan = _production_step(state, pid, by_tool, ("GRANARY", "MONUMENT"))
-    gold = state.player(pid)["gold"]
-    buys = [(t, a) for t, a in by_tool.get("purchase", [])
-            if a["item_id"] == "MONUMENT"]
-    if gold >= 200 and buys:
-        plan.append(buys[0])
+    if state.player(pid)["gold"] >= 200:
+        plan += _building_buy(state, plan, by_tool, "MONUMENT")
     plan += _research_step(state, pid, by_tool)
     plan += _fortify_step(state, pid, by_tool, set())
     return plan
@@ -295,7 +308,10 @@ OPTIONS: dict[str, Option] = {o.option_id: o for o in (
            _defend_step),
     Option("rush",
            lambda s, p: len(_military(s, p)) >= 2 and bool(_foreign_coords(s, p)),
-           lambda s, p: not _foreign_coords(s, p),
+           # units only: the sim has no city capture, so a known foreign
+           # CITY would make a coords-based termination unreachable forever
+           lambda s, p: not any(u["owner"] != p for u in s.units.values())
+           or not _military(s, p),
            _rush_step),
     Option("scout_frontier",
            lambda s, p: bool(_own_units(s, p, ("SCOUT",)))

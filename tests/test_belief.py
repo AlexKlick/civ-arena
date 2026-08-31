@@ -238,6 +238,33 @@ def test_belief_state_rolls_out_with_m15a_machinery() -> None:
     state_hash(rolled.to_doc())  # still canonical after the rollout
 
 
+def test_contradicted_last_seen_units_do_not_reconstruct() -> None:
+    """A foreign entry whose recorded tile is CURRENTLY observable but
+    absent from the current observation is suppressed from reconstruction
+    (it died or moved — materializing it would offer phantom attack
+    targets); the store keeps it (no-expiry) and it reconstructs again
+    once its tile falls back out of sight."""
+    state = SimState.from_doc(duel_start(21))
+    own = next(u for u in state.units.values() if u["owner"] == 0)
+    _, enemy = state.spawn_unit(1, "WARRIOR", own["q"] + 1, own["r"])
+    belief = PlannerBelief(0)
+    feed(belief, state)
+    assert enemy["unit_id"] in build_state_doc(belief, seed=5)["units"]
+
+    state.remove_unit(enemy["unit_id"])  # dies out of our turn
+    feed(belief, state)                  # tile still observable, unit absent
+    doc = build_state_doc(belief, seed=5)
+    assert enemy["unit_id"] not in doc["units"]        # contradicted: hidden
+    assert enemy["unit_id"] in belief.foreign_units    # but never expired
+
+    for u in list(state.units.values()):               # walk away: fog returns
+        if u["owner"] == 0:
+            u["q"], u["r"] = -5, 1
+    feed(belief, state)
+    doc = build_state_doc(belief, seed=5)
+    assert enemy["unit_id"] in doc["units"]            # uncontradicted again
+
+
 def test_belief_accumulates_and_wholesale_replaces_own() -> None:
     state = SimState.from_doc(duel_start(21))
     belief = PlannerBelief(0)
