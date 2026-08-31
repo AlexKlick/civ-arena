@@ -162,13 +162,16 @@ async def main(opts) -> int:
                           COLD_BOOT_S if opts.kill_first else WARM_BOOT_S,
                           "menu"):
         return 2
+    # the tuner refuses rapid reconnects: this poll's own connection must
+    # be long closed before live_newgame's subprocess dials in
+    await asyncio.sleep(8)
     # configure-then-host (order proven live): values stick through hosting
     cfg = run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
                "config"])
     print("[config]", cfg.stdout.strip() or cfg.stderr.strip())
     if cfg.returncode != 0:
         return 3
-    if not all(f"{k}|" in cfg.stdout for k in
+    if not all(k in cfg.stdout for k in
                ("MapSize|388991850", "MinMajor|2", "Participating|2")):
         print("[config] read-back mismatch — refusing to host")
         return 3

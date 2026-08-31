@@ -184,6 +184,10 @@ class PlannerRuntime:
         belief.foreign_cities = copy.deepcopy(last["belief"]["foreign_cities"])
         belief.tiles = copy.deepcopy(last["belief"]["tiles"])
         belief.turn = last["belief"]["turn"]
+        # the sim-frame origin rides the journal (a JSON round-trip makes
+        # it a list); None stays None — a pre-origin snapshot re-derives
+        origin = last["belief"].get("origin")
+        belief.origin = (int(origin[0]), int(origin[1])) if origin else None
         belief.current_observable = set()
         belief.current_foreign_ids = set()
         self.belief = belief
@@ -244,6 +248,7 @@ class PlannerRuntime:
                     "foreign_units": b.foreign_units,
                     "foreign_cities": b.foreign_cities,
                     "tiles": b.tiles, "turn": b.turn,
+                    "origin": b.origin,
                 },
                 "active": self.active, "chosen_at_turn": self.chosen_at_turn,
                 "proposer_posts": self.proposer_posts,

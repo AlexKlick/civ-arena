@@ -118,6 +118,33 @@ class PlannerBelief:
         # used to suppress last-seen entries a live observation contradicts
         self.current_observable: set[str] = set()
         self.current_foreign_ids: set[str] = set()
+        # M17c sim-frame origin (STICKY once set): the engine's axial frame
+        # is arbitrary (a duel map puts the start at (10,4)-ish); the sim
+        # world is a MAP_RADIUS hex around (0,0). The belief's world is
+        # RE-CENTERED on the player's first known own position, and the
+        # executor translates move destinations back at the wire boundary.
+        self.origin: tuple[int, int] | None = None
+
+    def ensure_origin(self) -> tuple[int, int]:
+        """The sticky sim-frame origin. The sim world is a MAP_RADIUS hex
+        around (0,0); the engine's axial frame is arbitrary (a duel map
+        puts the start around (10,4)). The origin is the lowest-id own
+        city center (else lowest-id own unit) WHEN that anchor lies
+        outside the sim map — a frame already inside the map (the sim's
+        own) keeps (0,0) so sim behavior is unchanged. Sticky: once set,
+        a mid-match founding cannot shift the world under a live plan."""
+        if self.origin is None:
+            anchor = (0, 0)
+            if self.own_cities:
+                cid = min(self.own_cities, key=lambda c: int(c[1:]))
+                anchor = parse_key(self.own_cities[cid]["coord"])
+            elif self.own_units:
+                uid = min(self.own_units, key=lambda u: int(u[1:]))
+                anchor = parse_key(self.own_units[uid]["coord"])
+            q, r = anchor
+            dist = (abs(q) + abs(r) + abs(q + r)) // 2
+            self.origin = anchor if dist > MAP_RADIUS else (0, 0)
+        return self.origin
 
     # -- observation intake (the ONLY inputs this layer accepts) ----------
 
@@ -213,11 +240,19 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
     """
     rng = random.Random(seed)
     pid = belief.player_id
+    oq, orr = belief.ensure_origin()
+
+    def _sim(coord: str) -> tuple[int, int]:
+        q, r = parse_key(coord)
+        return q - oq, r - orr
 
     tiles: dict[str, dict[str, Any]] = {}
     for q, r in map_tiles(MAP_RADIUS):
         key = tile_key(q, r)
-        known = belief.tiles.get(key)
+        # engine-frame key for this sim tile (known tiles are stored in
+        # the engine frame — the observation's own coordinates)
+        ekey = tile_key(q + oq, r + orr)
+        known = belief.tiles.get(ekey)
         terrain = known["terrain"] if known else _weighted_terrain(rng)
         tiles[key] = {
             "q": q, "r": r, "terrain": terrain,
@@ -228,7 +263,7 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
     units: dict[str, dict[str, Any]] = {}
     for uid in sorted(belief.own_units, key=lambda u: int(u[1:])):
         u = belief.own_units[uid]
-        q, r = parse_key(u["coord"])
+        q, r = _sim(u["coord"])
         units[uid] = {
             "unit_id": uid, "owner": pid, "type": u["type"], "q": q, "r": r,
             "movement": u["movement"], "max_movement": u["max_movement"],
@@ -246,7 +281,7 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         if (u["coord"] in belief.current_observable
                 and uid not in belief.current_foreign_ids):
             continue
-        q, r = parse_key(u["coord"])
+        q, r = _sim(u["coord"])
         spec = UNIT_TYPES[u["type"]]
         units[uid] = {
             "unit_id": uid, "owner": u["owner_id"], "type": u["type"],
@@ -263,12 +298,12 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
     cities: dict[str, dict[str, Any]] = {}
     for cid in sorted(belief.own_cities, key=lambda c: int(c[1:])):
         c = dict(belief.own_cities[cid])
-        q, r = parse_key(c.pop("coord"))
+        q, r = _sim(c.pop("coord"))
         c["q"], c["r"] = q, r
         cities[cid] = c
     for cid in sorted(belief.foreign_cities, key=lambda c: int(c[1:])):
         c = belief.foreign_cities[cid]
-        q, r = parse_key(c["coord"])
+        q, r = _sim(c["coord"])
         cities[cid] = {
             "city_id": cid, "owner": c["owner_id"], "name": c["name"],
             "q": q, "r": r, "population": c["population"], "hp": c["hp"],
@@ -343,7 +378,11 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
                  if t["city"] and t["city"][1:].isdigit()]
     max_cid = max([int(c[1:]) for c in cities] + tile_cids + [0])
     revealed = {p: [] for p in sorted(players)}
-    revealed[str(pid)] = sorted(belief.tiles)
+    # the sim's revealed set is in SIM frame like everything else the
+    # determinizer emits
+    revealed[str(pid)] = sorted(
+        tile_key(q - oq, r - orr)
+        for q, r in (parse_key(k) for k in belief.tiles))
 
     return {
         "turn": belief.turn,

@@ -276,3 +276,52 @@ def test_belief_accumulates_and_wholesale_replaces_own() -> None:
     feed(belief, state)
     assert len(belief.own_units) == n_before - 1
     assert dead["unit_id"] not in belief.own_units
+
+
+def test_engine_frame_recenters_into_the_sim_map() -> None:
+    """M17c frame seam: the engine's axial coords are arbitrary (a duel
+    start sits around (10,4) — hex distance 10 from the origin, far
+    outside the radius-5 sim map). The belief RE-CENTERS its world on the
+    first own anchor: own entities land inside the map, known terrain
+    follows them, and the sim frame stays the planner's internal
+    language. A frame already inside the map (the sim's own) keeps
+    (0,0) — every M15/M16 pin is untouched."""
+    state = SimState.from_doc(duel_start(21))
+    belief = PlannerBelief(0)
+    feed(belief, state)
+    assert belief.ensure_origin() == (0, 0)  # the sim frame needs no shift
+    before = build_state_doc(belief, seed=5)
+
+    # translate the whole world into an engine-like frame
+    OQ, OR = 34, -12
+    shifted = SimState.from_doc(state.to_doc())
+    for u in shifted.units.values():
+        u["q"], u["r"] = u["q"] + OQ, u["r"] + OR
+    for c in shifted.cities.values():
+        c["q"], c["r"] = c["q"] + OQ, c["r"] + OR
+    eb = PlannerBelief(0)
+    feed(eb, shifted)
+    anchor = eb.ensure_origin()
+    assert anchor != (0, 0)
+    if shifted.cities:
+        first = min(shifted.cities.values(), key=lambda c: int(c["city_id"][1:]))
+    else:
+        first = min(shifted.units.values(), key=lambda u: int(u["unit_id"][1:]))
+    assert anchor == (first["q"], first["r"])  # the shifted anchor itself
+    after = build_state_doc(eb, seed=5)
+    # the own roster is unchanged by the translation; every own unit and
+    # city now stands on a sim-map tile
+    assert set(after["units"]) == set(before["units"])
+    for u in after["units"].values():
+        assert f"{u['q']},{u['r']}" in after["tiles"]
+    for c in after["cities"].values():
+        assert f"{c['q']},{c['r']}" in after["tiles"]
+    # known terrain followed the shift: a tile the projection showed has
+    # the same terrain in both frames (compare by offset)
+    for key in list(before["tiles"])[:10]:
+        q, r = (int(x) for x in key.split(","))
+        sim_key = f"{q},{r}"
+        eng_key = f"{q + OQ},{r + OR}"
+        if eng_key in eb.tiles and sim_key in after["tiles"]:
+            assert (before["tiles"][sim_key]["terrain"]
+                    == after["tiles"][sim_key]["terrain"])

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from civ_arena.game.sim.rules import apply_action, check_action
-from civ_arena.game.sim.state import SimState
+from civ_arena.game.sim.state import SimState, parse_key, tile_key
 from civ_arena.planner.action_dag import build_dag, canonical_order
 from civ_arena.planner.belief import PlannerBelief, build_state_doc
 
@@ -94,7 +94,16 @@ async def execute_plan(
             report.skipped.append((tool, args, f"belief prevalidation: {reason.value}"))
             _cascade(idx)
             continue
-        result = await getattr(facade, tool)(**args)
+        # M17c frame seam: the plan is in the belief's SIM frame; the
+        # wire speaks the engine's. Move destinations are the only
+        # coordinate-carrying args (attacks target ids, founding is
+        # unit-relative) — translate them back through the sticky origin.
+        wire_args = dict(args)
+        if tool == "move_unit" and belief.origin is not None:
+            q, r = parse_key(args["dest"])
+            wire_args["dest"] = tile_key(q + belief.origin[0],
+                                         r + belief.origin[1])
+        result = await getattr(facade, tool)(**wire_args)
         if result.get("status") == "accepted":
             report.executed.append((tool, args))
             if tool in DETERMINISTIC_TOOLS:
