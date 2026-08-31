@@ -76,6 +76,10 @@ class FakeFacade:
             "visible_map", self._pid, obs, rem)
 
     def __getattr__(self, tool: str):
+        if tool == "end_turn":
+            async def end_turn():
+                return {"status": "accepted", "turn": self._state.turn}
+            return end_turn
         if tool not in ACTION_TOOLS:
             raise AttributeError(tool)
 

@@ -125,7 +125,7 @@ class MatchSpec:
         raise ConfigError(f"no agent for player {player_id}")
 
 
-VALID_POLICIES = frozenset({"expansionist", "turtler", "llm"})
+VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner"})
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
 

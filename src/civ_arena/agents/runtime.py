@@ -55,6 +55,10 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
         return ScriptedRuntime(profile=profile)
     if profile.policy == "turtler":
         return ScriptedRuntime(profile=profile)
+    if profile.policy == "planner":
+        from civ_arena.planner.runtime import PlannerRuntime
+
+        return PlannerRuntime(profile.player_id, profile.seed)
     raise ValueError(f"unknown policy: {profile.policy}")
 
 
