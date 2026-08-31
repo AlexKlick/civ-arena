@@ -20,6 +20,12 @@ Turn-keyed idempotency: ``append(turn, ...)`` first drops every entry
 with ``turn >= turn`` — a crashed-and-resumed run that re-executes a
 turn overwrites that turn's entry instead of duplicating it, and
 ``replay_upto(turn)`` returns only entries with a strictly earlier turn.
+
+Entries carry the END-OF-TURN belief snapshot, not the turn's raw
+observations: mid-turn reconciliations (a killed foreign target retired
+by the executor) mutate the belief AFTER the turn's observations, and
+replaying observations alone would resurrect the phantom (Codex M16a
+P1-1). The snapshot is exact state, so rebuild is exact by construction.
 """
 
 from __future__ import annotations
@@ -36,6 +42,12 @@ class PlannerJournal:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # EAGER validation (Codex M16a P1-2): a corrupt journal must refuse
+        # at CONSTRUCTION — the Arena is built before run() truncates the
+        # event log to the checkpoint, and a mid-file corruption discovered
+        # only at restore time would have already destroyed the
+        # authoritative tail. Fail closed before any mutation can happen.
+        self._load()
 
     def _load(self) -> tuple[list[dict[str, Any]], bool]:
         """EventLog semantics: torn tail tolerated, mid-file corruption

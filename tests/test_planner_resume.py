@@ -19,8 +19,13 @@ from civ_arena.agents.runtime import AgentProfile, build_runtime
 from civ_arena.arena.checkpoints import CheckpointState
 from civ_arena.arena.coordinator import Arena
 from civ_arena.config import AgentSpec, MatchSpec
+from civ_arena.game.sim.layouts import duel_start
+from civ_arena.game.sim.state import SimState
+from civ_arena.planner.belief import PlannerBelief
+from civ_arena.planner.executor import execute_plan
 from civ_arena.planner.journal import PlannerJournal
 from civ_arena.planner.runtime import PlannerRuntime
+from test_action_dag import FakeFacade, feed_via
 
 
 def spec_for(match_id: str, max_turns: int = 8) -> MatchSpec:
@@ -112,6 +117,104 @@ async def test_belief_rebuild_equals_live(tmp_path):
     assert _belief_snapshot(fresh) == snapshots[4], (
         "journal-rebuilt belief differs from the live runtime's state at "
         "the checkpoint turn")
+
+
+async def test_killed_target_stays_retired_across_resume(tmp_path):
+    """P1-1 regression: the executor's mid-turn reconciliation (a killed
+    foreign target retired from the belief) must survive resume — the
+    journal carries END-of-turn belief snapshots, not turn-start
+    observations, so the phantom cannot resurrect."""
+    state, enemy = _duel_with_adjacent_enemy()
+    enemy["hp"] = 10  # one strike kills: the reconciliation must retire it
+    facade = FakeFacade(state, 0)
+    belief = PlannerBelief(0)
+    await feed_via(facade, belief)
+    warriors = sorted((u for u in state.units.values()
+                       if u["owner"] == 0 and u["strength"] > 0),
+                      key=lambda u: int(u["unit_id"][1:]))
+    plan = [("attack", {"unit_id": warriors[0]["unit_id"],
+                        "target_id": enemy["unit_id"]})]
+    report = await execute_plan(facade, belief, 0, plan, seed=3)
+    assert report.executed and enemy["unit_id"] not in belief.foreign_units
+    snapshot = _belief_snapshot_of(belief)
+
+    j = PlannerJournal(tmp_path / "j" / "p0-journal.jsonl")
+    j.append(3, {"turn": 3, "belief": _journal_belief_of(belief),
+                 "active": "rush", "chosen_at_turn": 3})
+    fresh_rt = PlannerRuntime(0, 7)
+    fresh_rt.journal = j
+    fresh_rt._restore_from_journal(4)
+    assert fresh_rt.belief.foreign_units == {} or (
+        enemy["unit_id"] not in fresh_rt.belief.foreign_units)
+    assert _belief_snapshot_of(fresh_rt.belief)["foreign_units"] \
+        == snapshot["foreign_units"]
+
+
+def _duel_with_adjacent_enemy() -> tuple[SimState, dict]:
+    state = SimState.from_doc(duel_start(21))
+    own = next(u for u in state.units.values()
+               if u["owner"] == 0 and u["strength"] > 0)
+    _, enemy = state.spawn_unit(1, "WARRIOR", own["q"] + 1, own["r"])
+    return state, enemy
+
+
+def _belief_snapshot_of(belief) -> dict[str, Any]:
+    return {
+        "own_player": copy.deepcopy(belief.own_player),
+        "public_players": copy.deepcopy(belief.public_players),
+        "own_units": copy.deepcopy(belief.own_units),
+        "own_cities": copy.deepcopy(belief.own_cities),
+        "foreign_units": copy.deepcopy(belief.foreign_units),
+        "foreign_cities": copy.deepcopy(belief.foreign_cities),
+        "tiles": copy.deepcopy(belief.tiles),
+        "turn": belief.turn,
+    }
+
+
+def _journal_belief_of(belief) -> dict[str, Any]:
+    return _belief_snapshot_of(belief)
+
+
+def test_corrupt_journal_refuses_at_construction_before_log_truncation(
+        tmp_path):
+    """P1-2 regression: a mid-file-corrupt journal must refuse when the
+    PlannerJournal is constructed — BEFORE the resumed Arena can truncate
+    the authoritative event log to the checkpoint."""
+    j = PlannerJournal(tmp_path / "j" / "p0-journal.jsonl")
+    j.append(1, {"turn": 1, "belief": {}, "active": None, "chosen_at_turn": 0})
+    j.append(2, {"turn": 2, "belief": {}, "active": None, "chosen_at_turn": 0})
+    path = tmp_path / "j" / "p0-journal.jsonl"
+    lines = path.read_text().splitlines(keepends=True)
+    lines.insert(1, "corrupt-line\n")
+    path.write_text("".join(lines))
+    try:
+        PlannerJournal(path)
+        raise AssertionError("corrupt journal accepted at construction")
+    except ValueError:
+        pass
+
+
+async def test_reused_runtime_rewinds_to_earlier_checkpoint(tmp_path):
+    """P2 regression: a runtime that already processed to turn 8, reused
+    in an Arena resuming checkpoint 4, must RESTORE (not skip) — its
+    turn-8 state cannot survive into the rewind."""
+    spec = spec_for("planner-journal-rewind", max_turns=8)
+    bot = PlannerRuntime(0, 7, budget=4)
+    turtler = build_runtime(AgentProfile(agent_id="turtler", player_id=1,
+                                         policy="turtler", seed=22))
+    arena = Arena(tmp_path / "run", spec, runtimes={0: bot, 1: turtler})
+    await arena.run()
+    assert bot._processed_through == 8
+    eighth = _belief_snapshot(bot)
+
+    ckpt = CheckpointState.from_doc(json.loads(
+        (tmp_path / "run" / "checkpoints" / "ckpt-turn-0004.json").read_text()))
+    # SAME runtime instance, rewound:
+    bot._restore_from_journal(5)
+    fourth = _belief_snapshot(bot)
+    assert fourth["turn"] == 4  # the end-of-turn-4 snapshot, not turn-8 state
+    assert fourth != eighth
+    _ = ckpt
 
 
 # ------------------------------------------------------------- journal unit

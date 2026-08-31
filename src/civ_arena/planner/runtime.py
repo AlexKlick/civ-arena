@@ -25,6 +25,7 @@ not gameplay state, and the harness persists it separately.
 
 from __future__ import annotations
 
+import copy
 import random
 from typing import Any
 
@@ -56,7 +57,7 @@ class PlannerRuntime:
         self.chosen_at_turn = 0
         self.trace: list[dict[str, Any]] = []
         self.journal: Any = None  # PlannerJournal, injected via bind_services
-        self._restored = False
+        self._processed_through = 0  # last turn this runtime completed
         self.proposer = proposer  # ModelClient | None (M16b, untrusted prior)
 
     async def _propose(self, bstate: SimState, turn: int) -> tuple[
@@ -92,22 +93,40 @@ class PlannerRuntime:
             self.journal = journal
 
     def _restore_from_journal(self, turn: int) -> None:
-        """First take_turn after (re)construction: replay strictly-earlier
-        journal entries through the observe_* seam, restoring fog memory
-        and the option state exactly as the pre-crash runtime held it."""
-        if self._restored or self.journal is None:
-            self._restored = True
+        """Rewind-aware restore (Codex M16a P2): restore when the runtime is
+        BLANK (fresh construction — nothing observed yet) or when the
+        incoming turn rewinds to or behind turns this instance already
+        processed (a reused runtime resuming an earlier checkpoint). A
+        runtime progressing forward through its own turns restores never.
+        The latest strictly-earlier snapshot is EXACT end-of-turn state
+        (mid-turn reconciliations included), assigned directly onto a
+        fresh belief — no observation replay, no drift."""
+        blank = not self.belief.own_player
+        if self.journal is None or (turn > self._processed_through and not blank):
             return
-        self._restored = True
         docs = self.journal.replay_upto(turn)
-        for doc in docs:
-            self.belief.observe_overview(doc["overview"])
-            self.belief.observe_units(doc["units"], doc["turn"])
-            self.belief.observe_cities(doc["cities"], doc["turn"])
-            self.belief.observe_map(doc["map"])
-        if docs:
-            self.active = docs[-1]["active"]
-            self.chosen_at_turn = docs[-1]["chosen_at_turn"]
+        if not docs:
+            return
+        last = docs[-1]
+        belief = PlannerBelief(self.player_id)
+        belief.own_player = copy.deepcopy(last["belief"]["own_player"])
+        # JSON round-trips int dict keys as strings — normalize back so a
+        # post-restore observation (int keys) never mixes with snapshot
+        # keys in the same dict
+        belief.public_players = {
+            int(k): copy.deepcopy(v)
+            for k, v in last["belief"]["public_players"].items()}
+        belief.own_units = copy.deepcopy(last["belief"]["own_units"])
+        belief.own_cities = copy.deepcopy(last["belief"]["own_cities"])
+        belief.foreign_units = copy.deepcopy(last["belief"]["foreign_units"])
+        belief.foreign_cities = copy.deepcopy(last["belief"]["foreign_cities"])
+        belief.tiles = copy.deepcopy(last["belief"]["tiles"])
+        belief.turn = last["belief"]["turn"]
+        belief.current_observable = set()
+        belief.current_foreign_ids = set()
+        self.belief = belief
+        self.active = last["active"]
+        self.chosen_at_turn = last["chosen_at_turn"]
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()
@@ -146,11 +165,21 @@ class PlannerRuntime:
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
         await execute_plan(facade, self.belief, self.player_id, plan, seed=turn)
         await facade.end_turn()
+        self._processed_through = turn
         if self.journal is not None:
             # appended only after a COMPLETED turn: a crash mid-turn leaves
-            # no entry, so the journal never claims a turn that did not end
+            # no entry. The snapshot is END-of-turn belief state — the
+            # executor's mid-turn reconciliations (retired kill targets)
+            # are part of it, so a rebuild cannot resurrect phantoms.
+            b = self.belief
             self.journal.append(turn, {
-                "turn": turn, "overview": overview, "units": units_doc,
-                "cities": cities_doc, "map": map_doc,
+                "turn": turn,
+                "belief": {
+                    "own_player": b.own_player, "public_players": b.public_players,
+                    "own_units": b.own_units, "own_cities": b.own_cities,
+                    "foreign_units": b.foreign_units,
+                    "foreign_cities": b.foreign_cities,
+                    "tiles": b.tiles, "turn": b.turn,
+                },
                 "active": self.active, "chosen_at_turn": self.chosen_at_turn,
             })
