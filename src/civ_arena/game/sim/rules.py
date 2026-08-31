@@ -101,6 +101,11 @@ def _parse_coord(value: Any) -> tuple[int, int] | None:
         q, r = parse_key(value)
     except ValueError:
         return None
+    # Canonical spellings only: "-03,+01" and " 1,2" parse to the same ints
+    # as "-3,1" and "1,2" but would give the same semantic action a distinct
+    # args_digest/dedupe key and defeat enumeration completeness.
+    if tile_key(q, r) != value:
+        return None
     return q, r
 
 
@@ -185,6 +190,10 @@ def reachable_dests(state: SimState, unit: dict[str, Any]) -> dict[str, int]:
             if nd <= budget and nd < dist.get(nkey, 1 << 30):
                 dist[nkey] = nd
                 heapq.heappush(heap, (nd, nq, nr))
+    # An enemy co-located on the start tile (it entered before this unit was
+    # purchased there) makes the zero-cost self-move OCCUPIED per check_action.
+    if state.enemy_units_at(*start, owner):
+        del dist[tile_key(*start)]
     return dist
 
 

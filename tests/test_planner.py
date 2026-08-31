@@ -55,6 +55,9 @@ def playout(seed: int, turns: int) -> SimState:
                 preferred = [a for a in acts if a[0] in PREFER]
                 pool = preferred if preferred and rng.random() < 0.5 else acts
                 tool, args = pool[rng.randrange(len(pool))]
+                # soundness at EVERY step, not just at the endpoint state
+                assert check_action(state, pid, tool, args) is None, (
+                    f"enumerated illegal mid-playout: {tool} {args}")
                 apply_action(state, pid, tool, args)
         state.turn += 1
     return state
@@ -167,17 +170,97 @@ def sample_candidates(rng: random.Random, state: SimState, n: int):
 
 def test_legal_actions_complete_against_sampler() -> None:
     rng = random.Random(1234)
-    hits = 0
+    hits: dict[str, int] = {}
     for seed, turns in ((5, 2), (13, 8), (29, 14)):
         state = playout(seed, turns)
         for pid in (0, 1):
             enumerated = {as_key(t, a) for t, a in legal_actions(state, pid)}
             for tool, args in sample_candidates(rng, state, 600):
                 if check_action(state, pid, tool, args) is None:
-                    hits += 1
+                    hits[tool] = hits.get(tool, 0) + 1
                     assert as_key(tool, args) in enumerated, (
                         f"seed={seed} pid={pid} legal-but-missing {tool} {args}")
-    assert hits > 50  # the sampler must actually exercise the property
+    # Per-family floors where the sampler has statistical power; attack and
+    # found_city are pinned by the dedicated fixtures below instead.
+    assert hits.get("move_unit", 0) >= 10, hits
+    assert hits.get("fortify", 0) >= 50, hits
+    assert hits.get("set_research", 0) >= 50, hits
+    assert hits.get("set_city_production", 0) >= 50, hits
+    assert hits.get("purchase", 0) >= 5, hits
+
+
+# --------------------------------------------------------------------------
+# edge fixtures: enemy-co-located start tile, attack families, coord spelling
+
+
+def test_self_move_excluded_when_enemy_colocated() -> None:
+    """P1 regression: an enemy standing ON our tile (it entered before our
+    unit was purchased there) makes the zero-cost self-move OCCUPIED —
+    the enumerator must not emit it."""
+    state = SimState.from_doc(duel_start(8))
+    own = next(u for u in state.units.values() if u["owner"] == 0)
+    state.spawn_unit(1, "WARRIOR", own["q"], own["r"])
+    here = f"{own['q']},{own['r']}"
+    assert check_action(state, 0, "move_unit",
+                        {"unit_id": own["unit_id"], "dest": here}) is not None
+    enumerated = {as_key(t, a) for t, a in legal_actions(state, 0)}
+    assert as_key("move_unit", {"unit_id": own["unit_id"], "dest": here}) not in enumerated
+    # and the whole enumeration stays sound in this state
+    for tool, args in legal_actions(state, 0):
+        assert check_action(state, 0, tool, args) is None, (tool, args)
+
+
+def test_attack_family_fixture_all_ranges() -> None:
+    """Melee at dist 1, ranged at dist 2, ranged at dist 0 (co-located):
+    enumeration and check_action must agree on every pair."""
+    state = SimState.from_doc(duel_start(8))
+    own_w = next(u for u in state.units.values()
+                 if u["owner"] == 0 and u["strength"] > 0)
+    q, r = own_w["q"], own_w["r"]
+    _, melee_target = state.spawn_unit(1, "WARRIOR", q + 1, r)
+    _, far_target = state.spawn_unit(1, "WARRIOR", q + 2, r)
+    _, archer = state.spawn_unit(0, "ARCHER", q, r)
+    _, colocated = state.spawn_unit(1, "SCOUT", q, r)
+
+    enumerated = {as_key(t, a) for t, a in legal_actions(state, 0)
+                  if t == "attack"}
+    expected_legal = [
+        ("attack", {"unit_id": own_w["unit_id"], "target_id": melee_target["unit_id"]}),
+        ("attack", {"unit_id": archer["unit_id"], "target_id": melee_target["unit_id"]}),
+        ("attack", {"unit_id": archer["unit_id"], "target_id": far_target["unit_id"]}),
+        ("attack", {"unit_id": archer["unit_id"], "target_id": colocated["unit_id"]}),
+    ]
+    for tool, args in expected_legal:
+        assert check_action(state, 0, tool, args) is None, args
+        assert as_key(tool, args) in enumerated, args
+    # melee at dist 2 and dist 0 are illegal and must not be enumerated
+    for bad in (
+        {"unit_id": own_w["unit_id"], "target_id": far_target["unit_id"]},
+        {"unit_id": own_w["unit_id"], "target_id": colocated["unit_id"]},
+    ):
+        assert check_action(state, 0, "attack", bad) is not None, bad
+        assert as_key("attack", bad) not in enumerated, bad
+    for tool, args in legal_actions(state, 0):
+        assert check_action(state, 0, tool, args) is None, (tool, args)
+
+
+def test_noncanonical_coord_spellings_rejected() -> None:
+    """P2 regression: '-03,+01'-style spellings parse to the same ints but
+    would give one semantic action distinct dedupe keys; only the canonical
+    spelling is accepted, so enumeration completeness holds literally."""
+    state = SimState.from_doc(duel_start(8))
+    unit = next(u for u in state.units.values()
+                if u["owner"] == 0 and u["movement"] > 0)
+    dests = reachable_dests(state, unit)
+    canonical = sorted(k for k in dests if k != f"{unit['q']},{unit['r']}")[0]
+    assert check_action(state, 0, "move_unit",
+                        {"unit_id": unit["unit_id"], "dest": canonical}) is None
+    q, r = parse_key(canonical)
+    for bad in (f"{q:+d},{r}", f"{q:03d},{r}", f"{q}, {r}", f" {q},{r}", f"{q},{r} "):
+        if bad == canonical:
+            continue
+        assert check_action(state, 0, "move_unit",
+                            {"unit_id": unit["unit_id"], "dest": bad}) is not None, bad
 
 
 # --------------------------------------------------------------------------
