@@ -6,11 +6,16 @@ belief into a complete, canonical SimState doc that ``legal_actions`` /
 ``apply_action`` / ``run_ambient`` can roll out. The planner NEVER forks
 ground truth; this reconstruction is its only world.
 
-Fairness is enforced at the input seam, not promised: foreign entries
-carrying any field beyond the projection allowlists are REFUSED loudly
-(the leak-checker pattern — a leaky caller cannot make this layer
-omniscient), and the determinized values are pure functions of allowlisted
-fields (hp from hp_bucket, movement from the type table, fortified False).
+Fairness at the input seam is SHAPE validation, honestly scoped: foreign
+entries carrying any field beyond the projection allowlists are refused
+loudly, own entries must match the own-projection field set exactly, and
+determinized values are pure functions of allowlisted fields (hp from
+hp_bucket, movement from the type table, fortified False). This defends
+against buggy or mis-scoped callers, NOT against a caller that fabricates
+perfectly-shaped docs from ground truth — the ownership discriminators
+(``owner_id``/``owner``) and the map's observable-vs-remembered shape are
+trusted as projection outputs, the same trust class as the tool facade's
+closure binding (deliberate self-deception is out of threat model).
 
 Declared priors, all deliberate and test-visible:
 - own ``science_bucket`` is not projected anywhere → prior 0 (the model
@@ -21,6 +26,13 @@ Declared priors, all deliberate and test-visible:
   ``UNIT_TECH_REQ`` with transitive prereq closure;
 - foreign last-seen entities persist with no expiry (the M11 belief
   philosophy: an unobserved death must not erase the last known position);
+- remembered tiles keep the last LIVE-OBSERVED ownership (same no-expiry
+  epistemics — set only while the tile was observable, never from a
+  terrain-only projection);
+- a rival with NO last-seen units and no known cities gets the PUBLIC
+  duel roster (2 settlers + 2 warriors + 1 scout) at its layout start —
+  game-setup knowledge, not hidden state; once anything of that rival has
+  been observed, only last-seen entities are reconstructed;
 - unknown tiles sample terrain from the map generator's weights, seeded;
 - foreign revealed sets are empty (opponent vision is not modeled).
 """
@@ -32,7 +44,7 @@ from typing import Any
 
 from civ_arena.arena.visibility import FOREIGN_CITY_FIELDS, FOREIGN_UNIT_FIELDS
 from civ_arena.canonical import rng_to_doc
-from civ_arena.game.sim.layouts import _weighted_terrain
+from civ_arena.game.sim.layouts import STARTS, _weighted_terrain
 from civ_arena.game.sim.state import (
     MAP_RADIUS,
     TECHS,
@@ -44,6 +56,24 @@ from civ_arena.game.sim.state import (
 )
 
 OWN_GOLD_PRIOR = 100  # the duel start value; used for never-observed rivals
+
+# Public game setup (layouts.duel_start): the starting roster every player
+# receives. Used as the prior force for a rival nothing has been seen of.
+START_ROSTER = ("SETTLER", "SETTLER", "WARRIOR", "WARRIOR", "SCOUT")
+
+# The exact field set the projection emits for OWN units — an own-labeled
+# entry with any other shape is refused (shape validation, see module doc).
+OWN_UNIT_FIELDS = frozenset({
+    "unit_id", "owner_id", "type", "coord", "hp", "hp_bucket", "movement",
+    "max_movement", "strength", "ranged_strength", "fortified",
+})
+
+# Keys an own-city projection must carry (the full sim city doc + coord).
+OWN_CITY_REQUIRED = frozenset({
+    "city_id", "owner", "name", "coord", "q", "r", "population", "hp",
+    "food_bucket", "production_bucket", "production_queue", "buildings",
+    "border_radius",
+})
 
 
 def _hp_from_bucket(bucket: int) -> int:
@@ -101,6 +131,10 @@ class PlannerBelief:
         own: dict[str, dict[str, Any]] = {}
         for u in docs:
             if u["owner_id"] == self.player_id:
+                if set(u) != OWN_UNIT_FIELDS:
+                    raise ValueError(
+                        f"own unit {u.get('unit_id')} does not match the "
+                        f"own-projection shape — refusing")
                 own[u["unit_id"]] = dict(u)
                 continue
             extra = set(u) - FOREIGN_UNIT_FIELDS
@@ -119,6 +153,11 @@ class PlannerBelief:
         for c in docs:
             owner = c.get("owner", c.get("owner_id"))
             if owner == self.player_id:
+                missing = OWN_CITY_REQUIRED - set(c)
+                if missing:
+                    raise ValueError(
+                        f"own city {c.get('city_id')} missing projection "
+                        f"fields {sorted(missing)} — refusing")
                 own[c["city_id"]] = dict(c)
                 continue
             extra = set(c) - FOREIGN_CITY_FIELDS
@@ -206,6 +245,32 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
     seen_types: dict[int, set[str]] = {}
     for u in belief.foreign_units.values():
         seen_types.setdefault(u["owner_id"], set()).add(u["type"])
+    seen_city_owners = {c["owner_id"] for c in belief.foreign_cities.values()}
+
+    # Prior forces: a rival NOTHING has been seen of gets the public duel
+    # roster at its layout start (game-setup knowledge, not hidden state).
+    # Ids are allocated above every id in play so nothing collides.
+    prior_uid = max(
+        [int(u[1:]) for u in units]
+        + [int(u["unit_id"][1:]) for u in belief.foreign_units.values()]
+        + [0]) + 1
+    for opid in sorted(belief.public_players):
+        if opid == pid or opid in seen_types or opid in seen_city_owners:
+            continue
+        start = STARTS.get(opid)
+        if start is None:
+            continue
+        for type_ in START_ROSTER:
+            spec = UNIT_TYPES[type_]
+            uid = f"u{prior_uid}"
+            prior_uid += 1
+            units[uid] = {
+                "unit_id": uid, "owner": opid, "type": type_,
+                "q": start[0], "r": start[1],
+                "movement": spec["mv"], "max_movement": spec["mv"],
+                "hp": 100, "strength": spec["strength"],
+                "ranged_strength": spec["ranged"], "fortified": False,
+            }
 
     players: dict[str, dict[str, Any]] = {}
     players[str(pid)] = {
@@ -233,7 +298,12 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         }
 
     max_uid = max((int(u[1:]) for u in units), default=0)
-    max_cid = max((int(c[1:]) for c in cities), default=0)
+    # City ids also live on tile tags: a border tile can be legally observed
+    # while its city center is hidden, and a colliding freshly-founded city
+    # would inherit that foreign territory in run_ambient.
+    tile_cids = [int(t["city"][1:]) for t in tiles.values()
+                 if t["city"] and t["city"][1:].isdigit()]
+    max_cid = max([int(c[1:]) for c in cities] + tile_cids + [0])
     revealed = {p: [] for p in sorted(players)}
     revealed[str(pid)] = sorted(belief.tiles)
 

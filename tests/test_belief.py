@@ -16,7 +16,7 @@ import random
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.canonical import state_hash
 from civ_arena.game.sim.engine import run_ambient
-from civ_arena.game.sim.layouts import duel_start
+from civ_arena.game.sim.layouts import STARTS, duel_start
 from civ_arena.game.sim.rules import apply_action, check_action, legal_actions
 from civ_arena.game.sim.state import UNIT_TYPES, SimState
 from civ_arena.game.sim.visibility import ground_truth
@@ -60,24 +60,37 @@ def feed(belief: PlannerBelief, state: SimState) -> None:
         "visible_map", pid, vis.observable, vis.remembered))
 
 
-def test_unobserved_foreign_entities_stay_absent() -> None:
+def test_unobserved_rival_gets_the_prior_roster_not_truth() -> None:
     state = SimState.from_doc(duel_start(21))
     belief = PlannerBelief(0)
     feed(belief, state)
     doc = build_state_doc(belief, seed=5)
-    # at the duel start the opponents are out of sight range
-    assert all(u["owner"] == 0 for u in doc["units"].values())
+    # at the duel start the rival is out of sight: its force is the PUBLIC
+    # roster prior, stacked at the layout start — game setup, not truth
+    rival = [u for u in doc["units"].values() if u["owner"] == 1]
+    assert sorted(u["type"] for u in rival) == [
+        "SCOUT", "SETTLER", "SETTLER", "WARRIOR", "WARRIOR"]
+    assert all((u["q"], u["r"]) == STARTS[1] for u in rival)
     assert doc["cities"] == {}
-    # but the rival PLAYER is public knowledge, reconstructed from priors
     assert doc["players"]["1"]["gold"] == 100
     assert doc["players"]["1"]["researched"] == []
     # own units are reconstructed exactly
     own_true = {u["unit_id"]: u for u in state.units.values() if u["owner"] == 0}
-    assert set(doc["units"]) == set(own_true)
-    for uid, u in doc["units"].items():
+    own_doc = {uid: u for uid, u in doc["units"].items() if u["owner"] == 0}
+    assert set(own_doc) == set(own_true)
+    for uid, u in own_doc.items():
         t = own_true[uid]
         assert (u["q"], u["r"], u["hp"], u["movement"]) == (
             t["q"], t["r"], t["hp"], t["movement"])
+    # the prior tracks the SEED-independent setup, never live truth: move
+    # every true rival unit and rebuild — the prior does not follow
+    for u in list(state.units.values()):
+        if u["owner"] == 1:
+            u["q"], u["r"] = 0, 5
+    feed(belief, state)
+    doc2 = build_state_doc(belief, seed=5)
+    rival2 = [u for u in doc2["units"].values() if u["owner"] == 1]
+    assert all((u["q"], u["r"]) == STARTS[1] for u in rival2)
 
 
 def test_foreign_fields_are_determinized_not_copied() -> None:
@@ -115,6 +128,66 @@ def test_overinformative_observations_are_refused() -> None:
         raise AssertionError("leaky foreign city accepted")
     except ValueError:
         pass
+
+
+def test_misshapen_own_entries_are_refused() -> None:
+    """An own-labeled entry must match the own-projection shape exactly —
+    a foreign-shaped doc relabeled as own cannot slip past the allowlist."""
+    belief = PlannerBelief(0)
+    relabeled = {"unit_id": "u9", "owner_id": 0, "type": "WARRIOR",
+                 "coord": "0,0", "hp_bucket": 2, "strength": 20,
+                 "ranged_strength": 0}
+    try:
+        belief.observe_units([relabeled], turn=3)
+        raise AssertionError("misshapen own unit accepted")
+    except ValueError:
+        pass
+    partial_city = {"city_id": "c9", "owner": 0, "coord": "0,0", "name": "X"}
+    try:
+        belief.observe_cities([partial_city], turn=3)
+        raise AssertionError("misshapen own city accepted")
+    except ValueError:
+        pass
+
+
+def _border_only_city_fixture() -> tuple[SimState, PlannerBelief]:
+    """A rival city whose BORDER tile is observable while its center is not:
+    the projection legally shows a c1-tagged tile with no c1 city record."""
+    state = SimState.from_doc(duel_start(21))
+    state.tiles["1,1"]["terrain"] = "GRASSLAND"
+    _, settler = state.spawn_unit(1, "SETTLER", 1, 1)
+    assert check_action(state, 1, "found_city",
+                        {"unit_id": settler["unit_id"]}) is None
+    apply_action(state, 1, "found_city", {"unit_id": settler["unit_id"]})
+    belief = PlannerBelief(0)
+    feed(belief, state)
+    return state, belief
+
+
+def test_city_id_on_tiles_bumps_next_city_id() -> None:
+    """P1 regression: a freshly founded rollout city must never collide
+    with a city id known only from observed border tiles — the engine
+    would attribute the rival's tagged territory to it."""
+    _, belief = _border_only_city_fixture()
+    doc = build_state_doc(belief, seed=5)
+    assert doc["tiles"]["-1,1"]["city"] == "c1"      # the observed border tile
+    assert "c1" not in doc["cities"]                 # the hidden center
+    assert doc["next_city_id"] == 2                  # no collision possible
+
+
+def test_remembered_tiles_keep_last_live_ownership() -> None:
+    """Ownership persists only from a live observation: once the border
+    tile falls out of sight its last-seen owner is kept, and a tile never
+    seen live carries none."""
+    state, belief = _border_only_city_fixture()
+    for u in list(state.units.values()):
+        if u["owner"] == 0:
+            u["q"], u["r"] = -5, 1
+    feed(belief, state)  # the border tile is now remembered, terrain-only
+    doc = build_state_doc(belief, seed=5)
+    assert doc["tiles"]["-1,1"]["owner"] == 1
+    assert doc["tiles"]["-1,1"]["city"] == "c1"
+    assert doc["next_city_id"] == 2
 
 
 def test_inferred_research_closes_over_prereqs() -> None:
