@@ -4,9 +4,19 @@ A plan is an ordered list of (tool, args) actions for ONE turn. The DAG
 types the dependencies between them, derived statically from the rules'
 resource vocabulary (the RejectionReason taxonomy):
 
-- ``MUST_PRECEDE`` — same-unit sequences (movement is consumed, attacks
-  zero it, a found_city consumes the settler): the plan author's order is
-  the dependency; and purchase→purchase (gold draws down in plan order).
+- ``depends`` edges — same-unit sequences (movement is consumed, attacks
+  zero it, a found_city consumes the settler): author order binds AND a
+  failure cascades to dependents (a unit whose earlier action failed is in
+  an unknown-enough state that its later actions are not worth referee
+  spend).
+- ``order`` edges — pairs that INTERACT but where one failing leaves the
+  other independently valid, so they keep author order without cascading:
+  purchase→purchase (gold draws down; a skipped purchase must not kill a
+  still-affordable later one), attack→attack on one target (retaliation
+  falls on the author-chosen attacker first), found_city→found_city
+  (overlapping radius-2 claims and city-id assignment are order-dependent),
+  and same-city purchase↔set_city_production (a queued item can otherwise
+  be purchased into a duplicate building).
 - ``MUTEX`` — two actions that overwrite the same single-slot decision
   (two set_research; two set_city_production on one city). A plan
   containing a MUTEX pair is refused at build time: last-write-wins
@@ -47,15 +57,18 @@ def _entity_ord(tool: str, args: dict[str, Any]) -> int:
 
 @dataclass
 class ActionDag:
-    """Nodes are plan indices; ``preceders[j]`` = indices that must run first."""
+    """Nodes are plan indices; ``preceders[j]`` = indices that must run
+    first (all edge kinds); ``hard_dependents[i]`` = indices that cascade
+    when i fails (``depends`` edges only)."""
 
     actions: list[tuple[str, dict[str, Any]]]
     preceders: dict[int, set[int]] = field(default_factory=dict)
-    dependents: dict[int, set[int]] = field(default_factory=dict)
+    hard_dependents: dict[int, set[int]] = field(default_factory=dict)
 
-    def add_edge(self, i: int, j: int) -> None:
+    def add_edge(self, i: int, j: int, kind: str) -> None:
         self.preceders.setdefault(j, set()).add(i)
-        self.dependents.setdefault(i, set()).add(j)
+        if kind == "depends":
+            self.hard_dependents.setdefault(i, set()).add(j)
 
 
 def build_dag(actions: list[tuple[str, dict[str, Any]]]) -> ActionDag:
@@ -67,10 +80,21 @@ def build_dag(actions: list[tuple[str, dict[str, Any]]]) -> ActionDag:
             tool_i, args_i = actions[i]
             unit_i, unit_j = _unit_of(tool_i, args_i), _unit_of(tool_j, args_j)
             if unit_i is not None and unit_i == unit_j:
-                dag.add_edge(i, j)  # same-unit sequence: author order binds
+                dag.add_edge(i, j, "depends")  # same-unit: author order + cascade
                 continue
             if tool_i == "purchase" and tool_j == "purchase":
-                dag.add_edge(i, j)  # gold draws down in plan order
+                dag.add_edge(i, j, "order")  # gold order; no cascade
+                continue
+            if (tool_i == "attack" and tool_j == "attack"
+                    and args_i.get("target_id") == args_j.get("target_id")):
+                dag.add_edge(i, j, "order")  # one target: author picks who leads
+                continue
+            if tool_i == "found_city" and tool_j == "found_city":
+                dag.add_edge(i, j, "order")  # overlapping claims are order-dependent
+                continue
+            if ({tool_i, tool_j} == {"purchase", "set_city_production"}
+                    and _city_of(tool_i, args_i) == _city_of(tool_j, args_j)):
+                dag.add_edge(i, j, "order")  # queue/buildings interplay per city
                 continue
             if tool_i == "set_research" and tool_j == "set_research":
                 raise ValueError(
