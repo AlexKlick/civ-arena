@@ -124,59 +124,12 @@ class FakeMod:
         }
         self.next_city_id = 2
 
-    # -- the M17c visible-map read ------------------------------------------
+    # -- the M17c targeted map read ----------------------------------------
 
     # engine-named terrains on purpose: the rehearsal must exercise the
     # parser's engine->sim terrain mapping, not confirm a copy of itself
     _FAKE_TERRAINS = ("GRASS", "GRASS_HILLS", "PLAINS", "PLAINS_HILLS",
                       "DESERT", "TUNDRA", "COAST", "OCEAN")
-
-    @staticmethod
-    def _hex_dist(q1: int, r1: int, q2: int, r2: int) -> int:
-        dq, dr = q1 - q2, r1 - r2
-        return (abs(dq) + abs(dr) + abs(dq + dr)) // 2
-
-    def _visible_map_rows(self, pid: int) -> list[str]:
-        """A small deterministic revealed set: radius-2 around own units and
-        cities is CURRENTLY visible; a radius-3 ring around own cities is
-        remembered fog (terrain-only — ownership is never read there, the
-        same no-leak shape as the real Lua)."""
-        own_tiles: set[tuple[int, int]] = set()
-        visible: set[tuple[int, int]] = set()
-        for u in self.units.values():
-            if u["owner"] != pid:
-                continue
-            q, r = _ax(u["x"], u["y"])
-            own_tiles.add((q, r))
-        for c in self.cities.values():
-            if c["owner"] != pid:
-                continue
-            q, r = _ax(c["x"], c["y"])
-            own_tiles.add((q, r))
-        city_centers = {_ax(c["x"], c["y"]): (c["owner"], cid)
-                        for cid, c in self.cities.items()}
-        revealed: set[tuple[int, int]] = set()
-        for q, r in own_tiles:
-            for dq in range(-3, 4):
-                for dr in range(-3, 4):
-                    tile = (q + dq, r + dr)
-                    if self._hex_dist(q, r, *tile) <= 2:
-                        visible.add(tile)
-                    elif self._hex_dist(q, r, *tile) <= 3:
-                        revealed.add(tile)
-        revealed |= visible
-        rows = []
-        for q, r in sorted(revealed):
-            terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
-            vis = (q, r) in visible
-            owner, city = -1, ""
-            if vis and (q, r) in city_centers:
-                cowner, cid = city_centers[(q, r)]
-                owner = cowner
-                city = f"c{cid + cowner * 65536}"
-            rows.append(f"TILEROW|{q}|{r}|{terrain}|{str(vis).lower()}"
-                        f"|{owner}|{city}")
-        return ["VMAP|2", f"TURN|{self.turn}", *rows, "---END---"]
 
     def _snapshot(self, pid: int) -> dict[str, object]:
         """The mod's snapshot_player parity: units(pos/moves/damage),
@@ -410,9 +363,27 @@ class FakeMod:
                             f"|{c['owner']}|{c['name']}|{q}|{r}"
                             f"|{c['pop']}|{c['queue'] or '-'}")
             return ["CITIES|1", *rows, "---END---"]
-        if 'print("VMAP|2")' in code:
-            pid = int(re.search(r"Players\[(\d+)\]", code).group(1))
-            return self._visible_map_rows(pid)
+        if 'print("VMAP|3")' in code:
+            # the targeted read: the adapter derived the visible set and
+            # asks for exactly those axial coords (offset-encoded in the
+            # Lua as {q, r + floor(q / 2)}). Answer only what was asked —
+            # a row for an unrequested tile would enter the belief as
+            # sight it does not have.
+            coords = re.findall(r"\{(-?\d+),(-?\d+)\}", code)
+            rows = []
+            for x_s, y_s in coords:
+                q, y = int(x_s), int(y_s)
+                r = y - (q - (q % 2)) // 2
+                terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
+                owner = -1
+                city = ""
+                for cid, c in self.cities.items():
+                    cq, cr = _ax(c["x"], c["y"])
+                    if (cq, cr) == (q, r):
+                        owner = c["owner"]
+                        city = f"c{cid + c['owner'] * 65536}"
+                rows.append(f"TILEROW|{q}|{r}|{terrain}|true|{owner}|{city}")
+            return ["VMAP|3", f"TURN|{self.turn}", *rows, "---END---"]
         if 'print("VMAP|1")' in code:
             return ["VMAP|1", f"TURN|{self.turn}", "---END---"]
         if 'print("AVRES|1")' in code:

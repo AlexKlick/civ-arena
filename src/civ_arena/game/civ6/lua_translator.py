@@ -221,59 +221,44 @@ print("---END---")
 """
 
 
-def visible_map_read(player_id: int) -> str:
-    """M17c: the revealed-tiles read (the M14d empty-set declaration,
-    retired). Emits one TILEROW per plot the player has EVER revealed;
-    ``visible`` marks currently-seen plots, and OWNER/CITY are read ONLY
-    for those — the wire doc never carries fog ownership, so the
-    projection cannot leak what the doc does not hold. Terrain comes out
-    as the ENGINE TerrainType; the response parser maps it into the sim
-    vocabulary (the sim's movement tables would KeyError on GRASS_HILLS).
+def visible_map_read(player_id: int, tiles: list[tuple[int, int]]) -> str:
+    """M17c targeted terrain read. The engine's per-player fog state is NOT
+    exposed in this build's GameCore Lua (live-probed 2026-08-31: plot
+    IsRevealed/IsVisible nil, Player:GetVisibility errors, nothing
+    enumerable on Map/Game) — so visibility is DERIVED adapter-side from
+    the player's own units/cities and this read fetches terrain for
+    exactly that derived-visible coordinate list. Leak-safe by
+    construction: no coordinate outside the player's own-entity sight is
+    ever asked about, so the wire doc cannot carry unseen terrain.
 
-    Every GameCore accessor is pcall-guarded (declared degradation: a
-    missing accessor yields terrain "?" which the parser maps to PLAINS
-    and counts, not silently drops)."""
+    Coordinates are AXIAL (q, r); the engine's offset (x, y) with the
+    odd-q stagger is the inverse of the units/cities convention
+    (q = x, r = y - floor(x/2) => x = q, y = r + floor(q/2)). Terrain is
+    the ENGINE TerrainType; the parser maps it into the sim vocabulary.
+    plot:GetOwner IS live-verified — a visible tile's true ownership is
+    read here; GetOwningCity is nil in this build, so city tagging is a
+    Python-side join against the (already-omniscient) cities read."""
+    coords = ", ".join(f"{{{q},{r + _half_floor(q)}}}" for q, r in tiles)
     return f"""
-print("VMAP|2")
+print("VMAP|3")
 print("TURN|" .. Game.GetCurrentGameTurn())
-local p = Players[{player_id}]
-local vis = nil
-pcall(function() vis = p:GetVisibility() end)
-if vis == nil then print("---END---") return end
-local count = 0
-pcall(function() count = Map.GetPlotCount() end)
-for i = 0, count - 1 do
+local coords = {{ {coords} }}
+for _, c in ipairs(coords) do
     local plot = nil
-    pcall(function() plot = Map.GetPlotByIndex(i) end)
+    pcall(function() plot = Map.GetPlot(c[1], c[2]) end)
     if plot ~= nil then
-        local revealed = false
-        local visible = false
-        pcall(function() revealed = vis:IsRevealed(i) end)
-        if revealed then
-            pcall(function() visible = vis:IsVisible(i) end)
-            local terrain = "?"
-            pcall(function()
-                local t = GameInfo.Terrains[plot:GetTerrainType()]
-                if t ~= nil then terrain = t.TerrainType end
-            end)
-            terrain = string.gsub(terrain, "|", "-")
-            terrain = string.gsub(terrain, "%c", " ")
-            local x = 0 local y = 0
-            pcall(function() x = plot:GetX() y = plot:GetY() end)
-            local owner = -1 local city = ""
-            if visible then
-                pcall(function() owner = plot:GetOwner() end)
-                pcall(function()
-                    local c = plot:GetOwningCity()
-                    if c ~= nil and owner ~= nil and owner >= 0 then
-                        city = "c" .. (c:GetID() + owner * 65536)
-                    end
-                end)
-            end
-            print("TILEROW|" .. x .. "|" .. (y - math.floor(x / 2))
-                .. "|" .. terrain .. "|" .. tostring(visible)
-                .. "|" .. owner .. "|" .. city)
-        end
+        local terrain = "?"
+        pcall(function()
+            local t = GameInfo.Terrains[plot:GetTerrainType()]
+            if t ~= nil then terrain = t.TerrainType end
+        end)
+        terrain = string.gsub(terrain, "|", "-")
+        terrain = string.gsub(terrain, "%c", " ")
+        local owner = -1
+        pcall(function() owner = plot:GetOwner() end)
+        local q = c[1] local r = c[2]
+        print("TILEROW|" .. q .. "|" .. r .. "|" .. terrain
+            .. "|true|" .. owner .. "|")
     end
 end
 print("---END---")

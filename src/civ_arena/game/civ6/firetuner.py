@@ -177,6 +177,25 @@ _ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
 # the next Status/Digest poll.
 SimulateHook = Callable[[str, int, int], str]
 
+# M17c derived-visibility sight radii (axial hex distance). The engine's
+# fog state is not exposed in this build's GameCore Lua, so the adapter
+# derives the visible set from own entities. Deliberately CONSERVATIVE:
+# a hill-top unit or a walled city sees farther in the real engine —
+# under-revealing is the safe side of the no-leak contract (declared
+# approximation; hills/walls bonuses would need a per-plot read to lift).
+UNIT_SIGHT = 2
+CITY_SIGHT = 3
+
+
+def _ring(q: int, r: int, radius: int) -> set[str]:
+    """Axial-hex tiles within ``radius`` of (q, r), as sim tile keys."""
+    out: set[str] = set()
+    for dq in range(-radius, radius + 1):
+        for dr in range(max(-radius, -dq - radius),
+                        min(radius, -dq + radius) + 1):
+            out.add(f"{q + dq},{r + dr}")
+    return out
+
 
 class _LiveStateView:
     """Minimal sim-state shim: referee.abort_cleanup reads
@@ -500,21 +519,63 @@ class FireTunerAdapter:
             lines = await self._conn.execute_read(lua_translator.cities_read())
             return response_parser.parse_cities(lines)
         if req.kind is ObserveKind.VISIBLE_MAP:
-            # M17c: the real revealed-tiles read (the M14d empty-set
-            # declaration retired). The full-reveal read can run to ~1600
-            # TILEROWs on a duel map, so it gets a raised collect timeout —
-            # the default 5s covers only small reveals. The parsed doc
-            # feeds the per-player visibility cache visibility_for() reads;
-            # the cache is updated BEFORE the doc returns, so the referee's
-            # project() call and visibility_for() always see the SAME read
-            # (a `sees` key can never lack its owner field).
-            lines = await self._conn.execute_read(
-                lua_translator.visible_map_read(req.player_id), timeout=25.0)
-            parsed = response_parser.parse_visible_map(lines)
-            self._map_vis[req.player_id] = parsed
-            # the frozenset stays cache-side: the returned doc is canonical
-            # JSON material (tiles carry only str/int values)
-            return {"turn": parsed["turn"], "tiles": parsed["tiles"]}
+            # M17c derived visibility (the engine's fog state is not
+            # exposed in this build's GameCore Lua — live-probed
+            # 2026-08-31). The currently-visible set is hex radius
+            # UNIT_SIGHT around own units / CITY_SIGHT around own city
+            # centers, computed from the same reads the agents use; the
+            # targeted terrain read asks ONLY about those coordinates, so
+            # no unseen terrain can enter the doc. Remembered tiles are
+            # the ACCUMULATION of every previously-visible set (the M11
+            # no-expiry epistemics, adapter-side), served from cache with
+            # their last-seen terrain — never re-read from the wire.
+            units = response_parser.parse_units(await self._conn.execute_read(
+                lua_translator.units_read()))
+            cities = response_parser.parse_cities(
+                await self._conn.execute_read(lua_translator.cities_read()))
+            visible: set[str] = set()
+            for u in units:
+                if u["owner"] == req.player_id:
+                    visible |= _ring(u["q"], u["r"], UNIT_SIGHT)
+            for c in cities:
+                if c["owner"] == req.player_id:
+                    visible |= _ring(c["q"], c["r"], CITY_SIGHT)
+            coords = [(int(k.split(",")[0]), int(k.split(",", 1)[1]))
+                      for k in sorted(visible)]
+            parsed = response_parser.parse_visible_map(
+                await self._conn.execute_read(
+                    lua_translator.visible_map_read(req.player_id, coords),
+                    timeout=25.0))
+            turn = parsed["turn"]
+            fresh = parsed["tiles"]
+            cache = self._map_vis.setdefault(
+                req.player_id, {"turn": turn, "tiles": {}, "visible": set()})
+            # remembered = every tile EVER visible, terrain frozen at its
+            # last-seen read; the merge is monotone by construction
+            for key, tile in fresh.items():
+                cache["tiles"][key] = tile
+            cache["turn"] = turn
+            cache["visible"] = visible
+            # city tagging: a Python-side join against the omniscient
+            # cities read, applied ONLY on currently-visible tiles (a
+            # visible tile legitimately shows the city standing on it)
+            city_at = {f"{c['q']},{c['r']}":
+                       f"c{c['city_id'][1:]}" for c in cities}
+            for key in visible:
+                if key in city_at and key in cache["tiles"]:
+                    entry = cache["tiles"][key]
+                    if "owner" in entry:
+                        entry["city"] = city_at[key]
+            # the returned doc: visible tiles with owner/city, remembered
+            # tiles terrain-only (ownership stripped on the way out — the
+            # cache keeps full rows but the doc never leaks fog ownership)
+            out: dict[str, dict[str, Any]] = {}
+            for key, tile in cache["tiles"].items():
+                if key in visible:
+                    out[key] = tile
+                else:
+                    out[key] = {"terrain": tile["terrain"]}
+            return {"turn": turn, "tiles": out}
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
             lines = await self._conn.execute_read(
                 lua_translator.available_research_read(req.player_id))
@@ -530,19 +591,21 @@ class FireTunerAdapter:
         raise ValueError(f"unknown observe kind: {req.kind}")
 
     def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
-        """M17c: (observable, remembered) from the CACHED map read — the
-        engine's own visibility component is the authority (IsVisible now,
-        IsRevealed ever), captured per player on each VISIBLE_MAP observe.
-        Before the first map observation of a player the sets are EMPTY
-        (under-visibility, never over-visibility — the same fail-safe side
-        as the retired M14d declaration). The projection therefore shows a
-        foreign entity only while its tile is currently seen, and keeps
-        remembered tiles' terrain (never their fog ownership — the Lua
-        never reads it)."""
+        """M17c: (observable, remembered) from the CACHED derived map read.
+        The engine's fog state is not exposed in this build's GameCore
+        Lua, so visibility is derived from the player's own entities
+        (under-approximation by construction: own-entity sight, never the
+        engine's full reveal). Before the first map observation of a
+        player the sets are EMPTY — under-visibility, never
+        over-visibility, the same fail-safe side as the retired M14d
+        declaration. The projection therefore shows a foreign entity only
+        while its tile is within current own-entity sight, and remembered
+        tiles keep their terrain (never fog ownership — the doc strips
+        it on the way out)."""
         vis = self._map_vis.get(player_id)
         if vis is None:
             return frozenset(), frozenset()
-        visible = vis["visible"]
+        visible = frozenset(vis["visible"])
         revealed = frozenset(vis["tiles"])
         return visible, revealed - visible
 

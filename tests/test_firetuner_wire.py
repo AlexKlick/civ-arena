@@ -143,12 +143,14 @@ async def test_parser_visible_map_mapping_and_failclosed():
 
 
 async def test_visible_map_feeds_visibility_cache():
-    """observe(VISIBLE_MAP) is the authority visibility_for() reads: empty
-    before the first read (fail-safe under-visibility), then split into
-    observable (currently seen) / remembered (revealed fog). Consistency
-    invariant for the projection: every observable key's tile carries its
-    owner — visibility.py indexes tile["owner"] unconditionally for sees."""
-    async def check(port: int, _server: FakeTunerServer):
+    """observe(VISIBLE_MAP) derives visibility from own entities and is
+    the authority visibility_for() reads: empty before the first read
+    (fail-safe under-visibility); remembered tiles ACCUMULATE adapter-side
+    (the M11 no-expiry epistemics) — moving an own unit away from its old
+    ring turns that ring into remembered fog. Consistency invariant for
+    the projection: every observable key's tile carries its owner —
+    visibility.py indexes tile["owner"] unconditionally for sees."""
+    async def check(port: int, server: FakeTunerServer):
         adapter = FireTunerAdapter("127.0.0.1", port)
         await adapter.setup({})
         assert adapter.visibility_for(0) == (frozenset(), frozenset())
@@ -159,13 +161,22 @@ async def test_visible_map_feeds_visibility_cache():
         assert len(doc["tiles"]) > 5
         observable, remembered = adapter.visibility_for(0)
         assert observable | remembered == frozenset(doc["tiles"])
-        assert observable and remembered  # both halves of the split exist
-        assert observable & remembered == frozenset()
+        assert observable, "own-entity rings produce current sight"
+        assert remembered == frozenset(), "nothing forgotten yet"
         for key in observable:
             tile = doc["tiles"][key]
             assert "owner" in tile and "city" in tile
-        for key in remembered:
-            assert set(doc["tiles"][key]) == {"terrain"}
+
+        # march a warrior off its ring: the old sight becomes remembered
+        server.mod.units[2]["x"] += 4  # type: ignore[index]
+        doc2 = await adapter.observe(
+            ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
+        obs2, rem2 = adapter.visibility_for(0)
+        assert rem2, "the abandoned ring stays in memory"
+        assert obs2 & rem2 == frozenset()
+        assert obs2 | rem2 == frozenset(doc2["tiles"])
+        for key in rem2:
+            assert set(doc2["tiles"][key]) == {"terrain"}
         # the second player has NOT observed: still the safe empty sets
         assert adapter.visibility_for(1) == (frozenset(), frozenset())
         await adapter.teardown()
