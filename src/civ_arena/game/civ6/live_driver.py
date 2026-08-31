@@ -34,6 +34,7 @@ from civ_arena.arena.referee import Referee, RefereeConfig
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import MatchSpec, load_config
+from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
 from civ_arena.game.civ6 import lua_translator, response_parser
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
@@ -336,7 +337,7 @@ async def phase_dispatch(
             await driver.referee.begin_turn(
                 agent.player_id, agent.agent_id, turn)
             digest_open = await adapter.refresh_digest()
-            await _resolve_blockers(adapter, turn)
+            await _resolve_blockers(adapter, agent.player_id, turn)
             allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
             # the coordinator's turn-start hook (LLM runtimes REQUIRE it —
             # the authoritative turn number for their prompt; the turtler's
@@ -394,6 +395,11 @@ async def phase_dispatch(
         except Exception:
             pass
         await adapter.teardown()
+
+
+# the turtler doctrine's own build preference (agents/scripted.py)
+_BUILD_PREFERENCE = ["MONUMENT", "WALLS", "WARRIOR", "GRANARY", "SETTLER",
+                     "SCOUT", "SLINGER", "BARRACKS"]
 
 
 def _refuse_rerun(events: Path) -> None:
@@ -461,7 +467,8 @@ def _target_turn(status: dict[str, Any], player_id: int,
     return int(status["TURN"])
 
 
-async def _resolve_blockers(adapter: FireTunerAdapter, turn: int) -> None:
+async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
+                             turn: int) -> None:
     """Turn-blocker housekeeping at LEASE START (inside our own turn, where
     civic/policy changes are legal): a completed civic parks 'Choose a
     Civic' + 'Fill Policy Slot' on the local player, and a forced end-turn
@@ -470,6 +477,7 @@ async def _resolve_blockers(adapter: FireTunerAdapter, turn: int) -> None:
     NEVER SetCivic; UNLOCK_POLICIES + RequestPolicyChanges). Both attrs
     are outside the recorder's coverage, so nothing here enters the
     watchdog ledgers — the wire transcript is the record."""
+    _ = player_id
     rows = response_parser._split_lines(  # noqa: SLF001
         await adapter.write_raw(lua_translator.blocker_query()))
     blockers = [r for r in rows if r.startswith("BLOCKING|")]
@@ -482,11 +490,50 @@ async def _resolve_blockers(adapter: FireTunerAdapter, turn: int) -> None:
             out = await adapter.write_raw(lua_translator.fill_policy_slots())
             print(f"blocker[{turn}]: policies -> "
                   f"{[r for r in out if not r.endswith('---END---')]}")
+        elif "PRODUCTION" in b:
+            # the empty-queue city: set production for EVERY own city with
+            # an empty queue (the agent may have missed one; the blocker
+            # fires at turn END, when resolution freezes the cycle)
+            await _fill_empty_queues(adapter, player_id, turn)
         else:
             # unknown blocker: report it loudly — the run must not freeze
             # silently on something this housekeeping does not cover
             print(f"blocker[{turn}]: UNHANDLED {b} (manual resolution "
                   "may be needed)")
+    # PROACTIVE: fill empty queues every lease start — the production
+    # blocker only ever lists at turn end, when the wire can no longer
+    # resolve it (glm-g1 turn 12's freeze); pre-filling makes the class
+    # unreachable
+    await _fill_empty_queues(adapter, player_id, turn)
+
+
+async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
+                             turn: int) -> None:
+    """Set production for every own city whose queue reads empty (the
+    turtler doctrine's preference order). A city finishing its build
+    mid-turn with no follow-up parks ENDTURN_BLOCKING_PRODUCTION on the
+    cycle at turn end — a state the wire cannot release (glm-g1 t12)."""
+    cities = await adapter.observe(ObserveRequest(
+        kind=ObserveKind.CITIES, player_id=player_id))
+    for city in cities:
+        if city["owner"] != player_id or city.get("production_queue"):
+            continue
+        items = await adapter.observe(ObserveRequest(
+            kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=player_id,
+            subject_id=city["city_id"]))
+        by_id = {i["item_id"]: i for i in items}
+        pick = next((p for p in _BUILD_PREFERENCE if p in by_id), None)
+        if pick is None:
+            continue
+        res = await adapter.act(ActionCommand(
+            tool="set_city_production",
+            args={"city_id": city["city_id"], "item_id": pick},
+            player_id=player_id,
+            idempotency_key=f"housekeep-{turn}-{city['city_id']}",
+            lease_id="housekeeping"))
+        queue = city.get("production_queue")
+        print(f"housekeep[{turn}]: {city['name']} queue={queue!r} "
+              f"-> BUILD {pick}: {res.status}")
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,
