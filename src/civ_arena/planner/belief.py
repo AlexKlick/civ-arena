@@ -54,6 +54,7 @@ from civ_arena.game.sim.state import (
     parse_key,
     tile_key,
 )
+from civ_arena.planner.uncertainty import staleness_confidence
 
 OWN_GOLD_PRIOR = 100  # the duel start value; used for never-observed rivals
 
@@ -242,6 +243,9 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
             "hp": _hp_from_bucket(u["hp_bucket"]),
             "strength": u["strength"], "ranged_strength": u["ranged_strength"],
             "fortified": False,
+            # M16c: derived read-time uncertainty (the STORE entry never
+            # expires; the strategy's confidence in it does)
+            "confidence": staleness_confidence(u["last_seen_turn"], belief.turn),
         }
 
     cities: dict[str, dict[str, Any]] = {}

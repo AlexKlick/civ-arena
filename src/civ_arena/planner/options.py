@@ -28,6 +28,11 @@ from civ_arena.game.sim.state import (
     hex_dist,
     parse_key,
 )
+from civ_arena.planner.uncertainty import (
+    RUSH_CONF_MIN,
+    THREAT_CONF_MIN,
+    confident_foreign_units,
+)
 
 Plan = list[tuple[str, dict[str, Any]]]
 
@@ -68,7 +73,11 @@ def _military(state: SimState, pid: int) -> list[dict]:
 
 
 def _foreign_coords(state: SimState, pid: int) -> list[tuple[int, int]]:
-    out = [(u["q"], u["r"]) for u in state.units.values() if u["owner"] != pid]
+    """Confidence-gated target set (M16c): foreign UNITS count as targets
+    only while recently sighted (a last-seen ghost must not draw an attack
+    march); foreign CITIES are permanent and never decay."""
+    out = [(u["q"], u["r"])
+           for u in confident_foreign_units(state, pid, RUSH_CONF_MIN)]
     out += [(c["q"], c["r"]) for c in state.cities.values() if c["owner"] != pid]
     return sorted(out)
 
@@ -185,8 +194,12 @@ def _develop_step(state: SimState, pid: int) -> Plan:
 def _threat_within(state: SimState, pid: int, radius: int) -> bool:
     own = [(c["q"], c["r"]) for c in _own_cities(state, pid)]
     own += [(u["q"], u["r"]) for u in _own_units(state, pid)]
-    foreign = [(u["q"], u["r"]) for u in state.units.values()
-               if u["owner"] != pid and (u["strength"] > 0 or u["ranged_strength"] > 0)]
+    # M16c: only probably-real foreign MILITARY threatens — a stale ghost
+    # in the store must not pivot the economy to walls (the entry still
+    # materializes; its confidence floor gates the response)
+    foreign = [(u["q"], u["r"])
+               for u in confident_foreign_units(state, pid, THREAT_CONF_MIN)
+               if u["strength"] > 0 or u["ranged_strength"] > 0]
     return any(hex_dist(a, b) <= radius for a in own for b in foreign)
 
 
