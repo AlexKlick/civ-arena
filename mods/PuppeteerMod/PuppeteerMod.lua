@@ -44,7 +44,7 @@
 --     context? If not, write paths must run entirely in InGame state.
 
 Puppeteer = {}
-Puppeteer.version = "0.3.1-diagnostic"
+Puppeteer.version = "0.3.2"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -75,15 +75,26 @@ local function boolstr(v) return tostring(v and true or false) end
 -- live-learned 2026-08-30: the GameCore unit object exposes
 -- GetMovesRemaining / GetDamage — NOT GetMovementRemaining / GetHP, and no
 -- fortified accessor at all (dropped from snapshots/digest accordingly).
+-- live-learned glm-g1: consumed/dead units report position (-9999,-9999)
+-- (upstream guards the same) — they must read as GONE, not as units that
+-- "moved to null island" (that booked a phantom move violation on the
+-- founding settler)
+local function unit_gone(unit)
+    local ok, x = pcall(function() return unit:GetX() end)
+    return (not ok) or x == -9999
+end
+
 local function snapshot_units(playerID)
     local snap = {}
     local pUnits = Players[playerID]:GetUnits()
     for _, unit in pUnits:Members() do
-        snap[unit:GetID()] = {
-            x = unit:GetX(), y = unit:GetY(),
-            moves = unit:GetMovesRemaining(),
-            damage = unit:GetDamage(),
-        }
+        if not unit_gone(unit) then
+            snap[unit:GetID()] = {
+                x = unit:GetX(), y = unit:GetY(),
+                moves = unit:GetMovesRemaining(),
+                damage = unit:GetDamage(),
+            }
+        end
     end
     return snap
 end
@@ -269,9 +280,11 @@ local function OnPlayerTurnStartComplete(playerID)
     -- (and the trace shows exactly which one, if any).
     local pUnits = Players[playerID]:GetUnits()
     for _, unit in pUnits:Members() do
-        local ok, err = pcall(function() UnitManager.FinishMoves(unit) end)
-        if not ok then trace("FREEZE_ERR|u" .. tostring(unit:GetID())
-                             .. "|" .. tostring(err)) end
+        if not unit_gone(unit) then
+            local ok, err = pcall(function() UnitManager.FinishMoves(unit) end)
+            if not ok then trace("FREEZE_ERR|u" .. tostring(unit:GetID())
+                                 .. "|" .. tostring(err)) end
+        end
     end
     lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
               snapshot = snapshot_player(playerID) }
@@ -461,10 +474,12 @@ function Puppeteer.Digest()
     for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         local pid = p:GetID()
         for _, unit in p:GetUnits():Members() do
-            table.insert(rows, string.format("u%d|%d|%d|%d|%d|%d",
-                unit:GetID(), pid, unit:GetX(), unit:GetY(),
-                math.floor(unit:GetMovesRemaining()),
-                math.floor(unit:GetDamage())))
+            if not unit_gone(unit) then
+                table.insert(rows, string.format("u%d|%d|%d|%d|%d|%d",
+                    unit:GetID(), pid, unit:GetX(), unit:GetY(),
+                    math.floor(unit:GetMovesRemaining()),
+                    math.floor(unit:GetDamage())))
+            end
         end
         for _, city in p:GetCities():Members() do
             table.insert(rows, string.format("c%d|%d|%d",

@@ -280,6 +280,13 @@ async def phase_dispatch(
         bind(diary=driver.referee.diary, strategy=driver.referee.strategy)
     await adapter.setup({})
     await adapter.inject_mod(mod_lua)
+    # ARM THE PUPPET AT ATTACH (live-learned glm-g1): a turn whose
+    # PlayerTurnStartComplete fires while the puppet is off is SKIPPED
+    # entirely (HOOK_SKIP|not-puppet) — the engine plays that turn as an
+    # idle human seat and the driver can never engage it. Arming here
+    # means EVERY hook from now on engages a lease; targeting then only
+    # decides which engaged turn to drive.
+    await adapter.read_raw(lua_translator.set_puppet(agent.player_id, True))
     per_turn: list[dict[str, Any]] = []
     await driver.match_start()
     last_driven = -1
@@ -311,11 +318,15 @@ async def phase_dispatch(
                       "(no lease, hook past)")
                 await adapter.write_raw(
                     lua_translator.request_end_turn(agent.player_id))
+                # break ONLY on engagement: the turn NUMBER advances before
+                # the hook fires, and re-targeting from that instant
+                # overshoots to N+1 while the lease then engages at N
+                # (live-learned glm-g1's second race). The end-turn existed
+                # to GET the next lease — wait for exactly that.
                 deadline = time.monotonic() + 60.0
                 while time.monotonic() < deadline:
                     status = await adapter.poll_status()
-                    if (status.get("PUPPET_ACTIVE") is True
-                            or int(status.get("TURN", -1)) > turn - 1):
+                    if status.get("PUPPET_ACTIVE") is True:
                         break
                     await asyncio.sleep(2.0)
                 turn = _target_turn(status, agent.player_id, last_driven)
@@ -327,6 +338,12 @@ async def phase_dispatch(
             digest_open = await adapter.refresh_digest()
             await _resolve_blockers(adapter, turn)
             allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
+            # the coordinator's turn-start hook (LLM runtimes REQUIRE it —
+            # the authoritative turn number for their prompt; the turtler's
+            # ScriptedRuntime simply lacks it)
+            begin_hook = getattr(runtime, "begin_turn", None)
+            if begin_hook is not None:
+                begin_hook(turn)
             # THE TURN: the policy acts through the bound ToolFacade —
             # every call flows observe/execute/end_turn through the referee
             await session.take_turn(lease, runtime)

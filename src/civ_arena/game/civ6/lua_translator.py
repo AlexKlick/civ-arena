@@ -123,6 +123,11 @@ def units_read() -> str:
 print("UNITS|1")
 for _, p in ipairs(PlayerManager.GetAliveMajors()) do
     for _, unit in p:GetUnits():Members() do
+        local gone = false
+        pcall(function() gone = (unit:GetX() == -9999) end)
+        if gone then
+            -- consumed/dead units report (-9999,-9999); upstream skips them
+        else
         local info = GameInfo.Units[unit:GetType()]
         local name = "UNKNOWN"
         if info ~= nil then name = info.UnitType end
@@ -150,6 +155,7 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
             .. "|" .. x .. "|" .. (y - math.floor(x / 2))
             .. "|" .. hp .. "|" .. moves .. "|" .. maxmoves
             .. "|" .. combat .. "|" .. ranged .. "|" .. tostring(fortified))
+        end
     end
 end
 print("---END---")

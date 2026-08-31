@@ -713,3 +713,17 @@ def test_dispatch_targeting_rules_and_blockers():
     assert live_driver._last_deact_turn(
         ["16|HOOK_DEACT|0", "16|HOOK_ENTER|0"]) == 16
     assert live_driver._last_deact_turn([]) is None
+
+
+def test_llm_client_string_content_normalizes():
+    """Provider-shape tolerance (Z.AI glm-g1): plain-string content wraps
+    into a text block; garbage still fails loud."""
+    from civ_arena.agents.llm.client import _normalize_blocks
+
+    assert _normalize_blocks("plain") == [{"type": "text", "text": "plain"}]
+    assert _normalize_blocks(
+        ["str", {"type": "text", "text": "b"}]) == [
+        {"type": "text", "text": "str"}, {"type": "text", "text": "b"}]
+    assert _normalize_blocks([{"notype": 1}]) is None
+    assert _normalize_blocks(42) is None
+    assert _normalize_blocks(None) is None

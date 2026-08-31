@@ -16,7 +16,7 @@ agents:
     policy: llm
     seed: 1101
     llm:
-      base_url: "https://api.z.ai/api/anthropic"
+      base_url: "https://api.z.ai/api/anthropic/v1"   # /v1 needed: client appends /messages (probe-verified 2026-08-30)
       api_key_env: "ANTHROPIC_AUTH_TOKEN_ZAI"
       model_id: "glm-5.3"
       max_tokens: 4096

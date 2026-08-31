@@ -119,6 +119,12 @@ async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=4318)
+    ap.add_argument("--preemptive", action="store_true",
+                    help="also set civic + fill empty slots when NO blocker "
+                         "is listed yet (the fresh-game turn-1 park: the "
+                         "CODE_OF_LAWS blockers only APPEAR during "
+                         "end-of-turn processing, when policy changes "
+                         "already no-op — the only legal moment is NOW)")
     opts = ap.parse_args()
     conn = GameConnection(opts.host, opts.port)
     await conn.connect()
@@ -137,15 +143,16 @@ async def main() -> int:
 
     before = await blockers()
     print("blockers:", before or ["none"])
-    if not any("CIVIC" in b for b in before):
+    if not any("CIVIC" in b for b in before) and not opts.preemptive:
         print("no civic blockers to resolve")
         await conn.disconnect()
         return 0
 
-    if any(b.endswith("ENDTURN_BLOCKING_CIVIC") for b in before):
+    if opts.preemptive or any(
+            b.endswith("ENDTURN_BLOCKING_CIVIC") for b in before):
         out = await conn.execute_read(SET_CIVIC)
         print("civic:", [r for r in out if not r.endswith("---END---")])
-    if any("FILL_CIVIC_SLOT" in b for b in before):
+    if opts.preemptive or any("FILL_CIVIC_SLOT" in b for b in before):
         out = await conn.execute_write(FILL_SLOTS)
         print("policies:", [r for r in out if not r.endswith("---END---")])
     after = await blockers()

@@ -30,6 +30,27 @@ class ModelUnavailable(RuntimeError):
     """The model endpoint cannot be used (auth, network, budget, shape)."""
 
 
+def _normalize_blocks(content: Any) -> list[dict[str, Any]] | None:
+    """Provider-shape tolerance (live-learned glm-g1, Z.AI): the anthropic-
+    compat spec says content is a list of typed blocks, but providers ship
+    plain strings (whole-content or mixed into the list). Strings wrap into
+    text blocks; anything else fails LOUD — a silently dropped block is
+    worse than a refused response."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        out: list[dict[str, Any]] = []
+        for b in content:
+            if isinstance(b, str):
+                out.append({"type": "text", "text": b})
+            elif isinstance(b, dict) and isinstance(b.get("type"), str):
+                out.append(b)
+            else:
+                return None
+        return out
+    return None
+
+
 @dataclass(frozen=True)
 class ModelReply:
     content: list[dict[str, Any]]  # verbatim block list (thinking included)
@@ -108,10 +129,8 @@ class MiniMaxMessagesClient:
                 f"malformed response: top level is {type(doc).__name__}, "
                 "not an object"
             )
-        content = doc.get("content")
-        if not isinstance(content, list) or not all(
-                isinstance(b, dict) and isinstance(b.get("type"), str)
-                for b in content):
+        content = _normalize_blocks(doc.get("content"))
+        if content is None:
             raise ModelUnavailable(
                 "malformed response: content is not a list of typed blocks"
             )
