@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from civ_arena.game.adapter import ObserveKind, ObserveRequest
-from civ_arena.game.civ6.fake_tuner_server import FakeTunerServer
+from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.response_parser import parse_kv_lines
 from civ_arena.game.civ6.vendor import tuner_client
@@ -21,8 +21,8 @@ STATUS_DIGEST_CANNED = [
 ]
 
 
-async def with_server(responses, fn):
-    server = FakeTunerServer(responses)
+async def with_server(responses, fn, mod=None):
+    server = FakeTunerServer(responses, mod=mod)
     port = await server.start()
     try:
         return await fn(port, server)
@@ -105,6 +105,73 @@ async def test_parser_kv_and_rows():
     assert parsed["PUPPET_ACTIVE"] is False
     assert parsed["PLAYER"] == [["0", "CIVILIZATION_ROME"],
                                 ["1", "CIVILIZATION_KOREA"]]
+
+
+async def test_parser_visible_map_mapping_and_failclosed():
+    from civ_arena.game.civ6.response_parser import parse_visible_map
+
+    # engine names -> sim vocabulary (the mover's cost table); the
+    # unknown-name fallback is counted, not dropped
+    parsed = parse_visible_map([
+        "VMAP|2", "TURN|9",
+        "TILEROW|1|0|GRASS_HILLS|true|0|c1",
+        "TILEROW|2|0|TUNDRA|false|-1|",
+        "TILEROW|3|0|WEIRD_MARS|false|-1|",
+        "---END---"])
+    assert parsed["turn"] == 9
+    assert parsed["tiles"]["1,0"] == {"terrain": "HILL", "owner": 0,
+                                      "city": "c1"}
+    assert parsed["tiles"]["2,0"] == {"terrain": "PLAINS"}
+    assert parsed["tiles"]["3,0"] == {"terrain": "PLAINS"}
+    assert parsed["unknown_terrain"] == 1
+    assert parsed["visible"] == frozenset({"1,0"})
+    # fog rows never materialize ownership even when the wire sends one
+    parsed = parse_visible_map([
+        "VMAP|2", "TURN|2",
+        "TILEROW|0|0|DESERT|false|3|c999", "---END---"])
+    assert parsed["tiles"]["0,0"] == {"terrain": "DESERT"}
+    # fail-closed shapes
+    for bad in (["TILEROW|1|0|GRASS|maybe|-1|"],           # non-boolean flag
+                ["TILEROW|1|0|GRASS|true|-1"],             # 5 fields
+                ["BADEROW|x"],                             # foreign row
+                ["TILEROW|1|0|GRASS|true|-1|",             # duplicate
+                 "TILEROW|1|0|GRASS|true|-1|"]):
+        with pytest.raises(ValueError):
+            parse_visible_map(["VMAP|2"] + bad)
+    with pytest.raises(ValueError):
+        parse_visible_map(["TILEROW|1|0|GRASS|true|-1|"])  # no TURN row
+
+
+async def test_visible_map_feeds_visibility_cache():
+    """observe(VISIBLE_MAP) is the authority visibility_for() reads: empty
+    before the first read (fail-safe under-visibility), then split into
+    observable (currently seen) / remembered (revealed fog). Consistency
+    invariant for the projection: every observable key's tile carries its
+    owner — visibility.py indexes tile["owner"] unconditionally for sees."""
+    async def check(port: int, _server: FakeTunerServer):
+        adapter = FireTunerAdapter("127.0.0.1", port)
+        await adapter.setup({})
+        assert adapter.visibility_for(0) == (frozenset(), frozenset())
+        doc = await adapter.observe(
+            ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
+        # canonical-JSON material only in the returned doc
+        assert set(doc) == {"turn", "tiles"}
+        assert len(doc["tiles"]) > 5
+        observable, remembered = adapter.visibility_for(0)
+        assert observable | remembered == frozenset(doc["tiles"])
+        assert observable and remembered  # both halves of the split exist
+        assert observable & remembered == frozenset()
+        for key in observable:
+            tile = doc["tiles"][key]
+            assert "owner" in tile and "city" in tile
+        for key in remembered:
+            assert set(doc["tiles"][key]) == {"terrain"}
+        # the second player has NOT observed: still the safe empty sets
+        assert adapter.visibility_for(1) == (frozenset(), frozenset())
+        await adapter.teardown()
+        return None
+
+    await with_server([], check, mod=FakeMod())
 
 
 async def test_firetuner_adapter_poll_and_overview():

@@ -221,13 +221,61 @@ print("---END---")
 """
 
 
-def visible_map_read() -> str:
-    """M14d DECLARATION: no per-tile read until M14c's revealed-tiles query.
-    Under the empty visibility sets the projection emits no tiles anyway —
-    the shape contract (turn + tiles dict) is what this preserves."""
-    return """
-print("VMAP|1")
+def visible_map_read(player_id: int) -> str:
+    """M17c: the revealed-tiles read (the M14d empty-set declaration,
+    retired). Emits one TILEROW per plot the player has EVER revealed;
+    ``visible`` marks currently-seen plots, and OWNER/CITY are read ONLY
+    for those — the wire doc never carries fog ownership, so the
+    projection cannot leak what the doc does not hold. Terrain comes out
+    as the ENGINE TerrainType; the response parser maps it into the sim
+    vocabulary (the sim's movement tables would KeyError on GRASS_HILLS).
+
+    Every GameCore accessor is pcall-guarded (declared degradation: a
+    missing accessor yields terrain "?" which the parser maps to PLAINS
+    and counts, not silently drops)."""
+    return f"""
+print("VMAP|2")
 print("TURN|" .. Game.GetCurrentGameTurn())
+local p = Players[{player_id}]
+local vis = nil
+pcall(function() vis = p:GetVisibility() end)
+if vis == nil then print("---END---") return end
+local count = 0
+pcall(function() count = Map.GetPlotCount() end)
+for i = 0, count - 1 do
+    local plot = nil
+    pcall(function() plot = Map.GetPlotByIndex(i) end)
+    if plot ~= nil then
+        local revealed = false
+        local visible = false
+        pcall(function() revealed = vis:IsRevealed(i) end)
+        if revealed then
+            pcall(function() visible = vis:IsVisible(i) end)
+            local terrain = "?"
+            pcall(function()
+                local t = GameInfo.Terrains[plot:GetTerrainType()]
+                if t ~= nil then terrain = t.TerrainType end
+            end)
+            terrain = string.gsub(terrain, "|", "-")
+            terrain = string.gsub(terrain, "%c", " ")
+            local x = 0 local y = 0
+            pcall(function() x = plot:GetX() y = plot:GetY() end)
+            local owner = -1 local city = ""
+            if visible then
+                pcall(function() owner = plot:GetOwner() end)
+                pcall(function()
+                    local c = plot:GetOwningCity()
+                    if c ~= nil and owner ~= nil and owner >= 0 then
+                        city = "c" .. (c:GetID() + owner * 65536)
+                    end
+                end)
+            end
+            print("TILEROW|" .. x .. "|" .. (y - math.floor(x / 2))
+                .. "|" .. terrain .. "|" .. tostring(visible)
+                .. "|" .. owner .. "|" .. city)
+        end
+    end
+end
 print("---END---")
 """
 

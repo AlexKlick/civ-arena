@@ -131,7 +131,7 @@ def test_every_translator_output_parses():
         lua_translator.overview_read(),
         lua_translator.units_read(),
         lua_translator.cities_read(),
-        lua_translator.visible_map_read(),
+        lua_translator.visible_map_read(0),
         lua_translator.available_research_read(0),
         lua_translator.available_production_read(3),
         lua_translator.mod_handshake(),

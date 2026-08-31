@@ -274,6 +274,70 @@ def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
     return sorted(out, key=lambda i: (order[i["kind"]], i["item_id"]))
 
 
+# Engine TerrainType -> sim terrain. The sim's TERRAIN table is the
+# movement-cost authority (reachable_dests indexes it directly), so an
+# unmapped engine name would KeyError the planner's compilers — unknown
+# names map to PLAINS and are COUNTED, never silently dropped.
+_TERRAIN_MAP: dict[str, str] = {
+    "GRASS": "GRASSLAND", "GRASS_HILLS": "HILL",
+    "PLAINS": "PLAINS", "PLAINS_HILLS": "HILL",
+    "DESERT": "DESERT", "DESERT_HILLS": "HILL",
+    "TUNDRA": "PLAINS", "TUNDRA_HILLS": "HILL",
+    "SNOW": "DESERT", "SNOW_HILLS": "HILL",
+    "COAST": "COAST", "OCEAN": "OCEAN",
+}
+
+
+def parse_visible_map(lines: list[str]) -> dict[str, Any]:
+    """VMAP|2 read -> the sim visible-map doc plus the visibility split the
+    adapter caches. TILEROW|q|r|terrain|visible|owner|city; the Lua reads
+    owner/city ONLY for currently-visible plots, so the doc never carries
+    fog ownership (the leak-safe side of the projection contract — the
+    projection gates again on the visible set, double-gated by design).
+
+    Returns {turn, tiles, visible, unknown_terrain}: tiles is keyed by the
+    sim tile_key; ``visible`` is the frozenset of currently-seen keys (the
+    adapter splits remembered = revealed - visible).
+    """
+    turn: int | None = None
+    tiles: dict[str, dict[str, Any]] = {}
+    visible: set[str] = set()
+    unknown = 0
+    for line in _split_lines(lines):
+        line = line.strip()
+        if not line or line.startswith(("VMAP|", "---END---")):
+            continue
+        if line.startswith("TURN|"):
+            turn = _coerce_strict(line.partition("|")[2])
+            continue
+        prefix, _, rest = line.partition("|")
+        if prefix != "TILEROW":
+            raise ValueError(f"non-tile row in map read: {line!r}")
+        parts = rest.split("|")
+        if len(parts) != 6:
+            raise ValueError(f"malformed TILEROW (want 6 fields): {line!r}")
+        q, r, terrain, vis_flag, owner, city = parts
+        key = f"{_coerce_strict(q)},{_coerce_strict(r)}"
+        sim_terrain = _TERRAIN_MAP.get(terrain)
+        if sim_terrain is None:
+            sim_terrain = "PLAINS"
+            unknown += 1
+        entry: dict[str, Any] = {"terrain": sim_terrain}
+        if vis_flag == "true":
+            visible.add(key)
+            entry["owner"] = _coerce_strict(owner)
+            entry["city"] = city
+        elif vis_flag != "false":
+            raise ValueError(f"non-boolean visibility flag: {line!r}")
+        if key in tiles:
+            raise ValueError(f"duplicate tile row for {key}")
+        tiles[key] = entry
+    if turn is None:
+        raise ValueError("no TURN row in map read")
+    return {"turn": turn, "tiles": tiles, "visible": frozenset(visible),
+            "unknown_terrain": unknown}
+
+
 def parse_act(lines: list[str]) -> dict[str, Any]:
     """ACT|tool|OK|detail | ACT|tool|ERR|REASON|detail -> the act verdict.
     Exactly one ACT row per command; missing = fail loud (a torn response

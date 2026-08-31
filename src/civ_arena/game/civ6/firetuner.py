@@ -222,6 +222,10 @@ class FireTunerAdapter:
         self._turn_mirror = -1
         self._journal: list[MutationRecord] = []
         self._digest_text: str | None = None
+        # M17c per-player visibility cache: player_id -> the last parsed
+        # visible-map doc (tiles + the currently-seen key set). Written on
+        # each VISIBLE_MAP observe; read by visibility_for().
+        self._map_vis: dict[int, dict[str, Any]] = {}
         # hash scoping (Codex P1-4): while a phase is open (and for the
         # sealed phase-end hash) state_hash covers ONLY the phase owner's
         # digest rows — the next player acts immediately after release and
@@ -496,14 +500,21 @@ class FireTunerAdapter:
             lines = await self._conn.execute_read(lua_translator.cities_read())
             return response_parser.parse_cities(lines)
         if req.kind is ObserveKind.VISIBLE_MAP:
-            # M14d declaration: no per-tile read until M14c's revealed-tiles
-            # query; under the empty visibility sets the projection emits no
-            # tiles anyway — this preserves the shape contract only.
+            # M17c: the real revealed-tiles read (the M14d empty-set
+            # declaration retired). The full-reveal read can run to ~1600
+            # TILEROWs on a duel map, so it gets a raised collect timeout —
+            # the default 5s covers only small reveals. The parsed doc
+            # feeds the per-player visibility cache visibility_for() reads;
+            # the cache is updated BEFORE the doc returns, so the referee's
+            # project() call and visibility_for() always see the SAME read
+            # (a `sees` key can never lack its owner field).
             lines = await self._conn.execute_read(
-                lua_translator.visible_map_read())
-            parsed = response_parser.parse_kv_lines(lines)
-            return {"turn": int(parsed.get("TURN", self._turn_mirror)),
-                    "tiles": {}}
+                lua_translator.visible_map_read(req.player_id), timeout=25.0)
+            parsed = response_parser.parse_visible_map(lines)
+            self._map_vis[req.player_id] = parsed
+            # the frozenset stays cache-side: the returned doc is canonical
+            # JSON material (tiles carry only str/int values)
+            return {"turn": parsed["turn"], "tiles": parsed["tiles"]}
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
             lines = await self._conn.execute_read(
                 lua_translator.available_research_read(req.player_id))
@@ -519,15 +530,21 @@ class FireTunerAdapter:
         raise ValueError(f"unknown observe kind: {req.kind}")
 
     def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
-        """M14d DECLARATION (docs/live-validation.md §6): until M14c's
-        revealed-tiles read, the live adapter reports NO observable and NO
-        remembered tiles. The projection therefore hides EVERY foreign
-        entity — the safe side of the no-leak contract (under-visibility,
-        never over-visibility); own entities are ownership-based and
-        unaffected. A side effect the driver records: driven agents cannot
-        see or attack the opponent's units in M14d games."""
-        _ = player_id
-        return frozenset(), frozenset()
+        """M17c: (observable, remembered) from the CACHED map read — the
+        engine's own visibility component is the authority (IsVisible now,
+        IsRevealed ever), captured per player on each VISIBLE_MAP observe.
+        Before the first map observation of a player the sets are EMPTY
+        (under-visibility, never over-visibility — the same fail-safe side
+        as the retired M14d declaration). The projection therefore shows a
+        foreign entity only while its tile is currently seen, and keeps
+        remembered tiles' terrain (never their fog ownership — the Lua
+        never reads it)."""
+        vis = self._map_vis.get(player_id)
+        if vis is None:
+            return frozenset(), frozenset()
+        visible = vis["visible"]
+        revealed = frozenset(vis["tiles"])
+        return visible, revealed - visible
 
     # -- action -----------------------------------------------------------------
     async def act(self, cmd: ActionCommand) -> ActionResult:

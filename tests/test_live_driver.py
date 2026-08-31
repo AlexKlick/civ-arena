@@ -491,9 +491,11 @@ def test_parse_observes_are_sim_shaped():
 
 
 async def test_observes_over_fake_and_foreign_projection():
-    """The six observes run over the fake wire; with the M14d empty
-    visibility sets the REAL projection hides foreign entities (the safe
-    side of no-leak) and keeps own entities fully projected."""
+    """The six observes run over the fake wire. M17c: the map read is real
+    (the M14d empty-set declaration retired) — visible tiles carry
+    owner/city, fog tiles are terrain-only — and the REAL projection still
+    hides foreign entities outside the observer's sight (the safe side of
+    no-leak) while keeping own entities fully projected."""
     from civ_arena.arena.visibility import Scope
 
     adapter, server = await _adapter_with()
@@ -516,14 +518,27 @@ async def test_observes_over_fake_and_foreign_projection():
                 "kind": "building"} in production
         vmap = await adapter.observe(
             ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
-        assert vmap["tiles"] == {}
+        assert vmap["tiles"], "M17c: the revealed-tiles read is real"
+        for tile in vmap["tiles"].values():
+            # visible: terrain+owner+city; fog: terrain ONLY (the wire
+            # never reads fog ownership)
+            assert set(tile) in ({"terrain"}, {"terrain", "owner", "city"})
         # the projection with the adapter's own visibility ground truth
         policy = VisibilityPolicy()
         observable, remembered = adapter.visibility_for(0)
+        assert observable | remembered == frozenset(vmap["tiles"])
         projected = policy.project(units, "units", 0, observable, remembered,
                                    Scope.PRIVATE_PLAYER)
         owners = {u["owner_id"] for u in projected}
         assert owners == {0}, "foreign units must be hidden, own present"
+        # the projected map keeps fog terrain but never fog ownership
+        pmap = policy.project(vmap, "visible_map", 0, observable, remembered,
+                              Scope.PRIVATE_PLAYER)
+        for key, tile in pmap["tiles"].items():
+            if key in observable:
+                assert "owner_id" in tile
+            else:
+                assert set(tile) == {"coord", "terrain"}
     finally:
         await server.stop()
 
