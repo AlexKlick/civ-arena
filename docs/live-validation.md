@@ -467,3 +467,62 @@ wire-vocabulary filter that substitutes the engine's offered ids).
   (cache-collided renders of a Steam UI never in the bytes); the
   4B VL lane was RIGHT about every real capture. Ground-truth
   pixels with local decoders (screen_triage / ffmpeg signalstats).
+
+## M17c — the zero-touch ladder closed; the planner plays live (2026-08-31)
+
+Four live games this session, each teaching one layer. The full chain
+now runs with ONE human input total (the Steam login, once):
+
+1. **Zero-touch game creation works.** At the main menu the tuner
+   exposes 31 front-end Lua contexts (Main State has `_G`; the UI
+   contexts are sandboxed — bare-name probes only). `StagingRoom`
+   carries the full hosting API: `Network.HostGame` /
+   `GameConfiguration` / `MapConfiguration` / `PlayerConfigurations`
+   plus the engine's own `Automation` table. ORDER MATTERS:
+   configure at the menu FIRST (values stick through hosting), then
+   `Network.HostGame()` — in SINGLEPLAYER mode it AUTO-LAUNCHES; no
+   LaunchGame phase exists. Config gates on read-back: duel map
+   (hash 388991850), 2 majors, standard speed.
+2. **Civ VI type hashes are `~crc32(s)`** (verified against live
+   GameInfo.GameSpeeds rows AND the MapConfiguration read-back).
+   Never hand-type an enum value again: compute it.
+3. **The leader intro is the one click.** VL locates the BEGIN GAME
+   button WRONG ("bottom center"; the teal banner is at x≈0.28) —
+   locate UI by pixel color. `x_click.py` does synthetic X input
+   via ctypes XTest (no xdotool on this host); the XWarpPointer
+   trap: dest_w=None is a RELATIVE move — pass the root window.
+4. **Game one (blind)**: `get_visible_map` was the M14d empty-set
+   stub — zero tiles → every M15d sight-bounded compiler produced
+   nothing → 2 commands in 15 turns → defeat by neglect. The map
+   was the only missing piece (the act surface was already live).
+5. **The engine's fog API is NOT exposed**: plot
+   IsRevealed/IsVisible/IsExplored nil, Player:GetVisibility
+   errors, nothing enumerable on Map/Game. Derived visibility
+   instead: hex radius 2 around own units / 3 around own cities,
+   targeted terrain read for exactly those coords (leak-safe by
+   construction), remembered tiles accumulated adapter-side (the
+   M11 no-expiry epistemics).
+6. **The frame seam**: the engine's axial frame is arbitrary (the
+   duel start sits at (10,4), outside the radius-5 sim map) — the
+   belief RE-CENTERS on its first own anchor; the executor
+   translates move dests back at the wire boundary; a frame
+   already inside the map keeps (0,0) so every sim pin is
+   byte-identical.
+7. **Game four (seeing)**: the planner FOUNDED ITS CAPITAL (Delhi),
+   ran production every turn (MONUMENT → WARRIOR), set research,
+   drove 15 clean turns — 0 rejections, 0 violations — until the
+   turn-17 transition stalled on the research-chooser blocker (the
+   driver's one UNHANDLED case; policies/civics blockers DO
+   auto-resolve). The bounded-abort discipline worked exactly as
+   designed: timeout, clean exit, no hang.
+8. **Replay**: the 274-event log replayed model-free without
+   unknown-record errors; the aborted run never wrote a MATCH_END
+   hash, so hash parity is pending a run that reaches its natural
+   end (the M14 P2-6 envelope work).
+
+Tools landed: `scripts/frontend_probe.py` (state enumeration),
+`scripts/live_newgame.py` (host/config/launch + the hash identity),
+`scripts/x_click.py` (synthetic input), `scripts/live_zero_touch.py`
+(the whole ladder, one command). Follow-up owed: the
+ENDTURN_BLOCKING_RESEARCH auto-resolution; MATCH_END hash parity on
+a full-length live run.
