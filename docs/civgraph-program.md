@@ -289,3 +289,58 @@ A turn is a partially ordered set of actions, most of which commute.
   autonomy assessment enumerated — M17.
 - Learned value/dynamics models, expert iteration, league training, human
   evaluation, and every world-class gate past reliability — M18+.
+
+## 7. Experiment record
+
+### 2026-08-31 — Experiment-3 EXECUTED: H3 rejected at sim scale; MCGS dropped from M16
+
+`scripts/planner_experiment.py` (paired-seed harness, both sides per
+method per seed, scripted baselines) at budgets 8/16/32 — 360 matches
+total, all 40 turns, **0 watchdog violations and 0 referee rejections
+across every planner match**, dirty pairs 0. Paired analysis =
+exact sign test over same-seed/same-side pairs where the search method
+is the only difference (`scripts/planner_analyze.py`; artifacts under
+`runs/exp3/b{8,16,32}/`, git-ignored like all runs — this section and
+the scripts are the durable record).
+
+| budget | mcgs/mcts/ties | mean / median diff | one-sided p (H3) | verdict |
+|---|---|---|---|---|
+| 8 | 13/27/0 | −134 / −74 | 0.008 (**mcts**) | MCGS harmful |
+| 16 | 12/28/0 | −161 / −92 | 0.003 (**mcts**) | MCGS harmful |
+| 32 | 21/19/0 | −28 / +12 | 0.44 | null-uncertain |
+
+Both low-budget reversals survive a 3-way Bonferroni; the medians show
+they are not outlier-driven. Dominance context: both planner arms
+average +495..+522 vs the turtler where the expansionist baseline is
+−9 — **the option/DAG/belief substrate is the value carrier, not the
+search-graph layer**.
+
+Mechanism (independent glm-5.3-flash audit, claims re-verified against
+the raw data): depth-2 state-keyed node sharing averages value
+estimates across different determinized WORLDS — biased estimates at
+low visit counts, diluting as budget grows. The audit pre-registered
+this toxicity before the b16 leg contradicted the b32 null. Supporting
+evidence, all three legs: mcgs-LOST pairs carry more transposition
+merges than mcgs-won pairs (69v50, 64v57, 48v39); harm is monotone in
+budget (worst at 8, gone by 32); at b8 the harm is side-concentrated
+(mcgs 12/20 as player 0 but 1/19 as player 1). Secondary verified
+findings: MCGS shows a lower-variance profile (b32: wins avg +116 vs
+losses −187, blowout tails 2v4, SD 118v209 — shrunken estimates,
+conservative play); the methods diverge early (median decision ~2.5 of
+14–18 per match), so post-divergence pairs are near-independent
+trajectories and paired differentials carry chaos noise.
+
+Audit corrections adopted: the b32 "null" is restated as
+null-uncertain (≈10× underpowered for any plausible effect; the
+turtler is a saturated opponent that cannot discriminate search
+quality); the earlier "merges did not correlate with wins" reading is
+withdrawn (it weakly correlates with losing).
+
+**Gate decision for M16**: the graph-search layer is NOT carried
+forward. Sim-scale default = MCTS over options (or search-free option
+compilation). Graph search may return only with: search depth ≥ 3;
+per-world transposition keys (merging never crosses determinizations —
+which at depth 2 degenerates to MCTS, i.e. this finding); a
+discriminative opponent (direct planner-vs-planner self-play arm — the
+turtler saturates); per-decision merge-dispersion instrumentation; and
+budgets ≥ 128. The LLM-proposer lane (M16) proceeds on the substrate.
