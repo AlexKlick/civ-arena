@@ -11,15 +11,16 @@ search trace accumulates on ``self.trace`` as canonical-ready docs
 (integers only); the experiment harness persists it as the
 ``runs/<id>/planner/`` side artifact — the arena log never carries it.
 
-DECLARED LIMITATION — amnesia on resume: checkpoints persist only the
-runtime rng (the coordinator contract), so a resumed planner starts with
-an empty belief, ``active=None``, and an empty trace. Fog memory
-(last-seen foreign entities, remembered-tile ownership) rebuilds only
-from post-resume observations, and the resumed trajectory may legally
-diverge from the uninterrupted one — the same class as the LLM runtime,
-whose conversation is also not restored. A from-log belief rebuild
-(the ``observed``-digest pattern) is M16 work; model-free replay is
-unaffected (replay never runs the planner).
+M16a — resume without amnesia: the runtime journals each completed
+turn's projected observations plus its option state to a side artifact
+(``PlannerJournal``, injected through the coordinator's service binder)
+and rebuilds the belief at the first post-resume turn by replaying the
+journal through the SAME ``observe_*`` methods — rebuilt == live by
+construction. A resumed planner is therefore bit-deterministic with its
+uninterrupted twin (test-pinned via final_state_hash); the journal is
+advisory only (see planner/journal.py for the trust model). The
+per-decision search trace stays in-memory — it is an analysis artifact,
+not gameplay state, and the harness persists it separately.
 """
 
 from __future__ import annotations
@@ -52,14 +53,44 @@ class PlannerRuntime:
         self.active: str | None = None
         self.chosen_at_turn = 0
         self.trace: list[dict[str, Any]] = []
+        self.journal: Any = None  # PlannerJournal, injected via bind_services
+        self._restored = False
+
+    def bind_services(self, *, diary: Any = None, strategy: Any = None,
+                      journal: Any = None) -> None:
+        """Coordinator service hook (M16a): accept the seat's journal."""
+        if journal is not None:
+            self.journal = journal
+
+    def _restore_from_journal(self, turn: int) -> None:
+        """First take_turn after (re)construction: replay strictly-earlier
+        journal entries through the observe_* seam, restoring fog memory
+        and the option state exactly as the pre-crash runtime held it."""
+        if self._restored or self.journal is None:
+            self._restored = True
+            return
+        self._restored = True
+        docs = self.journal.replay_upto(turn)
+        for doc in docs:
+            self.belief.observe_overview(doc["overview"])
+            self.belief.observe_units(doc["units"], doc["turn"])
+            self.belief.observe_cities(doc["cities"], doc["turn"])
+            self.belief.observe_map(doc["map"])
+        if docs:
+            self.active = docs[-1]["active"]
+            self.chosen_at_turn = docs[-1]["chosen_at_turn"]
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()
-        self.belief.observe_overview(overview)
         turn = overview["turn"]
-        self.belief.observe_units(await facade.get_units(), turn)
-        self.belief.observe_cities(await facade.get_cities(), turn)
-        self.belief.observe_map(await facade.get_visible_map())
+        self._restore_from_journal(turn)
+        units_doc = await facade.get_units()
+        cities_doc = await facade.get_cities()
+        map_doc = await facade.get_visible_map()
+        self.belief.observe_overview(overview)
+        self.belief.observe_units(units_doc, turn)
+        self.belief.observe_cities(cities_doc, turn)
+        self.belief.observe_map(map_doc)
 
         bstate = SimState.from_doc(build_state_doc(self.belief, seed=turn))
         needs_choice = (
@@ -78,3 +109,11 @@ class PlannerRuntime:
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
         await execute_plan(facade, self.belief, self.player_id, plan, seed=turn)
         await facade.end_turn()
+        if self.journal is not None:
+            # appended only after a COMPLETED turn: a crash mid-turn leaves
+            # no entry, so the journal never claims a turn that did not end
+            self.journal.append(turn, {
+                "turn": turn, "overview": overview, "units": units_doc,
+                "cities": cities_doc, "map": map_doc,
+                "active": self.active, "chosen_at_turn": self.chosen_at_turn,
+            })

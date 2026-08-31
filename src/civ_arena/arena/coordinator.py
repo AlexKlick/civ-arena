@@ -54,11 +54,29 @@ def _service_binder(rt: Any) -> Any:
     return bind
 
 
-def _wire_services(runtimes: dict[int, Any], diary: Any, strategy: Any) -> None:
-    for rt in runtimes.values():
+def _wire_services(runtimes: dict[int, Any], diary: Any, strategy: Any,
+                   journals: dict[int, Any] | None = None) -> None:
+    """Inject arena-owned services into every opted-in runtime. The core
+    diary/strategy pair is validated EXACTLY as before (an incompatible
+    runtime binds nothing); a journal is passed ONLY to runtimes whose
+    binder also accepts the optional ``journal`` kwarg (same exact-
+    signature discipline, probed separately so the M16a planner seam
+    cannot change behavior for any pre-existing runtime)."""
+    journals = journals or {}
+    for pid, rt in runtimes.items():
         bind = _service_binder(rt)
-        if bind is not None:
+        if bind is None:
+            continue
+        journal = journals.get(pid)
+        if journal is None:
             bind(diary=diary, strategy=strategy)
+            continue
+        try:
+            inspect.signature(bind).bind(diary=None, strategy=None, journal=None)
+        except (TypeError, ValueError):
+            bind(diary=diary, strategy=strategy)  # no journal opt-in
+        else:
+            bind(diary=diary, strategy=strategy, journal=journal)
 
 
 class Arena:
@@ -121,8 +139,16 @@ class Arena:
                 self.referee, agent_spec.player_id, agent_spec.agent_id)
         # Arena-owned services reach EVERY opted-in runtime, injected ones
         # included: a runtime holding its own store reference would read
-        # empty memory after resume.
-        _wire_services(self.runtimes, self.diary, self.strategy)
+        # empty memory after resume. Planner-policy seats also get their
+        # belief journal (M16a) — a side artifact under runs/<id>/planner/.
+        from civ_arena.planner.journal import PlannerJournal
+
+        planner_dir = self.run_dir / "planner"
+        _journals = {
+            a.player_id: PlannerJournal(planner_dir / f"p{a.player_id}-journal.jsonl")
+            for a in spec.agents if a.policy == "planner"
+        }
+        _wire_services(self.runtimes, self.diary, self.strategy, _journals)
         self.checkpoints = CheckpointManager(
             self.run_dir / "checkpoints", every_n_turns=spec.checkpoint_every)
 
