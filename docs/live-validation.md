@@ -526,3 +526,41 @@ Tools landed: `scripts/frontend_probe.py` (state enumeration),
 (the whole ladder, one command). Follow-up owed: the
 ENDTURN_BLOCKING_RESEARCH auto-resolution; MATCH_END hash parity on
 a full-length live run.
+
+## M17d — the research blocker, resolved live; the evening's boot pathology (2026-08-31/09-01)
+
+**The blocker fix is live-proven.** Game seven (duel, 1024x768): the
+planner founded Aachen, ran production for ten clean turns, and at
+turn 11 — the exact turn game four froze — the log reads
+`housekeep[11]: research empty -> STUDY MINING: accepted`. The engine
+cycle continued. That run then stopped on a FALSE anomaly: the digest
+moved with zero AUTHORIZED mutations because housekeeping mutations
+are acknowledged, not allowed. Fixed (6cd820c): driver-commanded
+housekeeping mutations explain their own digest movement; the Codex
+P2-1 check stays strict for genuinely undeclared drift. Rehearsal
+clean, tests green.
+
+Design note pinned by the planner rehearsal: research housekeeping is
+REACTIVE (blocker-listed), never proactive — the blocker notification
+lists at lease start (unlike production), and pre-filling would starve
+the driven policy of its own research choice.
+
+**The evening's boot pathology (games five/six/eight/nine, unresolved
+— host-level):** starting ~19:30 every boot degrades the same way —
+the game binds its listener on 4319 only (4318 binds late or never),
+handshakes return an EMPTY state list through 20-60 min of 60-150%
+CPU, and map loads crawl (afternoon games 2-4: 4318, 2-4 min loads).
+Correlations: the AppOptions rewrite at 19:36 (RenderWidth jumped to
+2944x1840 — now pinned back to 1024x768), and my early synthetic
+clicks during the XWarpPointer bug may have dragged the window
+full-size, switching render paths. A graceful Steam restart did NOT
+clear it. nvidia-smi cannot see the game (pressure-vessel hides its
+PID), so software-render fallback is suspected but unproven. NEXT
+STEP: a full host reboot, then `scripts/live_zero_touch.py
+--kill-first --smoke` and a 30-turn dispatch — the M17d code needs
+nothing further.
+
+Also learned: the leader intro's BEGIN GAME sits at DIFFERENT
+fractions per boot (0.284/0.912 games 2-4; ~0.27/0.95 game eight) —
+locate it per-boot (VL on the window crop answers reliably), and 4318
+binds only at the in-game transition, not at boot.
