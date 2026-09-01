@@ -50,6 +50,7 @@ def lua_int(v: int) -> str:
 
 
 MAPSIZE_DUEL = civ_hash("MAPSIZE_DUEL")
+MAPSIZE_TINY = civ_hash("MAPSIZE_TINY")
 GAMESPEED_STANDARD = civ_hash("GAMESPEED_STANDARD")
 
 # -- shared plumbing -----------------------------------------------------
@@ -124,8 +125,12 @@ print("{SENTINEL}")
 
 # Read-back verification gates the launch: every value set here must read
 # back exactly, or the operator (not the script) decides what to do.
+# Map size is TINY, not DUEL: on duel-with-2-majors the engine AI's
+# settler runs out of settle spots mid-game and path-spins forever
+# (AStar log: UNIT_SETTLER -> -9999,-9999 at turn ~15, 2026-09-01) —
+# one size class of headroom keeps the opponent's expansion alive.
 CONFIG_LUA = f"""
-MapConfiguration.SetMapSize({lua_int(MAPSIZE_DUEL)})
+MapConfiguration.SetMapSize({lua_int(MAPSIZE_TINY)})
 MapConfiguration.SetMinMajorPlayers(2)
 MapConfiguration.SetMaxMajorPlayers(2)
 GameConfiguration.SetParticipatingPlayerCount(2)

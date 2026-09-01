@@ -346,8 +346,22 @@ async def phase_dispatch(
             adapter.expect_turn(turn)
             lease = driver.referee.grant_lease(
                 agent.player_id, agent.agent_id, turn)
-            await driver.referee.begin_turn(
-                agent.player_id, agent.agent_id, turn)
+            try:
+                await driver.referee.begin_turn(
+                    agent.player_id, agent.agent_id, turn)
+            except RuntimeError as e:
+                if "lease to engage" not in str(e):
+                    raise
+                # A front-end modal (advisor tip and friends) freezes the
+                # engine's between-turn processing — the lease wait times
+                # out. Dismiss any popup and retry ONCE on the SAME lease
+                # (the phase never opened). The failed wait's polls reset
+                # the turn mirror to the engine's stalled turn, so the
+                # expectation is re-armed before the retry.
+                await _dismiss_popups(turn)
+                adapter.expect_turn(turn)
+                await driver.referee.begin_turn(
+                    agent.player_id, agent.agent_id, turn)
             digest_open = await adapter.refresh_digest()
             await _resolve_blockers(adapter, agent.player_id, turn)
             # Housekeeping mutations are DRIVER-commanded, not
@@ -604,6 +618,27 @@ async def _ensure_research(adapter: FireTunerAdapter, player_id: int,
         idempotency_key=f"housekeep-research-{turn}",
         lease_id="housekeeping"))
     print(f"housekeep[{turn}]: research empty -> STUDY {pick}: {res.status}")
+
+
+async def _dismiss_popups(turn: int) -> None:
+    """Dismiss a front-end MODAL that froze the engine's between-turn
+    processing (2026-09-01 live game, turn 16: an advisor popup held the
+    cycle after a clean turn 15 — the lease then never engaged). TWO
+    Escapes, spaced: the first closes a modal if one is up; if none was,
+    it OPENS the game menu, which the second closes. Bounded and
+    self-undoing — only invoked from the already-stalled path, where the
+    alternative is the run aborting."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+    repo = _Path(__file__).resolve().parents[3]
+    for _ in range(2):
+        subprocess.run(
+            [_sys.executable, str(repo / "scripts" / "x_click.py"),
+             "--key", "Escape"],
+            capture_output=True, timeout=15)
+        await asyncio.sleep(2.0)
+    print(f"modal-sweep[{turn}]: popup dismissal sent (Escape x2)")
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,

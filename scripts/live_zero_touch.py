@@ -185,7 +185,7 @@ async def main(opts) -> int:
     if cfg.returncode != 0:
         return 3
     if not all(k in cfg.stdout for k in
-               ("MapSize|388991850", "MinMajor|2", "Participating|2")):
+               ("MapSize|-601637951", "MinMajor|2", "Participating|2")):
         print("[config] read-back mismatch — refusing to host")
         return 3
     host = run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),

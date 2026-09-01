@@ -54,10 +54,11 @@ def test_lua_int_signedness():
 def test_config_lua_carries_verified_setup():
     lng = _load("live_newgame")
     lua = lng.CONFIG_LUA
-    # duel map (live-verified hash), two majors, standard speed — every
-    # setter is followed by a read-back print so the operator gates the
-    # launch on the engine confirming the value
-    assert f"MapConfiguration.SetMapSize(388991850)" in lua
+    # TINY map (duel proved too cramped: the engine AI's settler
+    # path-spins without settle spots), two majors, standard speed —
+    # every setter is followed by a read-back print so the operator
+    # gates the launch on the engine confirming the value
+    assert f"MapConfiguration.SetMapSize(-601637951)" in lua
     assert "MapConfiguration.SetMinMajorPlayers(2)" in lua
     assert "MapConfiguration.SetMaxMajorPlayers(2)" in lua
     assert "GameConfiguration.SetParticipatingPlayerCount(2)" in lua
