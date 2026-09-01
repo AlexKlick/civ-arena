@@ -352,13 +352,14 @@ async def phase_dispatch(
             except RuntimeError as e:
                 if "lease to engage" not in str(e):
                     raise
-                # A front-end modal (advisor tip and friends) freezes the
-                # engine's between-turn processing — the lease wait times
-                # out. Dismiss any popup and retry ONCE on the SAME lease
-                # (the phase never opened). The failed wait's polls reset
-                # the turn mirror to the engine's stalled turn, so the
-                # expectation is re-armed before the retry.
-                await _dismiss_popups(turn)
+                # A stalled lease engage has two live shapes: the attach
+                # case (our parked human turn was never ended — recover by
+                # ending it) and a front-end modal (advisor tips freeze the
+                # between-turn processing — recover by dismissal). Retry
+                # ONCE on the SAME lease (the phase never opened); the
+                # failed wait's polls reset the turn mirror, so the
+                # expectation is re-armed first.
+                await _recover_stall(adapter, agent.player_id, turn)
                 adapter.expect_turn(turn)
                 await driver.referee.begin_turn(
                     agent.player_id, agent.agent_id, turn)
@@ -639,6 +640,26 @@ async def _dismiss_popups(turn: int) -> None:
             capture_output=True, timeout=15)
         await asyncio.sleep(2.0)
     print(f"modal-sweep[{turn}]: popup dismissal sent (Escape x2)")
+
+
+async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
+                         turn: int) -> None:
+    """Stall recovery on a lease-engage timeout, by SHAPE (2026-09-01):
+    - ATTACH case (our turn ACTIVE, hook past, no puppet — the settle
+      window can misread an imminent hook and skip the bootstrap): end
+      the parked human turn ourselves, exactly what --bootstrap-end-turn
+      does; the engine then processes and the next hook engages.
+    - Otherwise assume a front-end modal (advisor tips freeze the
+      between-turn processing): dismiss with Escape x2."""
+    status = await adapter.poll_status()
+    if (status.get("PUPPET_ACTIVE") is not True
+            and status.get("TURN_ACTIVE") is True
+            and int(status.get("TURN", -1)) == turn - 1):
+        print(f"recover[{turn}]: attach case — ending parked turn "
+              f"{status['TURN']}")
+        await adapter.write_raw(lua_translator.request_end_turn(player_id))
+        return
+    await _dismiss_popups(turn)
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,

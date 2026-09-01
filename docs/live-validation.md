@@ -564,3 +564,36 @@ Also learned: the leader intro's BEGIN GAME sits at DIFFERENT
 fractions per boot (0.284/0.912 games 2-4; ~0.27/0.95 game eight) —
 locate it per-boot (VL on the window crop answers reliably), and 4318
 binds only at the in-game transition, not at boot.
+
+## M17e — the long-game killers: two fixed and live-proven, one is the engine's own (2026-09-01)
+
+**No reboot was needed.** The evening pathology was the GAMING SESSION's
+long-lived X server (GL/driver state). Killing the xinit tree made the
+session supervisor respawn a fresh one in seconds — after which the
+game bound 4318, the intro banner sat at its classic position, and the
+map loaded in 25 s (vs 20-60 min). The ladder is healthy again.
+
+**The full-length attempt surfaced three long-game killers:**
+
+1. **Front-end modals** (advisor tips chain after the policy/civic
+   resolutions) freeze the between-turn processing — the lease never
+   engages. FIXED: `_dismiss_popups` (Escape x2 — the second undoes the
+   menu a blind first Escape opens; only invoked from the already-stalled
+   path) + a single begin_turn retry on the same lease with the turn
+   mirror re-armed. **Live-proven: `modal-sweep[16]` rescued turn 16 of
+   the final run.**
+2. **The attach-case race** (the settle window misreads an imminent
+   hook; the parked human turn is never ended). FIXED:
+   `_recover_stall` ends the parked turn ourselves when the stall shape
+   says attach. **Live-proven: `recover[2]` rescued turn 2.**
+3. **The engine's own AI hangs at ~turn 15-16** — Player 1's turn stays
+   active indefinitely (35+ min at 150% CPU) with NO notification, NO
+   dialog, menus cleared, pathing log stale; map size did not help
+   (duel AND tiny both brick). NOT reachable from the wire. This is the
+   one remaining blocker for a full-length 1v1 vs the engine AI.
+
+**Recommended path past #3: a hotseat 1v1** — two HUMAN seats, both
+driven by arena agents (planner vs turtler/planner). The engine AI is
+out of the game entirely, the puppet/lease machinery already exists
+per-player, and both seats already speak the arena's tool surface.
+That is the shape of a true full-length autonomous 1v1.
