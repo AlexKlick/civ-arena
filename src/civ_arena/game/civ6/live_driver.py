@@ -350,6 +350,15 @@ async def phase_dispatch(
                 agent.player_id, agent.agent_id, turn)
             digest_open = await adapter.refresh_digest()
             await _resolve_blockers(adapter, agent.player_id, turn)
+            # Housekeeping mutations are DRIVER-commanded, not
+            # agent-commanded — they must not read as uncommanded drift in
+            # the session's watchdog window. The civic/policy resolutions
+            # dodge this only because their attrs sit outside the
+            # recorder's coverage; research IS covered (player snapshot
+            # parity), so acknowledge explicitly. The wire transcript
+            # remains the record — same trust class as the resolutions.
+            driver.referee._ls.acknowledged.extend(  # noqa: SLF001
+                adapter.drain_mutations())
             allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
             # the coordinator's turn-start hook (LLM runtimes REQUIRE it —
             # the authoritative turn number for their prompt; the turtler's
@@ -412,6 +421,13 @@ async def phase_dispatch(
 # the turtler doctrine's own build preference (agents/scripted.py)
 _BUILD_PREFERENCE = ["MONUMENT", "WALLS", "WARRIOR", "GRANARY", "SETTLER",
                      "SCOUT", "SLINGER", "BARRACKS"]
+
+# research housekeeping preference: era-1 techs the wire actually offers,
+# then the sorted fallback — a deterministic pick that NEVER leaves
+# research empty while techs remain (an empty slot is the freeze)
+_TECH_PREFERENCE = ["MINING", "POTTERY", "ANIMAL_HUSBANDRY", "MASONRY",
+                    "BRONZE_WORKING", "ARCHERY", "WRITING", "IRRIGATION",
+                    "SAILING", "ASTROLOGY", "CATTLE"]
 
 
 def _refuse_rerun(events: Path) -> None:
@@ -507,6 +523,11 @@ async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
             # an empty queue (the agent may have missed one; the blocker
             # fires at turn END, when resolution freezes the cycle)
             await _fill_empty_queues(adapter, player_id, turn)
+        elif "RESEARCH" in b:
+            # completed research with no follow-up parks 'Choose a
+            # Technology' on the local player — game four froze the whole
+            # engine cycle here at the turn-17 transition
+            await _ensure_research(adapter, player_id, turn)
         else:
             # unknown blocker: report it loudly — the run must not freeze
             # silently on something this housekeeping does not cover
@@ -517,6 +538,10 @@ async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
     # resolve it (glm-g1 turn 12's freeze); pre-filling makes the class
     # unreachable
     await _fill_empty_queues(adapter, player_id, turn)
+    # Research is deliberately NOT pre-filled: the blocker notification
+    # DOES list at lease start (game four, turn 11 — unlike production),
+    # so the reactive branch above resolves it in time, and pre-filling
+    # would starve the driven policy of its own research choice.
 
 
 async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
@@ -546,6 +571,34 @@ async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
         queue = city.get("production_queue")
         print(f"housekeep[{turn}]: {city['name']} queue={queue!r} "
               f"-> BUILD {pick}: {res.status}")
+
+
+async def _ensure_research(adapter: FireTunerAdapter, player_id: int,
+                           turn: int) -> None:
+    """Set research when the player's slot reads empty. A completed tech
+    mid-turn with no follow-up parks ENDTURN_BLOCKING_RESEARCH on the
+    cycle — game four's turn-17 freeze (the one blocker class this
+    housekeeping did not cover). Deterministic pick: the preference
+    order, else the alphabetically-first available; NEVER leaves the
+    slot empty while any tech is offerable."""
+    overview = await adapter.observe(ObserveRequest(
+        kind=ObserveKind.OVERVIEW, player_id=player_id))
+    me = overview.get("players", {}).get(str(player_id), {})
+    if me.get("researching"):
+        return
+    options = await adapter.observe(ObserveRequest(
+        kind=ObserveKind.AVAILABLE_RESEARCH, player_id=player_id))
+    by_id = {i["tech_id"] for i in options}
+    if not by_id:
+        return  # nothing offerable: the engine cannot be blocking on this
+    pick = next((t for t in _TECH_PREFERENCE if t in by_id), sorted(by_id)[0])
+    res = await adapter.act(ActionCommand(
+        tool="set_research",
+        args={"tech_id": pick},
+        player_id=player_id,
+        idempotency_key=f"housekeep-research-{turn}",
+        lease_id="housekeeping"))
+    print(f"housekeep[{turn}]: research empty -> STUDY {pick}: {res.status}")
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,

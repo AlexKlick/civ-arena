@@ -295,6 +295,11 @@ class FakeMod:
             if p["researching"] == tech:
                 return [f"ACT|set_research|ERR|ALREADY|{tech}", "---END---"]
             p["researching"] = tech
+            # the engine drops the 'Choose a Technology' notification once
+            # research is set (M17d: the research-blocker housekeeping)
+            self.pending_blockers = [
+                b for b in self.pending_blockers
+                if not b.endswith("ENDTURN_BLOCKING_RESEARCH")]
             return [f"ACT|set_research|OK|{tech}", "---END---"]
         if tool == "set_city_production":
             cid = dec(num(r"CityManager\.GetCity\(me, (\d+)\)"))

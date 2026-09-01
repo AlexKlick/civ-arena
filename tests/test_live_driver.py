@@ -21,7 +21,11 @@ from civ_arena.config import load_config
 from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
-from civ_arena.game.civ6.response_parser import parse_digest, parse_ledger_lines
+from civ_arena.game.civ6.response_parser import (
+    _split_lines,
+    parse_digest,
+    parse_ledger_lines,
+)
 from civ_arena.session.tools import SessionCtx
 
 REPO = Path(__file__).resolve().parents[1]
@@ -728,6 +732,49 @@ def test_dispatch_targeting_rules_and_blockers():
     assert live_driver._last_deact_turn(
         ["16|HOOK_DEACT|0", "16|HOOK_ENTER|0"]) == 16
     assert live_driver._last_deact_turn([]) is None
+
+
+async def test_ensure_research_resolves_the_research_blocker():
+    """M17d: game four's turn-17 freeze — completed research with no
+    follow-up parks ENDTURN_BLOCKING_RESEARCH on the cycle. The
+    housekeeping sets the preference-first available tech, and the wire
+    clears the pending blocker with it (never leaves the slot empty
+    while techs remain)."""
+    from civ_arena.game.civ6 import live_driver
+
+    adapter, server = await _adapter_with()
+    try:
+        await adapter.setup({})
+        await adapter.begin_phase(0, 1)
+        mod = server.mod
+        assert mod is not None
+        mod.players[0]["researching"] = ""
+        mod.pending_blockers = ["BLOCKING|ENDTURN_BLOCKING_RESEARCH"]
+
+        rows = _split_lines(
+            await adapter.write_raw(lua_translator.blocker_query()))
+        blockers = [r for r in rows if r.startswith("BLOCKING|")]
+        assert blockers == ["BLOCKING|ENDTURN_BLOCKING_RESEARCH"]
+
+        await live_driver._ensure_research(adapter, 0, turn=17)
+        # the preference order's first offerable tech landed
+        assert mod.players[0]["researching"] == "MINING"
+        assert mod.pending_blockers == [], "the blocker cleared with it"
+
+        # a filled slot is left alone (no redundant set_research)
+        again = await adapter.observe(ObserveRequest(
+            kind=ObserveKind.OVERVIEW, player_id=0))
+        assert again["players"]["0"]["researching"]
+        await live_driver._ensure_research(adapter, 0, turn=18)
+        assert mod.players[0]["researching"] == "MINING"
+
+        # exhausted preference falls back to sorted-first, never empty
+        mod.players[0]["researching"] = ""
+        mod.TECHS = {"ZEBRA_HUSBANDRY": 30}  # type: ignore[assignment]
+        await live_driver._ensure_research(adapter, 0, turn=19)
+        assert mod.players[0]["researching"] == "ZEBRA_HUSBANDRY"
+    finally:
+        await server.stop()
 
 
 def test_llm_client_string_content_normalizes():
