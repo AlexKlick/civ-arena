@@ -30,7 +30,7 @@ STEAM_URI = "steam://rungameid/289070"
 # Timing lessons from the 2026-08-31 runs, all live-learned:
 COLD_BOOT_S = 600        # first launch after Steam start: ~8-10 min
 WARM_BOOT_S = 420        # relaunch: states register in ~4-7 min
-INTRO_SETTLE_S = 150     # host -> BEGIN GAME clickable
+INTRO_SETTLE_S = 300     # host -> BEGIN GAME clickable (varies 80-300s)
 MAP_LOAD_S = 300         # BEGIN GAME -> GameCore_Tuner
 
 
@@ -64,7 +64,19 @@ def launch() -> None:
 
 
 def port_up() -> bool:
-    return ":4318" in run(["ss", "-tln"]).stdout
+    """The tuner binds 4318 unless it lingers from a dying instance, in
+    which case the game silently takes 4319 (live-learned game five).
+    Accept either; the actual port is re-resolved before dispatch."""
+    out = run(["ss", "-tln"]).stdout
+    return ":4318" in out or ":4319" in out
+
+
+def tuner_port() -> int:
+    out = run(["ss", "-tln"]).stdout
+    for port in (4318, 4319):
+        if f":{port}" in out:
+            return port
+    return 4318
 
 
 def civ6_window_geometry() -> tuple[int, int, int, int]:
@@ -120,10 +132,11 @@ def click(fx: float, fy: float) -> None:
          "--at", f"{fx:.4f},{fy:.4f}"])
 
 
-async def tuner_states() -> list[str]:
+async def tuner_states(port: int | None = None) -> list[str]:
     from civ_arena.game.civ6.vendor import tuner_client
     try:
-        r, w = await tuner_client.connect("127.0.0.1", 4318, timeout=4)
+        r, w = await tuner_client.connect("127.0.0.1",
+                                          port or tuner_port(), timeout=4)
     except Exception:
         return []
     try:
@@ -206,7 +219,8 @@ async def main(opts) -> int:
         return 6
     if opts.smoke:
         smoke = run([sys.executable,
-                     str(REPO / "scripts" / "firetuner_smoke.py"), "--live"])
+                     str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
+                     "--port", str(tuner_port())])
         print("[smoke]", smoke.stdout.strip().splitlines()[-1] if
               smoke.stdout.strip() else smoke.stderr.strip())
         if smoke.returncode != 0:

@@ -357,8 +357,8 @@ async def phase_dispatch(
             # recorder's coverage; research IS covered (player snapshot
             # parity), so acknowledge explicitly. The wire transcript
             # remains the record — same trust class as the resolutions.
-            driver.referee._ls.acknowledged.extend(  # noqa: SLF001
-                adapter.drain_mutations())
+            housekept = adapter.drain_mutations()
+            driver.referee._ls.acknowledged.extend(housekept)  # noqa: SLF001
             allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
             # the coordinator's turn-start hook (LLM runtimes REQUIRE it —
             # the authoritative turn number for their prompt; the turtler's
@@ -383,8 +383,13 @@ async def phase_dispatch(
             # integrity (Codex P2-1, one-directional): the digest moving
             # with ZERO authorized mutations is undeclared drift. The
             # inverse is LEGAL — receipts with an unchanged net hash (a
-            # move there-and-back) — so it must not flag.
-            row["unexpected"] = row["digest_changed"] and not row["mutated"]
+            # move there-and-back) — so it must not flag. Driver-commanded
+            # housekeeping mutations (acknowledged, not allowed) explain
+            # their own digest movement — research set at lease start
+            # moved the digest with zero AGENT mutations (game seven,
+            # turn 11 — a legal stop turned into a false anomaly).
+            row["unexpected"] = (row["digest_changed"]
+                                 and not (row["mutated"] or housekept))
             per_turn.append(row)
             last_driven = turn
             print(f"dispatch turn {turn}: allowed={row['allowed_mutations']} "
