@@ -463,3 +463,52 @@ claims. Indexes: runs/labels-exp3-b{8,16,32}.json, runs/labels-llm.json.
 Gates: 461 → 467 passed (+1 skip), the 2 pre-existing failures
 throughout; ruff no new errors. The VERDICT layer is no longer empty:
 every recorded decision now carries its outcome.
+
+### 2026-09-02 — M19b BUILT + exp-M19b: retrieval-as-evidence REJECTED in this form (292ea92 → 885d281)
+
+The case base is real and wired end-to-end: signature = projection of
+the search abstract doc (turn/development dropped), computed from the
+SAME determinized world the trace root_key comes from (pinned by
+construction — abstract_key is NOT seed-invariant); mined from the
+labeled corpus (configs/casebase-m19b.json, 2,849 signatures / 4,693
+takens from 240 runs, index-provenance-verified); compiled legal-now
+and merged after any live proposer prior; rides the trace, never the
+event log; resume binds the artifact BYTES (a swap degrades to unprimed
++ on-disk flag); both live dispatch paths armed. Codex round 1: NO-GO
+5 P1 + 1 P2 (live wiring, miner self-clobber, index provenance,
+impossible stats, resume digest, float false-tie) — all verified, all
+fixed + pinned (885d281).
+
+Two experiment legs, paired 30 seeds × 2 sides, budget 16 and 4, fresh
+seed block 200_003+i*7919 (never overlaps the mining corpus), 0 dirty:
+
+| leg | result | reading |
+|---|---|---|
+| b16 (pre-registered) | 60/60 ties, identical differentials | STRUCTURAL NULL: every decision carries 5–8 candidates ≥ budget covers all — the prior's ordering is inert when untried-first explores everything (the M16b activation condition, confirmed) |
+| b4 (exploratory) | base wins 6–0 (54 ties), mean paired diff −183, p(H: case>base)=1.0; all 6 losses as player 1 | H REJECTED where the mechanism engages: mean-differential ranking mined from strong-game corpora is evidence about CLOSING games, not about allocating scarce exploration |
+
+Signature recall was sparse in both legs (74/876 and 70/850 decisions,
+~8%) — exact-match retrieval over fine-grained signatures generalizes
+poorly to unseen worlds. VERDICT: retrieval-as-evidence in this exact
+form (exact signature, mean-diff rank, turtler-mined) does not help and
+at scarce budget actively hurts. The machinery stays (legal-now prior
+seam, provenance-verified artifact, resume binding); the follow-ups it
+points to: coarsened/k-NN signatures for recall, league-mined
+discriminative corpora (M20a), prior blending instead of hard ordering.
+Side note: the harm is side-concentrated as player 1 — the same
+asymmetry the b8 MCGS leg showed.
+
+Gate: 482 passed + 1 skip, 2 pre-existing failures (/tmp/m19b-fix-gate.log).
+
+### 2026-09-02 — M19c BUILT: pattern mining over the labeled corpus (7bdb167)
+
+planner/mining.py + scripts/pattern_mining.py: PrefixSpan (projected
+prefix) over chosen[] sequences + depth-bounded Apriori motifs over
+root_key features + heuristic roll-up, conditioned on outcome sign AND
+the median-differential split (the discriminator while the corpus is
+win-saturated). option_mining's budget stub fixed to read the trace.
+Read-only over runs/, out-alias guarded, all-int artifacts. Production
+artifact runs/patterns-m19c.json at min-support 10 (9,548 sequential /
+5,838 motifs / 838 heuristics). Strongest promote signal:
+chosen=rush + rival researched>=3 — support 405 high-diff vs 190
+low-diff. 8 hermetic pins incl. the bruteforce-subsequence oracle.
