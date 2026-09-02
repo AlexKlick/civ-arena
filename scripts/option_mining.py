@@ -33,7 +33,7 @@ def mine_root(root: Path) -> list[dict]:
         pid = next(a_pid for a_pid, s in _planner_seats(summary, run_dir))
         diff = score_differential(summary["scores"], pid)
         rows.append({
-            "match": run_dir.name, "budget": _budget_of(run_dir.name),
+            "match": run_dir.name, "budget": _budget_of(trace),
             "diff": diff, "turns": summary["final_turn"],
             "decisions": trace,
         })
@@ -47,8 +47,16 @@ def _planner_seats(summary: dict, run_dir: Path):
     yield side, summary
 
 
-def _budget_of(_name: str) -> int:
-    return -1  # filled by the caller from the root path
+def _budget_of(trace: list) -> int:
+    """The run's search budget, read from the trace's own per-entry
+    ``budget`` field (constant per run — trace[0] carries it). -1 for a
+    trace with no entries or no budget field (older traces)."""
+    if not trace:
+        return -1
+    budget = trace[0].get("budget")
+    if isinstance(budget, int) and not isinstance(budget, bool):
+        return budget
+    return -1
 
 
 def aggregate(roots: list[Path]) -> dict:
