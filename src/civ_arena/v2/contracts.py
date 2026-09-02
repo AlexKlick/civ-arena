@@ -1479,6 +1479,12 @@ class ActionGraphV2:
             raise ContractError("graph node ids must be unique")
         if any(node.action.observation_id != self.observation_id for node in self.nodes):
             raise ContractError("every graph action must bind to the graph observation")
+        rebound_action_set = LegalActionSetV2.create(
+            self.observation_id,
+            [node.action for node in self.nodes],
+        )
+        if rebound_action_set.legal_action_set_id != self.legal_action_set_id:
+            raise ContractError("graph legal_action_set_id does not match its node inventory")
         if tuple(sorted(self.edges, key=lambda item: item.edge_id)) != self.edges:
             raise ContractError("graph edges must be unique and sorted by stable edge_id")
         if len({edge.edge_id for edge in self.edges}) != len(self.edges):
@@ -1492,6 +1498,9 @@ class ActionGraphV2:
         for edge in self.edges:
             pair = frozenset({edge.source_action_id, edge.target_action_id})
             by_pair.setdefault(pair, set()).add(edge.kind)
+        expected_pair_count = len(node_ids) * (len(node_ids) - 1) // 2
+        if len(by_pair) != expected_pair_count:
+            raise ContractError("graph must explicitly classify every action pair")
         for kinds in by_pair.values():
             if EdgeKindV2.COMMUTES_WITH in kinds and len(kinds) > 1:
                 raise ContractError("COMMUTES_WITH cannot override another relationship")

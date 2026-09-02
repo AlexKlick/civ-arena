@@ -64,10 +64,16 @@ from civ_arena.v2.environment import (
     simulator_facets_v2,
     split_adapter_v2,
 )
+from civ_arena.v2.graph import (
+    ActionGraphCompilerV2,
+    GraphSelectionError,
+    canonical_action_order,
+)
 from civ_arena.v2.schemas import ContractError
 
 __all__ = [
     "ActionGraphEdgeV2",
+    "ActionGraphCompilerV2",
     "ActionGraphMetricsV2",
     "ActionGraphNodeV2",
     "ActionGraphV2",
@@ -126,6 +132,8 @@ __all__ = [
     "ValidationReceiptV2",
     "VerificationStatusV2",
     "GraphOverflowError",
+    "GraphSelectionError",
+    "canonical_action_order",
     "firetuner_facets_v2",
     "simulator_facets_v2",
     "split_adapter_v2",
