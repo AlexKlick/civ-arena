@@ -1,0 +1,1 @@
+{"fit":{"corpus":{"docs":240,"sha256":"c339b1c7cbb03fe8df2cb8228abf04b67ab1f88132dc047b6e28fa3e8eb49b2c"},"lambda":1000,"rows":4693,"scale_norm":"l1_161","val_mse_fixed":77031383},"schema":1,"weights":{"cities":109,"gold":0,"population":12,"techs":38,"units":-2}}

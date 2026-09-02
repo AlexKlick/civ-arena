@@ -216,8 +216,16 @@ def search_option(
     epoch_turns: int = 3,
     seed: int = 0,
     prior: list[str] | None = None,
+    weights: dict[str, int] | None = None,
 ) -> SearchResult:
-    """Pick the next option for ``pid`` under the given rollout budget."""
+    """Pick the next option for ``pid`` under the given rollout budget.
+
+    ``weights`` (M20c) threads straight into the LEAF evaluation —
+    ``value_of(world, pid, weights)`` — and nowhere else: the abstraction
+    (``abstract_key``), the determinized worlds, and UCT arithmetic are
+    untouched, so ``weights=None`` reproduces the DEFAULT_WEIGHTS behavior
+    exactly. The learned head changes only what a finished rollout is
+    worth, at any budget."""
     assert method in ("mcts", "mcgs")
     root_state = SimState.from_doc(build_state_doc(belief, seed))
     candidate_set = _candidates(root_state, pid) or ["tech_race"]
@@ -251,7 +259,7 @@ def search_option(
         oid2 = node.uct_pick(mid_candidates, mid_candidates)
         _simulate_epoch(world, pid, OPTIONS[oid2], epoch_turns)
 
-        value = value_of(world, pid)
+        value = value_of(world, pid, weights)
         root.record(oid1, value)
         node.record(oid2, value)
 

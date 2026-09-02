@@ -61,6 +61,15 @@ pending update and the next journal append still loses that one update
 to the missing update's ranking effect and the pin covers the resumed
 leg). An unarmed resume over an armed journal (or vice versa) ignores
 the block, mirroring the case-stats additive rule.
+
+M20c — learned value head (optional ``weights``): integer component
+weights threaded VERBATIM into ``search_option``'s leaf evaluation. None
+(the default) reproduces the DEFAULT_WEIGHTS behavior bit-for-bit; a
+weights dict changes only what a finished rollout is worth — the belief,
+the abstraction, and every prior leg are untouched. The weights are a
+PLAY parameter like seed/budget, not learned state: they never ride the
+journal (a resumed leg re-arms from its constructor args, exactly like
+``method``/``budget``).
 """
 
 from __future__ import annotations
@@ -130,11 +139,13 @@ class PlannerRuntime:
     def __init__(self, player_id: int, seed: int, *,
                  method: str = SEARCH_METHOD, budget: int = SEARCH_BUDGET,
                  proposer: Any = None, case_base: Any = None,
-                 bandit: Any = None) -> None:
+                 bandit: Any = None,
+                 weights: dict[str, int] | None = None) -> None:
         self.player_id = player_id
         self.rng = random.Random(seed)
         self.method = method
         self.budget = budget
+        self.weights = weights  # dict[str,int] | None (M20c value head)
         self.belief = PlannerBelief(player_id)
         self.active: str | None = None
         self.chosen_at_turn = 0
@@ -449,7 +460,7 @@ class PlannerRuntime:
             result = search_option(
                 self.belief, self.player_id, method=self.method,
                 budget=self.budget, epoch_turns=EPOCH_TURNS, seed=turn,
-                prior=prior)
+                prior=prior, weights=self.weights)
             self.active = result.chosen
             self.chosen_at_turn = turn
             if self.bandit is not None:
