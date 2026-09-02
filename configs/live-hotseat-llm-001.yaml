@@ -1,0 +1,45 @@
+# M18 leg 2: the first true LIVE 1v1 — both seats LLM-driven in the hotseat
+# lane (no engine AI anywhere; the engine-AI hang class is out of the game).
+# Seat 0 = glm-5.3 (Z.AI), seat 1 = MiniMax-M3 — two model families, each a
+# live/sim-proven seat driver (live-tourney-glm53-g1; M10 llm lane). Provider
+# wiring copied verbatim from the tourney configs; keys stay env-only.
+match:
+  match_id: live-hotseat-llm-001
+  seed: 271829
+  max_turns: 30
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: glm-5.3
+    player_id: 0
+    policy: llm
+    seed: 11
+    llm:
+      base_url: "https://api.z.ai/api/anthropic/v1"   # /v1 needed: client appends /messages (probe-verified 2026-08-30)
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_ZAI"
+      model_id: "glm-5.3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: minimax-m3
+    player_id: 1
+    policy: llm
+    seed: 22
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+
+chaos: []
