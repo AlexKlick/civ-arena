@@ -38,6 +38,29 @@ hit/miss counters are journaled diagnostics that never affect ranking.
 Resume binds the artifact BYTES: the journaled digest is checked against
 the loaded artifact and a mismatch degrades the leg to unprimed with an
 on-disk ``artifact_mismatch`` flag — never a silent evidence swap.
+
+M20b — contextual bandit (optional ``bandit``): online within-match
+learning prior. At each needs_choice the pending PREVIOUS decision is
+settled first — advantage = ``value_of(bstate_now) - value_of(the
+previous decision's bstate)`` (value_of over the two successive decision
+worlds, integer), ``bandit.update(prev_context, prev_option, advantage)``
+— then the CURRENT world is bucketed (``context_bucket``) and the menu
+ranked by the bandit, compiled legal-now, and merged into the prior
+AFTER the proposer AND the case prior (merge order: proposer → case →
+bandit — the live signal first, then retrieved evidence, then the
+online-learned ranking; chained ``_merge_prior`` calls, first occurrence
+wins). Fail-soft exactly like ``_case_prior`` (``bandit_prior`` trace
+entry). The pending decision (last_decision_turn/context/option/value)
+rides the journal's ``bandit`` block BESIDE the bandit state and is
+restored at resume — journaling it is what keeps the resume bit-identity
+pin holding: without it the first post-resume decision would settle no
+pending (one update lost) and the learned state would diverge from the
+uninterrupted twin's. DECLARED LIMIT: a crash BETWEEN the in-memory
+pending update and the next journal append still loses that one update
+(the bandit is advisory learning state; gameplay determinism is bounded
+to the missing update's ranking effect and the pin covers the resumed
+leg). An unarmed resume over an armed journal (or vice versa) ignores
+the block, mirroring the case-stats additive rule.
 """
 
 from __future__ import annotations
@@ -48,12 +71,14 @@ from collections.abc import Iterable
 from typing import Any
 
 from civ_arena.game.sim.state import SimState
+from civ_arena.game.sim.value import value_of
+from civ_arena.planner.bandit import Bandit, context_bucket
 from civ_arena.planner.belief import PlannerBelief, build_state_doc
 from civ_arena.planner.casebase import signature_from_state
 from civ_arena.planner.executor import execute_plan
 from civ_arena.planner.options import OPTIONS
 from civ_arena.planner.proposer import build_request, compile_proposal
-from civ_arena.planner.search import search_option
+from civ_arena.planner.search import _candidates, search_option
 
 # M19 lane-0: the M16 gate ruling (program doc §7, c1827df) says the
 # graph-search layer is NOT carried forward — sim-scale default = MCTS.
@@ -70,12 +95,14 @@ RESELECT_EVERY = 3
 PROPOSER_POST_CAP = 64
 
 
-def _compile_case_ranking(ranked: Iterable[str], state: SimState,
-                          pid: int) -> list[str]:
-    """Case ranking -> LEGAL-now ranking, mirroring compile_proposal's
+def _compile_legal_ranking(ranked: Iterable[str], state: SimState,
+                           pid: int) -> list[str]:
+    """A ranked id list -> LEGAL-now ranking, mirroring compile_proposal's
     narrowing EXACTLY: non-str/unknown/duplicate ids drop (first kept),
-    only initiation-true options survive — retrieval can only permute,
-    never widen the search's choice set."""
+    only initiation-true options survive. Shared by the case-prior and
+    bandit-prior paths (renamed from ``_compile_case_ranking`` when the
+    bandit joined) — any prior can only permute, never widen the search's
+    choice set."""
     out: list[str] = []
     for oid in ranked:
         if not isinstance(oid, str) or oid in out or oid not in OPTIONS:
@@ -87,9 +114,11 @@ def _compile_case_ranking(ranked: Iterable[str], state: SimState,
 
 def _merge_prior(proposer_ranked: list[str] | None,
                  case_ranked: list[str] | None) -> list[str] | None:
-    """Proposer FIRST (the live, more specific signal), then case-ranked ids
-    not already present; first occurrence wins. Both optional — both empty
-    stays None (unprimed)."""
+    """Proposer FIRST (the live, more specific signal), then case-ranked,
+    then bandit-ranked ids not already present — the bandit leg merges by
+    a second chained call (``_merge_prior(prior, bandit_ranked)``);
+    associative through dict.fromkeys, first occurrence wins. Both
+    optional — both empty stays None (unprimed)."""
     merged = list(dict.fromkeys(list(proposer_ranked or [])
                                 + list(case_ranked or [])))
     return merged or None
@@ -100,7 +129,8 @@ class PlannerRuntime:
 
     def __init__(self, player_id: int, seed: int, *,
                  method: str = SEARCH_METHOD, budget: int = SEARCH_BUDGET,
-                 proposer: Any = None, case_base: Any = None) -> None:
+                 proposer: Any = None, case_base: Any = None,
+                 bandit: Any = None) -> None:
         self.player_id = player_id
         self.rng = random.Random(seed)
         self.method = method
@@ -117,6 +147,11 @@ class PlannerRuntime:
         self.case_hits = 0         # diagnostics only, journaled as case_stats
         self.case_misses = 0
         self._case_artifact_mismatch = False  # set on resume artifact swap
+        self.bandit = bandit  # bandit.Bandit | None (M20b online prior)
+        # the PENDING decision (in-memory, journaled beside the bandit
+        # state): {"turn", "context", "option", "value"} of the last
+        # completed selection, settled at the NEXT needs_choice
+        self._bandit_pending: dict[str, Any] | None = None
 
     async def _propose(self, bstate: SimState, turn: int) -> tuple[
             list[str] | None, dict[str, Any]]:
@@ -163,7 +198,7 @@ class PlannerRuntime:
                 self.case_hits += 1
             else:
                 self.case_misses += 1
-            compiled = _compile_case_ranking(ranked, bstate, self.player_id)
+            compiled = _compile_legal_ranking(ranked, bstate, self.player_id)
             doc: dict[str, Any] = {"turn": turn, "ranked": compiled,
                                    "signature": sig, "hit": hit}
             return (compiled or None), doc
@@ -183,6 +218,61 @@ class PlannerRuntime:
         if self._case_artifact_mismatch:
             stats["artifact_mismatch"] = True
         return stats
+
+    def _bandit_prior(self, bstate: SimState,
+                      turn: int) -> tuple[list[str] | None, dict[str, Any]]:
+        """M20b online contextual prior. FIRST settles the pending previous
+        decision: advantage = value_of over the two successive decision
+        worlds (bstate NOW minus the bstate the pending was recorded at),
+        fed to ``bandit.update`` — then buckets the CURRENT world, ranks
+        the candidate menu (the same ``_candidates`` menu the search sees
+        — bstate is the exact world the trace root_key comes from, so
+        menu == trace candidates by construction), and compiles the
+        ranking legal-now. Fail-soft exactly like ``_case_prior``: ANY
+        per-turn failure degrades to no bandit prior and the match
+        continues; the update is inside the same boundary (a poisoned
+        bandit never blocks or breaks the match)."""
+        try:
+            if self._bandit_pending is not None:
+                advantage = (value_of(bstate, self.player_id)
+                             - int(self._bandit_pending["value"]))
+                self.bandit.update(self._bandit_pending["context"],
+                                   self._bandit_pending["option"], advantage)
+            ctx = context_bucket(bstate, self.player_id)
+            ranked = self.bandit.rank(ctx, _candidates(bstate, self.player_id))
+            compiled = _compile_legal_ranking(ranked, bstate, self.player_id)
+            doc: dict[str, Any] = {"turn": turn, "ranked": compiled,
+                                   "context": list(ctx)}
+            return (compiled or None), doc
+        except Exception:
+            return None, {"turn": turn, "error": "bandit_prior_failed"}
+
+    def _bandit_journal_doc(self) -> dict[str, Any]:
+        """The journal's bandit block: the bandit state doc plus the four
+        pending-decision fields (journaling the pending is what holds the
+        resume bit-identity pin — see the module docstring)."""
+        doc: dict[str, Any] = dict(self.bandit.to_doc())
+        pending = self._bandit_pending
+        doc["last_decision_turn"] = pending["turn"] if pending else None
+        doc["last_context"] = list(pending["context"]) if pending else None
+        doc["last_option"] = pending["option"] if pending else None
+        doc["last_value"] = pending["value"] if pending else None
+        return doc
+
+    @staticmethod
+    def _bandit_pending_from_doc(doc: dict[str, Any]) -> dict[str, Any] | None:
+        """Parse the journal block's pending fields back to the in-memory
+        shape (JSON round-trips the context tuple as a list of ints)."""
+        ctx = doc.get("last_context")
+        option = doc.get("last_option")
+        value = doc.get("last_value")
+        turn = doc.get("last_decision_turn")
+        if (not isinstance(ctx, list) or not isinstance(option, str)
+                or not isinstance(value, int) or isinstance(value, bool)
+                or not isinstance(turn, int) or isinstance(turn, bool)):
+            return None
+        return {"turn": turn, "context": tuple(int(x) for x in ctx),
+                "option": option, "value": value}
 
     async def _filter_to_wire_vocabulary(
             self, facade: Any, bstate: Any,
@@ -305,6 +395,21 @@ class PlannerRuntime:
             if current != journal_sha:
                 self.case_base = None
                 self._case_artifact_mismatch = True
+        # M20b additive restore: the bandit state AND the pending decision
+        # ride the journal's bandit block. An armed runtime over a journal
+        # WITHOUT a bandit block (old journal, or an unarmed first leg)
+        # keeps its construction-time arming, mirroring the case-stats
+        # rule; an unarmed runtime ignores the block. A bandit block that
+        # refuses validation degrades the leg to unprimed (the journal is
+        # advisory; the referee is untouched) — never a crash mid-resume.
+        bandit_doc = last.get("bandit")
+        if self.bandit is not None and isinstance(bandit_doc, dict):
+            try:
+                self.bandit = Bandit.from_doc(bandit_doc)
+                self._bandit_pending = self._bandit_pending_from_doc(bandit_doc)
+            except Exception:
+                self.bandit = None
+                self._bandit_pending = None
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()
@@ -328,23 +433,47 @@ class PlannerRuntime:
             prior: list[str] | None = None
             proposal_doc: dict[str, Any] | None = None
             case_doc: dict[str, Any] | None = None
+            bandit_doc: dict[str, Any] | None = None
             if self.proposer is not None:
                 prior, proposal_doc = await self._propose(bstate, turn)
             if self.case_base is not None:
                 case_ranked, case_doc = self._case_prior(bstate, turn)
                 if case_ranked:
                     prior = _merge_prior(prior, case_ranked)
+            if self.bandit is not None:
+                # settles the pending decision (the advantage update)
+                # BEFORE choosing, then ranks — proposer → case → bandit
+                bandit_ranked, bandit_doc = self._bandit_prior(bstate, turn)
+                if bandit_ranked:
+                    prior = _merge_prior(prior, bandit_ranked)
             result = search_option(
                 self.belief, self.player_id, method=self.method,
                 budget=self.budget, epoch_turns=EPOCH_TURNS, seed=turn,
                 prior=prior)
             self.active = result.chosen
             self.chosen_at_turn = turn
+            if self.bandit is not None:
+                # record the NEW pending: this search's chosen option and
+                # the value of THIS decision world — settled at the next
+                # needs_choice. Recorded even when the bandit chain failed
+                # this turn (value bookkeeping is bandit-health-neutral);
+                # one pending at a time, always the latest decision.
+                try:
+                    self._bandit_pending = {
+                        "turn": turn,
+                        "context": context_bucket(bstate, self.player_id),
+                        "option": result.chosen,
+                        "value": value_of(bstate, self.player_id),
+                    }
+                except Exception:
+                    self._bandit_pending = None
             entry = {"turn": turn, **result.to_doc()}
             if proposal_doc is not None:
                 entry["proposal"] = proposal_doc
             if case_doc is not None:
                 entry["case_prior"] = case_doc
+            if bandit_doc is not None:
+                entry["bandit_prior"] = bandit_doc
             self.trace.append(entry)
 
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
@@ -371,4 +500,8 @@ class PlannerRuntime:
                 "active": self.active, "chosen_at_turn": self.chosen_at_turn,
                 "proposer_posts": self.proposer_posts,
                 "case_stats": self._case_stats_doc(),
+                # M20b additive block: armed legs only (an unarmed leg's
+                # snapshot keeps the pre-M20b shape exactly)
+                **({"bandit": self._bandit_journal_doc()}
+                   if self.bandit is not None else {}),
             })

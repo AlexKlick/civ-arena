@@ -45,7 +45,7 @@ from civ_arena.planner.casebase import (
 )
 from civ_arena.planner.runtime import (
     PlannerRuntime,
-    _compile_case_ranking,
+    _compile_legal_ranking,
     _merge_prior,
 )
 from civ_arena.planner.search import abstract_key, search_option
@@ -312,7 +312,7 @@ async def test_case_prior_is_permutation_only(tmp_path):
     facade = FakeFacade(state, 0)
     belief = PlannerBelief(0)
     await feed_via(facade, belief)
-    case_ranked = _compile_case_ranking(
+    case_ranked = _compile_legal_ranking(
         ["economy", "develop", "expand", "rush", "tech_race"],
         SimState.from_doc(build_state_doc(belief, seed=4)), 0)
     assert case_ranked, "fixture lost all option candidacies"
@@ -392,7 +392,7 @@ def test_merged_prior_deterministic(tmp_path):
     state = playout(21, 4)
     initiated = {oid for oid in ("expand", "economy", "rush")
                  if _option_initiation(oid, state)}
-    compiled = _compile_case_ranking(
+    compiled = _compile_legal_ranking(
         ["rush", "expand", "rush", "no_such_option", 7, "economy"], state, 0)
     assert compiled == [oid for oid in ("rush", "expand", "economy")
                         if oid in initiated]

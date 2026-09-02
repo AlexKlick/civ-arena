@@ -39,9 +39,11 @@ def spec_for(match_id: str, max_turns: int = 8) -> MatchSpec:
     )
 
 
-def runtimes(budget: int = 4, case_base: Any = None) -> dict[int, Any]:
+def runtimes(budget: int = 4, case_base: Any = None,
+             bandit: Any = None) -> dict[int, Any]:
     return {
-        0: PlannerRuntime(0, 7, budget=budget, case_base=case_base),
+        0: PlannerRuntime(0, 7, budget=budget, case_base=case_base,
+                          bandit=bandit),
         1: build_runtime(AgentProfile(agent_id="turtler", player_id=1,
                                       policy="turtler", seed=22)),
     }
