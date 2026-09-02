@@ -29,9 +29,15 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "src"))
 sys.path.insert(0, str(_HERE))
 
-from live_newgame import connect_state, find_state, run_lua  # noqa: E402
+from live_newgame import (  # noqa: E402
+    CONFIG_HOTSEAT_LUA,
+    HOST_HOTSEAT_LUA,
+    connect_state,
+    find_state,
+    run_lua,
+)
 
-from civ_arena.game.civ6.vendor import SENTINEL  # noqa: E402
+from civ_arena.game.civ6.vendor import SENTINEL, tuner_client  # noqa: E402
 
 # Base-ruleset leaders the engine itself uses in tutorialsetup.lua —
 # never hand-pick an unverified string.
@@ -87,6 +93,33 @@ print("launchgame-called")
 print("{SENTINEL}")
 """
 
+# M18 rung 4: HostGame(SERVER_TYPE_HOTSEAT) kills the FireTuner listener
+# for the whole process (live-proven twice 2026-09-02) — but Network.LoadGame
+# is a different engine path. Load the hotseat AUTOsave back with the tuner
+# still attached; param shape from loadgamemenu.lua OnLoadYes + the
+# automation suite's PlayGame LoadConfiguration block.
+#
+# Rung 5 refinement: with SERVER_TYPE_HOTSEAT the load opens a STAGING
+# session (roster reset to defaults) and the tuner still dies — the network
+# SESSION is the killer, not HostGame specifically. HOTSEAT IS LOCAL: try
+# SERVER_TYPE_NONE (the automation suite's own LoadConfiguration server
+# type) — resume the hotseat save with no session server at all, the SP
+# path the tuner demonstrably survives.
+LOAD_LUA = f"""
+local p = {{
+  Location = SaveLocations.LOCAL_STORAGE,
+  Type = SaveTypes.SINGLE_PLAYER,
+  FileType = SaveFileTypes.GAME_SAVE,
+  IsAutosave = true,
+  IsQuicksave = false,
+  Directory = "Hotseat/auto",
+  Name = "AutoSave_0001",
+}}
+local ok = Network.LoadGame(p, ServerType.SERVER_TYPE_NONE)
+print("loadgame-returned|" .. tostring(ok))
+print("{SENTINEL}")
+"""
+
 
 async def run(host: str, port: int, lua: str, state: str,
               settle: float) -> int:
@@ -104,6 +137,83 @@ async def run(host: str, port: int, lua: str, state: str,
     return 0
 
 
+async def _rediscover(conn) -> bool:
+    """Re-run the LSQ handshake on the SAME socket (the tuner server can
+    outlive front-end transitions; the TCP client should not have to
+    reconnect). Returns True when a StagingRoom state is present."""
+    _, raw_states = await tuner_client.handshake(conn._reader,  # noqa: SLF001
+                                                 conn._writer)  # noqa: SLF001
+    states: dict[int, str] = {}
+    i = 0
+    while i + 1 < len(raw_states):
+        try:
+            states[int(raw_states[i])] = raw_states[i + 1]
+            i += 2
+        except ValueError:
+            i += 1
+    conn.lua_states = states
+    return find_state_sync(states, "StagingRoom") is not None
+
+
+def find_state_sync(states: dict[int, str], name: str) -> int | None:
+    for i, n in states.items():
+        if n == name:
+            return i
+    return None
+
+
+async def run_full(host: str, port: int, state: str,
+                   transition_timeout: float = 180.0) -> int:
+    """The whole hotseat launch on ONE tuner connection, held open across
+    the HostGame transition (the disconnect is what the degraded-boot
+    pathology punishes — and an idle unjoined staging session has exited
+    the game twice now, so no gaps).
+
+    Gates: every phase's read-back must match before the next mutation.
+    """
+    conn = await connect_state(host, port, state)
+    try:
+        # 1. seat + verify (live_newgame's proven Lua, same read-backs)
+        idx = await find_state(conn, state)
+        assert idx is not None
+        for ln in await run_lua(conn, idx, CONFIG_HOTSEAT_LUA):
+            print(ln)
+        # 2. host the hotseat staging session
+        for ln in await run_lua(conn, idx, HOST_HOTSEAT_LUA):
+            print(ln)
+        # 3. wait out the front-end transition ON THIS SOCKET, polling the
+        #    state list until StagingRoom re-registers (index may change).
+        deadline = asyncio.get_event_loop().time() + transition_timeout
+        new_idx: int | None = None
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(3.0)
+            try:
+                if await _rediscover(conn):
+                    new_idx = find_state_sync(conn.lua_states, state)
+                    break
+            except (asyncio.IncompleteReadError, ConnectionError, OSError):
+                print("handshake-failed-retry", flush=True)
+        if new_idx is None:
+            print("FAILED: StagingRoom never re-registered after HostGame")
+            return 11
+        print(f"staging-registered|idx={new_idx}", flush=True)
+        # 4. read the seats, gate on session active
+        for ln in await run_lua(conn, new_idx, READ_LUA):
+            print(ln)
+        # 5. complete seat 2 + ready both (leaders + SetReady + broadcast)
+        for ln in await run_lua(conn, new_idx, COMPLETE_LUA):
+            print(ln)
+        # 6. verify the completion took
+        for ln in await run_lua(conn, new_idx, READ_LUA):
+            print(ln)
+        # 7. launch — stagingroom.lua OnReadyButton, hotseat arm
+        for ln in await run_lua(conn, new_idx, LAUNCH_LUA):
+            print(ln)
+        return 0
+    finally:
+        await conn.disconnect()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
@@ -114,12 +224,21 @@ def main() -> int:
     g.add_argument("--read", action="store_true")
     g.add_argument("--complete", action="store_true")
     g.add_argument("--launch", action="store_true")
+    g.add_argument("--load", action="store_true",
+                   help="Network.LoadGame the hotseat autosave (HOTSEAT)")
+    g.add_argument("--full", action="store_true",
+                   help="config → host → complete → launch on ONE connection")
     opts = ap.parse_args()
 
-    lua = {"read": READ_LUA, "complete": COMPLETE_LUA,
-           "launch": LAUNCH_LUA}[("read" if opts.read else
-                                  "complete" if opts.complete else "launch")]
     try:
+        if opts.full:
+            return asyncio.run(
+                run_full(opts.host, opts.port, opts.state))
+        lua = {"read": READ_LUA, "complete": COMPLETE_LUA,
+               "launch": LAUNCH_LUA, "load": LOAD_LUA}[
+            ("load" if opts.load else
+             "read" if opts.read else
+             "complete" if opts.complete else "launch")]
         return asyncio.run(run(opts.host, opts.port, lua, opts.state,
                                opts.settle))
     except (ConnectionError, RuntimeError) as e:

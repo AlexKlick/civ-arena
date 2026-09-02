@@ -30,7 +30,6 @@ import argparse
 import asyncio
 import sys
 import zlib
-from pathlib import Path
 
 from civ_arena.game.civ6.vendor import SENTINEL, tuner_client
 from civ_arena.game.civ6.vendor.connection import GameConnection, _parse_output
@@ -179,8 +178,16 @@ print("{SENTINEL}")
 # automation suite (steamassets/.../automation_standardtests.lua): a slot
 # becomes human via SetSlotStatus(SlotStatus.SS_TAKEN) — SS_OPEN (1) is
 # UNOCCUPIED and auto-fills with AI at launch (live-learned). Hotseat names
-# seat the players per the game's own EditHotseatPlayer flow. Then HostGame
-# auto-launches as in SP.
+# seat the players per the game's own EditHotseatPlayer flow.
+#
+# M18 rung 3 (2026-09-02, live-learned): the FireTuner listener (4318) DIES
+# at the HostGame transition and only rebinds IN-GAME — there is NO wire
+# access to the staging session, and an idle unlaunched staging session
+# exits the game within minutes (twice reproduced). So the seats must be
+# FULLY launch-ready (leader picked + ready) BEFORE HostGame: the staging
+# room's own CheckGameAutoStart then auto-launches (countdown →
+# Network.LaunchGame from the session host). Leaders are the engine's own
+# tutorialsetup.lua strings.
 CONFIG_HOTSEAT_LUA = f"""
 Network.SetLocalNetworkMode(GameModeTypes.HOTSEAT)
 GameConfiguration.SetGameMode(GameModeTypes.HOTSEAT)
@@ -191,13 +198,17 @@ GameConfiguration.SetParticipatingPlayerCount(2)
 GameConfiguration.SetGameSpeedType({lua_int(GAMESPEED_STANDARD)})
 PlayerConfigurations[0]:SetSlotStatus(SlotStatus.SS_TAKEN)
 PlayerConfigurations[0]:SetMajorCiv()
+PlayerConfigurations[0]:SetLeaderTypeName("LEADER_CLEOPATRA")
 PlayerConfigurations[0]:SetHotseatName("Arena Seat 1")
 pcall(function() PlayerConfigurations[0]:SetHotseatPassword("arena") end)
+PlayerConfigurations[0]:SetReady(true)
 Network.BroadcastPlayerInfo(0)
 PlayerConfigurations[1]:SetSlotStatus(SlotStatus.SS_TAKEN)
 PlayerConfigurations[1]:SetMajorCiv()
+PlayerConfigurations[1]:SetLeaderTypeName("LEADER_GILGAMESH")
 PlayerConfigurations[1]:SetHotseatName("Arena Seat 2")
 pcall(function() PlayerConfigurations[1]:SetHotseatPassword("arena") end)
+PlayerConfigurations[1]:SetReady(true)
 Network.BroadcastPlayerInfo(1)
 print("GameMode|" .. tostring(GameConfiguration.GetGameMode()))
 print("IsHotseat|" .. tostring(GameConfiguration.IsHotseat()))
@@ -209,6 +220,10 @@ print("P0Human|" .. tostring(PlayerConfigurations[0]:IsHuman()))
 print("P1Human|" .. tostring(PlayerConfigurations[1]:IsHuman()))
 print("P0Slot|" .. tostring(PlayerConfigurations[0]:GetSlotStatus()))
 print("P1Slot|" .. tostring(PlayerConfigurations[1]:GetSlotStatus()))
+print("P0Leader|" .. tostring(PlayerConfigurations[0]:GetLeaderTypeName()))
+print("P1Leader|" .. tostring(PlayerConfigurations[1]:GetLeaderTypeName()))
+print("P0Ready|" .. tostring(PlayerConfigurations[0]:GetReady()))
+print("P1Ready|" .. tostring(PlayerConfigurations[1]:GetReady()))
 print("{SENTINEL}")
 """
 
