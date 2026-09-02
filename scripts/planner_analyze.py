@@ -53,13 +53,24 @@ def analyze(path: str, arm_a: str = ARM_A_DEFAULT,
                   f"rej={r.get('planner_rejections')}")
         print("   WARNING: interpret diffs with the dirty rows excluded")
 
+    # A7: a dirty row poisons its WHOLE paired key — dirty members never
+    # enter by_key, so the pair is dropped from inference, not warned about
+    # and averaged in anyway
+    dirty_keys = sorted({(r["seed"], r["side"]) for r in bad})
     by_key: dict[tuple[int, int], dict[str, dict]] = {}
     for r in rows:
-        if r["arm"] in (arm_a, arm_b):
-            by_key.setdefault((r["seed"], r["side"]), {})[r["arm"]] = r
+        if (r["arm"] not in (arm_a, arm_b)
+                or r["violations"] or r.get("planner_rejections")):
+            continue
+        by_key.setdefault((r["seed"], r["side"]), {})[r["arm"]] = r
     pairs = [(k, v[arm_a], v[arm_b])
              for k, v in sorted(by_key.items())
              if arm_a in v and arm_b in v]
+    # A8: a key carrying only one arm (the other never ran, or was dropped
+    # as dirty) must surface — a silently vanishing key biases the pairing
+    unmatched = sorted(k for k, v in by_key.items()
+                       if (arm_a in v) != (arm_b in v)
+                       and k not in dirty_keys)
 
     diffs = [b_row["value_differential"] - a_row["value_differential"]
              for _, a_row, b_row in pairs]
@@ -69,6 +80,15 @@ def analyze(path: str, arm_a: str = ARM_A_DEFAULT,
     ties = len(diffs) - len(clean)
     print(f"   pairs={len(pairs)} ({lb} wins {wins} / {la} wins {losses} "
           f"/ ties {ties})")
+    if dirty_keys:
+        print(f"   EXCLUDED pairs (dirty member, both rows dropped): "
+              f"{len(dirty_keys)} {dirty_keys}")
+    if unmatched:
+        print(f"   UNMATCHED keys (arm on one side only): {len(unmatched)} "
+              f"{unmatched}")
+    if dirty_keys or unmatched:
+        print("   ANALYSIS INCOMPLETE: inference ran on matched clean "
+              "pairs only")
     if clean:
         print(f"   paired diff: mean={statistics.mean(clean):+.0f} "
               f"median={statistics.median(clean):+.0f} "
@@ -98,14 +118,16 @@ def analyze(path: str, arm_a: str = ARM_A_DEFAULT,
     print()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--arm-a", default=ARM_A_DEFAULT,
                     help=f"first arm of the pair (default {ARM_A_DEFAULT})")
     ap.add_argument("--arm-b", default=ARM_B_DEFAULT,
                     help=f"second arm of the pair (default {ARM_B_DEFAULT})")
     ap.add_argument("paths", nargs="+")
-    opts = ap.parse_args()
+    opts = ap.parse_args(argv)
+    if opts.arm_a == opts.arm_b:  # A9: a self-pair is not an analysis
+        ap.error(f"--arm-a and --arm-b must differ (both {opts.arm_a!r})")
     for p in opts.paths:
         analyze(p, arm_a=opts.arm_a, arm_b=opts.arm_b)
 
