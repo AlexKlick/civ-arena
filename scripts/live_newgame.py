@@ -158,6 +158,44 @@ print("launchgame-called")
 print("{SENTINEL}")
 """
 
+# M18 hotseat: two HUMAN seats, no engine AI (the class of engine-AI hangs
+# that ends long games dies with it). Seating recipe from the ENGINE'S OWN
+# automation suite (steamassets/.../automation_standardtests.lua): a slot
+# becomes human via SetSlotStatus(SlotStatus.SS_TAKEN) — SS_OPEN (1) is
+# UNOCCUPIED and auto-fills with AI at launch (live-learned). Hotseat names
+# seat the players per the game's own EditHotseatPlayer flow. Then HostGame
+# auto-launches as in SP.
+CONFIG_HOTSEAT_LUA = f"""
+Network.SetLocalNetworkMode(GameModeTypes.HOTSEAT)
+GameConfiguration.SetGameMode(GameModeTypes.HOTSEAT)
+MapConfiguration.SetMapSize({lua_int(MAPSIZE_TINY)})
+MapConfiguration.SetMinMajorPlayers(2)
+MapConfiguration.SetMaxMajorPlayers(2)
+GameConfiguration.SetParticipatingPlayerCount(2)
+GameConfiguration.SetGameSpeedType({lua_int(GAMESPEED_STANDARD)})
+PlayerConfigurations[0]:SetSlotStatus(SlotStatus.SS_TAKEN)
+PlayerConfigurations[0]:SetMajorCiv()
+PlayerConfigurations[0]:SetHotseatName("Arena Seat 1")
+pcall(function() PlayerConfigurations[0]:SetHotseatPassword("arena") end)
+Network.BroadcastPlayerInfo(0)
+PlayerConfigurations[1]:SetSlotStatus(SlotStatus.SS_TAKEN)
+PlayerConfigurations[1]:SetMajorCiv()
+PlayerConfigurations[1]:SetHotseatName("Arena Seat 2")
+pcall(function() PlayerConfigurations[1]:SetHotseatPassword("arena") end)
+Network.BroadcastPlayerInfo(1)
+print("GameMode|" .. tostring(GameConfiguration.GetGameMode()))
+print("IsHotseat|" .. tostring(GameConfiguration.IsHotseat()))
+print("Humans|" .. tostring(GameConfiguration.GetHumanPlayerCount()))
+print("AI|" .. tostring(GameConfiguration.GetAIPlayerCount()))
+print("MapSize|" .. tostring(MapConfiguration.GetMapSize()))
+print("Participating|" .. tostring(GameConfiguration.GetParticipatingPlayerCount()))
+print("P0Human|" .. tostring(PlayerConfigurations[0]:IsHuman()))
+print("P1Human|" .. tostring(PlayerConfigurations[1]:IsHuman()))
+print("P0Slot|" .. tostring(PlayerConfigurations[0]:GetSlotStatus()))
+print("P1Slot|" .. tostring(PlayerConfigurations[1]:GetSlotStatus()))
+print("{SENTINEL}")
+"""
+
 
 async def phase(host: str, port: int, lua: str, state: str,
                 settle: float) -> int:
@@ -179,15 +217,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=4318)
-    ap.add_argument("phase_arg", choices=["host", "config", "launch"],
+    ap.add_argument("phase_arg", choices=["host", "config", "hotseat",
+                                          "launch"],
                     help="host: create the local session; config: apply + "
-                         "verify the duel setup; launch: start the map load")
+                         "verify the duel setup; hotseat: the two-human-seat "
+                         "setup; launch: start the map load")
     ap.add_argument("--settle", type=float, default=0.0,
                     help="seconds to wait after the phase (state churn)")
     ap.add_argument("--state", default="StagingRoom")
     opts = ap.parse_args()
 
     lua = {"host": HOST_LUA, "config": CONFIG_LUA,
+           "hotseat": CONFIG_HOTSEAT_LUA,
            "launch": LAUNCH_LUA}[opts.phase_arg]
     try:
         return asyncio.run(phase(opts.host, opts.port, lua, opts.state,
