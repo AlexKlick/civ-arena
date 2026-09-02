@@ -1800,6 +1800,111 @@ class ArtifactRefV2:
         return cls(**raw)
 
 
+@dataclass(frozen=True)
+class ValidationCommandV2:
+    command: str
+    exit_code: int
+    log_digest: str
+    passed: int
+    failed: int
+    skipped: int
+
+    SCHEMA_REF: ClassVar[str] = "urn:civ-arena:receipt:2#/$defs/ValidationCommandV2"
+
+    def __post_init__(self) -> None:
+        validate_doc(self.SCHEMA_REF, self.to_doc())
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "log_digest": self.log_digest,
+            "passed": self.passed,
+            "failed": self.failed,
+            "skipped": self.skipped,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> ValidationCommandV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(**raw)
+
+
+@dataclass(frozen=True)
+class ValidationReceiptV2:
+    receipt_id: str
+    commit_sha: str
+    tree_sha: str
+    source_diff_digest: str
+    validator: str
+    commands: tuple[ValidationCommandV2, ...]
+    schema: int = SCHEMA_V2
+
+    SCHEMA_REF: ClassVar[str] = "urn:civ-arena:receipt:2#/$defs/ValidationReceiptV2"
+
+    def __post_init__(self) -> None:
+        if not self.commands:
+            raise ContractError("validation receipt requires at least one command")
+        doc = self.to_doc()
+        validate_doc(self.SCHEMA_REF, doc)
+        _assert_identity(doc, "receipt_id")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        commit_sha: str,
+        tree_sha: str,
+        source_diff_digest: str,
+        validator: str,
+        commands: tuple[ValidationCommandV2, ...] | list[ValidationCommandV2],
+    ) -> ValidationReceiptV2:
+        frozen = tuple(commands)
+        body = {
+            "schema": SCHEMA_V2,
+            "receipt_id": ZERO_DIGEST,
+            "commit_sha": commit_sha,
+            "tree_sha": tree_sha,
+            "source_diff_digest": source_diff_digest,
+            "validator": validator,
+            "commands": [item.to_doc() for item in frozen],
+        }
+        return cls(
+            receipt_id=_semantic_id(body, "receipt_id"),
+            commit_sha=commit_sha,
+            tree_sha=tree_sha,
+            source_diff_digest=source_diff_digest,
+            validator=validator,
+            commands=frozen,
+        )
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "receipt_id": self.receipt_id,
+            "commit_sha": self.commit_sha,
+            "tree_sha": self.tree_sha,
+            "source_diff_digest": self.source_diff_digest,
+            "validator": self.validator,
+            "commands": [item.to_doc() for item in self.commands],
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> ValidationReceiptV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(
+            receipt_id=raw["receipt_id"],
+            commit_sha=raw["commit_sha"],
+            tree_sha=raw["tree_sha"],
+            source_diff_digest=raw["source_diff_digest"],
+            validator=raw["validator"],
+            commands=tuple(ValidationCommandV2.from_doc(item) for item in raw["commands"]),
+            schema=raw["schema"],
+        )
+
+
 class TurnTerminationV2(enum.StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
@@ -2022,6 +2127,8 @@ class EpisodeReceiptV2:
             raise ContractError("episode policy descriptors must be unique")
         if tuple(sorted(self.artifacts, key=lambda item: item.digest)) != self.artifacts:
             raise ContractError("episode artifacts must be sorted by digest")
+        if len({item.digest for item in self.artifacts}) != len(self.artifacts):
+            raise ContractError("episode artifact digests must be unique")
         has_parent = self.parent_episode_id is not None
         if has_parent != (self.parent_terminal_event_hash is not None):
             raise ContractError("resume parent id and terminal hash must appear together")
@@ -2205,6 +2312,18 @@ def event_semantic_hash(doc: Mapping[str, Any]) -> str:
     return sha256_hex(canonical(_event_semantic_doc(doc)))
 
 
+def event_identity_hash(doc: Mapping[str, Any]) -> str:
+    return sha256_hex(
+        canonical(
+            {
+                "episode_id": doc["episode_id"],
+                "sequence_number": doc["sequence_number"],
+                "semantic_hash": doc["semantic_hash"],
+            }
+        )
+    )
+
+
 def event_chain_hash(doc: Mapping[str, Any]) -> str:
     return sha256_hex(
         canonical(
@@ -2243,11 +2362,25 @@ class EventV2:
             raise ContractError("event_type must be EventTypeV2")
         if EVENT_PAYLOAD_NAME[self.event_type] != self.payload_name:
             raise ContractError("event payload does not match its event type")
+        if isinstance(self.payload_value, ArtifactRefV2):
+            expected_schema_ref = self.payload_value.schema_ref
+        elif isinstance(self.payload_value, str):
+            expected_schema_ref = (
+                LegalActionV2.SCHEMA_REF
+                if self.event_type is EventTypeV2.ACTION_EXECUTION_STARTED
+                else ActionGraphV2.SCHEMA_REF
+            )
+        else:
+            expected_schema_ref = self.payload_value.SCHEMA_REF
+        if self.schema_ref != expected_schema_ref:
+            raise ContractError("event schema_ref does not match its typed payload")
         doc = self.to_doc()
         validate_doc(self.SCHEMA_REF, doc)
         semantic_hash = event_semantic_hash(doc)
-        if self.semantic_hash != semantic_hash or self.event_id != semantic_hash:
+        if self.semantic_hash != semantic_hash:
             raise ContractError("event semantic identity mismatch")
+        if self.event_id != event_identity_hash(doc):
+            raise ContractError("event identity mismatch")
         if self.event_hash != event_chain_hash(doc):
             raise ContractError("event chain hash mismatch")
         if self.event_type is EventTypeV2.EPISODE_TERMINATED:
@@ -2290,8 +2423,9 @@ class EventV2:
             "event_hash": ZERO_DIGEST,
         }
         semantic_hash = event_semantic_hash(body)
-        body["event_id"] = semantic_hash
         body["semantic_hash"] = semantic_hash
+        event_id = event_identity_hash(body)
+        body["event_id"] = event_id
         chain_hash = event_chain_hash(body)
         if event_type is EventTypeV2.EPISODE_TERMINATED:
             if not isinstance(payload_value, EpisodeReceiptV2):
@@ -2302,7 +2436,7 @@ class EventV2:
             assert event_semantic_hash(body) == semantic_hash
             assert event_chain_hash(body) == chain_hash
         return cls(
-            event_id=semantic_hash,
+            event_id=event_id,
             event_type=event_type,
             schema_ref=schema_ref,
             episode_id=episode_id,

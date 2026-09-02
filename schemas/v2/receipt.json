@@ -5,6 +5,45 @@
   "type": "object",
   "additionalProperties": false,
   "$defs": {
+    "ValidationCommandV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "exit_code", "log_digest", "passed", "failed", "skipped"],
+      "properties": {
+        "command": {"type": "string", "minLength": 1, "maxLength": 512},
+        "exit_code": {"type": "integer", "minimum": 0, "maximum": 255},
+        "log_digest": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "passed": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "skipped": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ValidationReceiptV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receipt_id",
+        "commit_sha",
+        "tree_sha",
+        "source_diff_digest",
+        "validator",
+        "commands"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "receipt_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "commit_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "tree_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "source_diff_digest": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "validator": {"type": "string", "minLength": 1, "maxLength": 160},
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/ValidationCommandV2"}
+        }
+      }
+    },
     "TurnReceiptV2": {
       "type": "object",
       "additionalProperties": false,

@@ -51,6 +51,8 @@ from civ_arena.v2.contracts import (
     TurnProposalV2,
     TurnReceiptV2,
     TurnTerminationV2,
+    ValidationCommandV2,
+    ValidationReceiptV2,
     VerificationStatusV2,
 )
 from civ_arena.v2.schemas import ContractError
@@ -107,5 +109,7 @@ __all__ = [
     "TurnProposalV2",
     "TurnReceiptV2",
     "TurnTerminationV2",
+    "ValidationCommandV2",
+    "ValidationReceiptV2",
     "VerificationStatusV2",
 ]
