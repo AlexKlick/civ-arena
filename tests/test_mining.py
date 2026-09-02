@@ -4,13 +4,18 @@ Pinned: PrefixSpan equals exhaustive subsequence enumeration on a small
 fixture (supports included); mining is deterministic (byte-identical
 artifact twice, CLI included); the CLI is read-only over the corpus
 (only --out appears, input digests unchanged); --out aliasing an input
-refuses with SystemExit BEFORE any write; a win-saturated corpus (every
-sign +1 — the real exp3 shape) still discriminates through the median
-axis (non-empty high/low split, promote AND demote heuristics); the
-artifact is canonical and float-free (a poisoned float refuses); every
-heuristic row serializes with str/int/list values only; and
-option_mining's budget now reads the trace's own ``budget`` field
-(-1 preserved for budget-less traces).
+refuses with SystemExit BEFORE any write — including when the input
+labels.json is ITSELF a symlink (siblings guard the resolved run dir);
+a symlink planted at the predictable ``<out>.tmp`` name is never
+written through (mkstemp O_EXCL — the Codex M19c C1 class fix); a
+win-saturated corpus (every sign +1 — the real exp3 shape) still
+discriminates through the median axis (non-empty high/low split,
+promote AND demote heuristics); the artifact is canonical and
+float-free (a poisoned float refuses); every heuristic row serializes
+with str/int/list values only; every support number a heuristic row
+cites appears verbatim in a serialized comparison row (C3
+traceability); and option_mining's budget now reads the trace's own
+``budget`` field (-1 preserved for budget-less traces).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -216,10 +222,42 @@ def test_out_alias_refused(tmp_path: Path) -> None:
             "--labels-glob", str(tmp_path / "runs" / "*" / "labels.json"),
             "--out", str(paths[0].parent / "summary.json"),
             "--min-support", "3"])
+    # C2: a SYMLINKED input labels.json relocates its run directory — the
+    # guard must protect the artifacts beside the TARGET, not beside the
+    # link (pre-fix it checked <link-dir>/summary.json and waved this through)
+    link_dir = tmp_path / "runs" / "run-link"
+    link_dir.mkdir()
+    (link_dir / "labels.json").symlink_to(paths[0])
+    with pytest.raises(SystemExit, match="would overwrite"):
+        _load("pattern_mining").main([
+            "--labels-glob", str(tmp_path / "runs" / "*" / "labels.json"),
+            "--out", str(paths[0].parent / "summary.json"),
+            "--min-support", "3"])
     # a genuinely separate path passes
     _load("pattern_mining").main([
         "--labels-glob", str(tmp_path / "runs" / "*" / "labels.json"),
         "--out", str(tmp_path / "ok.json"), "--min-support", "3"])
+
+
+def test_artifact_tmp_write_never_follows_symlink(tmp_path: Path) -> None:
+    """C1 pin: a symlink planted at the predictable ``<out>.tmp`` name
+    pointing at an input labels.json — the pre-fix idiom (fixed tmp name
+    + write_text) truncated the victim THROUGH the link before the
+    replace ever ran; mkstemp (O_EXCL) can only ever create a fresh file
+    at a name it invented, so the victim survives untouched."""
+    paths = _write_corpus(tmp_path / "runs")
+    victim = paths[0]
+    victim_bytes = victim.read_bytes()
+    out = tmp_path / "mining.json"
+    planted = tmp_path / "mining.json.tmp"  # the predictable pre-fix tmp name
+    planted.symlink_to(victim)
+    _load("pattern_mining").main([
+        "--labels-glob", str(tmp_path / "runs" / "*" / "labels.json"),
+        "--out", str(out), "--min-support", "3"])
+    assert victim.read_bytes() == victim_bytes  # never written through
+    assert planted.is_symlink()  # the planted link itself is untouched
+    assert out.is_file()  # and the artifact still landed
+    assert json.loads(out.read_text())["schema"] == 1
 
 
 def test_win_saturated_corpus_uses_median_axis(tmp_path: Path) -> None:
@@ -306,3 +344,39 @@ def test_heuristics_rows_are_strings(tmp_path: Path) -> None:
         assert row["kind"] in ("promote", "demote", "context")
         assert _only_str_int_list(json.loads(json.dumps(row))), row
         assert all(isinstance(value, str) for value in row.values())
+
+
+def test_heuristic_supports_trace_to_serialized_rows(tmp_path: Path) -> None:
+    """C3 pin: every support number a heuristic row cites appears
+    verbatim in a SERIALIZED comparison row — heuristics never emit a
+    number the artifact does not carry. Comparison rows hold BOTH sides'
+    supports (below-min-support counterpart included and flagged)."""
+    artifact = _build(_docs(_write_corpus(tmp_path / "runs")))
+    comparisons = {tuple(row["items"]): row
+                   for row in artifact["comparisons"]}
+    assert comparisons
+    for row in artifact["comparisons"]:
+        assert set(row) == {"items", "support_high", "support_low",
+                            "below_min_support"}
+        assert isinstance(row["below_min_support"], bool)
+    # both flag values occur: {chosen=economy} clears min_support on BOTH
+    # sides (3 and 3), while the high-only expand motif's low-side
+    # counterpart (0) is below it
+    flags = {comparisons[("chosen=economy",)]["below_min_support"],
+             comparisons[("chosen=expand", "p0:gold_bucket>=8")]
+             ["below_min_support"]}
+    assert flags == {False, True}
+
+    pattern = re.compile(r"^support_high=(\d+) support_low=(\d+)$")
+    cited = 0
+    for row in artifact["heuristics"]:
+        if row["kind"] == "context":
+            continue  # candidacy counts, not supports — serialized in-row
+        items = tuple(row["evidence"][len("itemset "):].split(","))
+        match = pattern.match(row["detail"])
+        assert match, row
+        comp = comparisons[items]  # the evidence maps to a serialized row
+        assert int(match.group(1)) == comp["support_high"], row
+        assert int(match.group(2)) == comp["support_low"], row
+        cited += 1
+    assert cited > 0  # the corpus actually discriminates somewhere

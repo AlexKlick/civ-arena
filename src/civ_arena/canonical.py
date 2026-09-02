@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
+import tempfile
+from pathlib import Path
 from typing import Any
 
 SCHEMA = 1
@@ -57,6 +60,33 @@ def sha256_hex(text: str) -> str:
 
 def args_digest(args: Any) -> str:
     return sha256_hex(canonical(args))
+
+
+def atomic_write_text(path: Path | str, text: str, *,
+                      fsync: bool = False) -> None:
+    """Atomic tmp+replace that cannot follow a planted link (Codex M19c
+    C1, class fix): the temp file comes from tempfile.mkstemp, which is
+    O_EXCL — a symlink or hardlink planted at any PREDICTABLE tmp name is
+    never opened for writing, because mkstemp only succeeds on a fresh
+    name it invented; the destination is then swapped in atomically by
+    os.replace. The pre-fix idiom (fixed ``<out>.tmp`` + write_text)
+    opened the planted path itself and truncated the link target BEFORE
+    the replace ever ran. ``fsync=True`` keeps the journal's durability
+    semantics (flush + fsync before the replace)."""
+    dest = Path(path)
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".",
+                                    suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            if fsync:
+                fh.flush()
+                os.fsync(fh.fileno())
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # never leave the temp behind on failure
+        raise
 
 
 def assert_schema(n: int) -> None:

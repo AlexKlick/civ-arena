@@ -31,9 +31,10 @@ P1-1). The snapshot is exact state, so rebuild is exact by construction.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
+
+from civ_arena.canonical import atomic_write_text
 
 
 class PlannerJournal:
@@ -80,18 +81,19 @@ class PlannerJournal:
 
     def append(self, turn: int, doc: dict[str, Any]) -> None:
         """Record ``doc`` for ``turn``, dropping any entry at ``turn`` or
-        later first (idempotent turn re-execution)."""
+        later first (idempotent turn re-execution). Atomic tmp+replace via
+        canonical.atomic_write_text (mkstemp is O_EXCL — a planted symlink
+        or hardlink at a predictable tmp name cannot be followed; Codex
+        M19c C1 class fix) with the journal's durability semantics kept:
+        flush + fsync before the replace."""
         recs, _torn = self._load()
         recs = [r for r in recs if r["turn"] < turn]
         recs.append({"turn": turn, "doc": doc})
-        tmp = self.path.with_suffix(".jsonl.tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            for rec in recs:
-                fh.write(json.dumps(rec, sort_keys=True,
-                                    separators=(",", ":")) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
+        atomic_write_text(
+            self.path,
+            "".join(json.dumps(rec, sort_keys=True, separators=(",", ":"))
+                    + "\n" for rec in recs),
+            fsync=True)
 
     def replay_upto(self, turn: int) -> list[dict[str, Any]]:
         """Entries for strictly earlier turns, oldest first."""

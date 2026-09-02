@@ -14,9 +14,18 @@ float ever reaches an artifact: every mean is floor division ``sum // n``
   option itself); frequent itemsets by Apriori (sorted prefix-join +
   subset prune, depth-bounded), min_support counted in DECISIONS per
   side, each row carrying the mean match differential when present.
+- COMPARISONS: one SERIALIZED median-axis row per union itemset (mined
+  on the high OR the low side at min_support), carrying BOTH sides'
+  supports — including the below-min-support counterpart, flagged
+  ``below_min_support`` — so every support number any heuristic row
+  cites exists in the artifact itself (Codex M19c C3: heuristics derive
+  EXCLUSIVELY from these serialized rows, never from a recompute; the
+  sign axis needs no comparison rows because no heuristic cites a
+  sign-axis number, and sequential/motif rows already serialize every
+  mined side support).
 - HEURISTICS: per option a ``context`` row (candidacy stats — floor
   means and a floor percent) plus one ``promote``/``demote`` row per
-  mined itemset containing ``chosen=<opt>`` whose high-vs-low supports
+  comparison row containing ``chosen=<opt>`` whose high-vs-low supports
   differ. Explicit strings only: M20b reads them as candidate context
   features, never as numbers to re-derive.
 
@@ -51,16 +60,21 @@ against aliasing any input (the labels.py --index-out discipline).
 from __future__ import annotations
 
 import json
-import os
 from collections import Counter
 from collections.abc import Iterable
 from itertools import combinations
 from pathlib import Path
 from typing import Any
 
-from civ_arena.canonical import canonical
+from civ_arena.canonical import atomic_write_text, canonical
 
 SCHEMA = 1
+
+# What one unit of "support" counts, per artifact section — sequential
+# support counts RUNS, motif/comparison support counts DECISIONS (the
+# two scales differ; serialized in the artifact source, Codex M19c C4).
+SUPPORT_UNITS = {"sequential": "runs", "motifs": "decisions",
+                 "comparisons": "decisions"}
 
 # Corpus side names, fixed order (mining order; the artifact sorts keys).
 SIDES = ("wins", "losses", "high", "low")
@@ -301,8 +315,42 @@ def mine_motifs(corpus: dict[str, Any], min_support: int,
 # ------------------------------------------------------------ heuristics
 
 
-def build_heuristics(corpus: dict[str, Any], min_support: int,
-                     max_depth: int) -> list[dict[str, Any]]:
+def build_comparisons(corpus: dict[str, Any], min_support: int,
+                      max_depth: int) -> list[dict[str, Any]]:
+    """Serialized median-axis evidence: one row per UNION itemset (mined
+    on the high OR the low side at min_support), with BOTH sides'
+    supports — the below-min-support counterpart included and flagged
+    ``below_min_support`` so consumers can filter weak-comparison rows
+    while the numbers stay serialized (Codex M19c C3). Heuristics cite
+    ONLY these rows; support units are decisions (the motif scale)."""
+    sides = _side_docs(corpus)
+    agg_by_side = {side: _itemset_agg(sides[side])
+                   for side in ("high", "low")}
+    union: set[frozenset[str]] = set()
+    for side in ("high", "low"):
+        if agg_by_side[side]:
+            union.update(mine_itemsets(
+                {iset: rec[0] for iset, rec in agg_by_side[side].items()},
+                min_support, max_depth))
+    rows: list[dict[str, Any]] = []
+    for iset in sorted(union, key=lambda s: (len(s), sorted(s))):
+        supports = {
+            side: sum(rec[0] for other, rec in agg_by_side[side].items()
+                      if iset <= other)
+            for side in ("high", "low")
+        }
+        rows.append({
+            "items": sorted(iset),
+            "support_high": supports["high"],
+            "support_low": supports["low"],
+            "below_min_support": any(n < min_support
+                                     for n in supports.values()),
+        })
+    return rows
+
+
+def build_heuristics(corpus: dict[str, Any],
+                     comparisons: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """M20b-consumable rows — explicit strings only ({option, evidence,
     kind, detail}; kind in promote/demote/context):
 
@@ -310,10 +358,13 @@ def build_heuristics(corpus: dict[str, Any], min_support: int,
       stats over the WHOLE corpus — candidate count, chosen count, a
       floor taken-rate percent, mean diff when taken, and mean diff when
       on the menu but NOT taken (the candidacies are the A/B contrast;
-      both means floor division).
-    - one ``promote`` (support_high > support_low) or ``demote``
-      (<) row per itemset mined on the median axis that contains
-      ``chosen=<opt>`` and whose high-vs-low supports differ.
+      both means floor division). Candidacy counts are not supports —
+      they are serialized in the row itself.
+    - one ``promote`` (support_high > support_low) or ``demote`` (<) row
+      per SERIALIZED comparison row that contains ``chosen=<opt>`` and
+      whose high-vs-low supports differ — derived EXCLUSIVELY from the
+      ``comparisons`` rows exactly as they appear in the artifact, so
+      every cited support number is traceable to a serialized row.
 
     Options with zero discriminating itemsets keep just their context
     row — absence of evidence is reported, never invented."""
@@ -355,34 +406,23 @@ def build_heuristics(corpus: dict[str, Any], min_support: int,
                 f"{_mean(rec['untaken_sum'], rec['untaken_n'])}"),
         })
 
-    sides = _side_docs(corpus)
-    agg_by_side = {side: _itemset_agg(sides[side]) for side in ("high", "low")}
-    mined_union: set[frozenset[str]] = set()
-    for side in ("high", "low"):
-        if agg_by_side[side]:
-            mined_union.update(mine_itemsets(
-                {iset: rec[0] for iset, rec in agg_by_side[side].items()},
-                min_support, max_depth))
-
-    def _support(side: str, iset: frozenset[str]) -> int:
-        return sum(rec[0] for other, rec in agg_by_side[side].items()
-                   if iset <= other)
-
-    discriminating: list[tuple[str, int, int, frozenset[str]]] = []
-    for iset in mined_union:
-        high, low = _support("high", iset), _support("low", iset)
+    discriminating: list[tuple[str, int, int, list[str]]] = []
+    for comp in comparisons:
+        high, low = comp["support_high"], comp["support_low"]
         if high == low:
             continue
-        chosen_item = next((i for i in iset if i.startswith("chosen=")), None)
+        chosen_item = next((i for i in comp["items"]
+                            if i.startswith("chosen=")), None)
         if chosen_item is None:
             continue
-        discriminating.append((chosen_item[len("chosen="):], high, low, iset))
-    for oid, high, low, iset in sorted(
+        discriminating.append((chosen_item[len("chosen="):], high, low,
+                               comp["items"]))
+    for oid, high, low, items in sorted(
             discriminating,
-            key=lambda t: (t[0], -abs(t[1] - t[2]), sorted(t[3]))):
+            key=lambda t: (t[0], -abs(t[1] - t[2]), t[3])):
         rows.append({
             "option": oid,
-            "evidence": "itemset " + ",".join(sorted(iset)),
+            "evidence": "itemset " + ",".join(items),
             "kind": "promote" if high > low else "demote",
             "detail": f"support_high={high} support_low={low}",
         })
@@ -394,9 +434,11 @@ def build_heuristics(corpus: dict[str, Any], min_support: int,
 
 def build_artifact(label_docs: Iterable[dict[str, Any]], *, source: dict,
                    min_support: int, max_itemset_depth: int) -> dict:
-    """The one artifact: {schema, source (+ axis sizes), sequential,
-    motifs, heuristics}. ``source`` (glob/docs/params) is the caller's
-    provenance block — the CLI supplies it; tests pass their own."""
+    """The one artifact: {schema, source (+ support_units + axis sizes),
+    sequential, motifs, comparisons, heuristics}. ``source``
+    (glob/docs/params) is the caller's provenance block — the CLI
+    supplies it; tests pass their own. Heuristics are derived from the
+    SERIALIZED comparisons rows (C3 traceability)."""
     if min_support < 1:
         raise ValueError(f"min_support must be >= 1, got {min_support}")
     if max_itemset_depth < 1:
@@ -404,9 +446,10 @@ def build_artifact(label_docs: Iterable[dict[str, Any]], *, source: dict,
                          f"got {max_itemset_depth}")
     corpus = corpus_from_docs(label_docs)
     sides = _side_docs(corpus)
+    comparisons = build_comparisons(corpus, min_support, max_itemset_depth)
     return {
         "schema": SCHEMA,
-        "source": {**source, "axis": {
+        "source": {**source, "support_units": SUPPORT_UNITS, "axis": {
             "docs": len(corpus["docs"]),
             "skipped_docs": corpus["skipped"],
             "decisions": corpus["decisions"],
@@ -415,31 +458,36 @@ def build_artifact(label_docs: Iterable[dict[str, Any]], *, source: dict,
         }},
         "sequential": mine_sequential(corpus, min_support),
         "motifs": mine_motifs(corpus, min_support, max_itemset_depth),
-        "heuristics": build_heuristics(corpus, min_support,
-                                       max_itemset_depth),
+        "comparisons": comparisons,
+        "heuristics": build_heuristics(corpus, comparisons),
     }
 
 
 def write_artifact(out: Path, artifact: dict[str, Any]) -> None:
-    """Atomic tmp+replace (the labels/journal discipline); canonical text
-    refuses a float-bearing artifact at write time, never on disk."""
-    path = Path(out)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(canonical(artifact) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    """Atomic tmp+replace via canonical.atomic_write_text — mkstemp is
+    O_EXCL, so a symlink or hardlink planted at any predictable tmp name
+    can never be written through (Codex M19c C1); canonical text refuses
+    a float-bearing artifact at write time, never on disk."""
+    atomic_write_text(out, canonical(artifact) + "\n")
 
 
 def assert_out_safe(out: Path, label_paths: list[Path]) -> None:
     """--out must never clobber an input (the labels.py --index-out
     discipline): the resolved out path is checked against every mined
     labels.json AND every protected run artifact beside it — directly,
-    via ``..``, or through a symlink."""
+    via ``..``, or through a symlink. Each label path is RESOLVED before
+    its siblings are built: an input labels.json that is itself a
+    symlink to ../<run>/labels.json relocates its whole run directory,
+    and guarding the UNRESOLVED parent would check aliases beside the
+    link instead of beside the target (Codex M19c C2)."""
     from civ_arena.labels import PROTECTED_ARTIFACTS
 
     resolved_out = Path(out).resolve()
     for path in label_paths:
-        for target in [path, *(path.parent / rel
-                               for rel in PROTECTED_ARTIFACTS)]:
+        resolved_label = path.resolve()
+        for target in [resolved_label,
+                       *(resolved_label.parent / rel
+                         for rel in PROTECTED_ARTIFACTS)]:
             if target.resolve() == resolved_out:
                 raise SystemExit(f"error: --out {out} would overwrite the "
                                  f"run artifact {target} — refusing")

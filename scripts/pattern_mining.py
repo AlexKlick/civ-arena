@@ -52,6 +52,10 @@ def _print_report(artifact: dict[str, Any], out: Path,
         by_side[row["side"]] += 1
     print(f"motif itemsets: {len(motifs)} "
           + " ".join(f"{side}={n}" for side, n in by_side.items()))
+    comparisons = artifact["comparisons"]
+    below = sum(1 for row in comparisons if row["below_min_support"])
+    print(f"median-axis comparison rows: {len(comparisons)} "
+          f"(below_min_support={below})")
     heuristics = artifact["heuristics"]
     kinds = {kind: 0 for kind in ("promote", "demote", "context")}
     for row in heuristics:

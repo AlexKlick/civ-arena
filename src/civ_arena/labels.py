@@ -29,11 +29,10 @@ import argparse
 import glob
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Any
 
-from civ_arena.canonical import canonical
+from civ_arena.canonical import atomic_write_text, canonical
 from civ_arena.game.sim.value import DEFAULT_WEIGHTS, score_differential
 from civ_arena.graph.project import load_records
 from civ_arena.strategy import scoring
@@ -272,19 +271,16 @@ def label_run(run_dir: Path) -> dict[str, Any]:
 
 
 def write_labels(run_dir: Path, doc: dict[str, Any]) -> None:
-    """Atomic tmp+replace (the journal discipline). Canonical text, so a
-    float anywhere in the doc refuses at write time, never on disk."""
-    path = Path(run_dir) / "labels.json"
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(canonical(doc) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    """Atomic tmp+replace (the journal discipline, via
+    canonical.atomic_write_text — mkstemp is O_EXCL, so a planted symlink
+    or hardlink at a predictable tmp name can never be followed). Canonical
+    text, so a float anywhere in the doc refuses at write time, never on
+    disk."""
+    atomic_write_text(Path(run_dir) / "labels.json", canonical(doc) + "\n")
 
 
 def write_index(path: Path, index: dict[str, Any]) -> None:
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(canonical(index) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, canonical(index) + "\n")
 
 
 def _assert_index_safe(index_path: Path, run_dirs: list[Path]) -> None:
