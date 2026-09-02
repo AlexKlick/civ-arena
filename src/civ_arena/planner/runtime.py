@@ -41,7 +41,12 @@ from civ_arena.planner.options import OPTIONS
 from civ_arena.planner.proposer import build_request, compile_proposal
 from civ_arena.planner.search import search_option
 
-SEARCH_METHOD = "mcgs"
+# M19 lane-0: the M16 gate ruling (program doc §7, c1827df) says the
+# graph-search layer is NOT carried forward — sim-scale default = MCTS.
+# The constant had stayed "mcgs" since before the ruling; every
+# config-driven match (live legs included) has been running MCGS. Flipped
+# to match the ruling; the live legs change behavior from the next game on.
+SEARCH_METHOD = "mcts"
 SEARCH_BUDGET = 12
 EPOCH_TURNS = 3
 RESELECT_EVERY = 3

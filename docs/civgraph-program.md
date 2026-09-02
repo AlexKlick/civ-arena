@@ -144,11 +144,18 @@ today.
 | **M15** (specified below) | Foundations, belief forward model, within-turn action DAG + executor, options, MCTS-vs-MCGS comparison — all sim-side | M14 closed |
 | **M16** | LLM as proposer over the option library (candidate options + contingencies as untrusted proposals, compiled and validated before search); option discovery from recorded trajectories; typed uncertainty layer with a real consumer | M15 comparison run |
 | **M17** | Live-leg planner port + the zero-touch match harness (autonomous launch, save-load, modal handling, screenshot triage — the 2026-08-30 autonomy assessment; proposal Gate 1 reliability) | M15; M14 live lane learnings |
-| **M18+** | Learned value/dynamics (graph encoder, expert iteration), league training, human evaluation — the proposal's Phases C–G and Gates 3–5 | Deferred; not planned in detail here |
+| **M18** | Live-leg hotseat 1v1 — both seats arena-driven, no engine AI (the in-flight "M18" git commits are this lane, NOT the deferred training row they displaced) | M17 |
+| **M19** | Memory that acts: outcome-label layer over the recorded corpora (read-only side artifacts, never the event log); case-based retrieval-as-evidence prior at the planner's existing prior seam; offline pattern mining over option traces and strategic features | M16 corpus on disk (runs/exp3 + llm-vs-turtler) |
+| **M20** | Learning that adapts: sim league/self-play harness (planner-vs-planner arm — a recorded MCGS revival condition); contextual fixed-point bandit over options; learned value head (offline numpy fit, dev group only, quantized to ints) | M19 labels |
+| **M21+** | Graph-encoder dynamics models, expert iteration, human evaluation — the rest of the proposal's Phases C–G and Gates 3–5 | Deferred; not planned in detail here |
 
-Everything in M18+ is explicitly out of scope for planning today: it
-depends on results, hardware budget (GPU 0 is text-main's), and whether the
-M15 comparison validates the architecture at all.
+M19/M20 pull the league-training and learned-value rungs forward
+(operator-approved 2026-09-02, with constraints: numpy stays in the dev
+group for OFFLINE fitting only, quantized to ints at the boundary — the
+runtime stays pure-integer and GPU-free; every experiment is model-free,
+zero API spend). What remains M21+ stays out of scope for the same
+reasons as before: results, hardware budget (GPU 0 is text-main's), and
+the world-class gates past reliability.
 
 ## 5. M15 — the first research build (full spec)
 
@@ -287,8 +294,9 @@ A turn is a partially ordered set of actions, most of which commute.
   verdict layer is non-empty in real runs.
 - Live Civ VI evaluation, the zero-touch harness, and everything the
   autonomy assessment enumerated — M17.
-- Learned value/dynamics models, expert iteration, league training, human
-  evaluation, and every world-class gate past reliability — M18+.
+- Graph-encoder dynamics models, expert iteration, human evaluation, and
+  every world-class gate past reliability — M21+. (League training and the
+  learned value head moved into M19/M20 on 2026-09-02 — §4.)
 
 ## 7. Experiment record
 
@@ -389,3 +397,33 @@ Gates across the day: 426 → 431 → 436 → 439 → 444 passed (+1 skip),
 the same 2 pre-existing out-of-lane failures throughout. Codex rounds
 found real defects every time (2+1, 3+1+2) — the standing pattern
 since M15a.
+
+### 2026-09-02 — Lane 0: sim-scale default flipped to MCTS; M19/M20 chartered
+
+The M16 gate ruling said "the graph-search layer is NOT carried forward.
+Sim-scale default = MCTS" — but `SEARCH_METHOD` had stayed `"mcgs"`, so
+every config-driven match since the ruling (live legs included) actually
+ran MCGS. Flipped to `"mcts"` per the ruling (operator-approved 2026-09-02);
+the trace-method pin flips with it. Live-leg planner behavior changes from
+the next game on. Codex round skipped for this lane — a two-line code diff,
+self-reviewed.
+
+Baseline floor established at HEAD `cec6bcb` BEFORE the flip, from one
+teed run (`/tmp/lane0-baseline.log`): **2 failed, 456 passed, 1 skipped,
+580s** — the failures are exactly the known out-of-lane pair
+(`test_dispatch_rehearsal_end_to_end`, `test_client_parse_armor`); the
+"third" failure carried in the stale pytest cache was a phantom (no such
+test exists at HEAD). This exact set is the green-gate definition for
+every M19/M20 lane; the floor is only ever re-established by a full teed
+run. The post-flip gate matched it exactly (`/tmp/lane0-gate.log`:
+2 failed / 456 passed / 1 skipped). Ruff carries 4 PRE-EXISTING errors at
+HEAD too (proven by stash: `live_newgame.py` ×2, `live_driver.py:584`,
+`test_zero_touch.py:61` — all M18 live-lane files, outside this wave);
+the ruff floor for M19/M20 lanes = zero NEW errors, those 4 recorded.
+
+M19 (memory that acts: outcome labels, case-based prior, pattern mining)
+and M20 (learning that adapts: league/self-play, contextual bandit,
+learned value head) are chartered in §4. Operator decisions for the wave:
+both milestones executed back-to-back; numpy in the dev group for offline
+fitting only, quantized to ints; zero LLM API spend — every experiment
+model-free.

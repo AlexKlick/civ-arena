@@ -116,7 +116,7 @@ async def test_planner_full_match_zero_rejections_and_replay(tmp_path):
     summary = await arena.run()
     assert summary["final_turn"] == 8
     assert summary["violations_total"] == 0
-    assert bot.trace and bot.trace[0]["method"] == "mcgs"
+    assert bot.trace and bot.trace[0]["method"] == "mcts"
     assert bot.active in OPTIONS
 
     records = [json.loads(line) for line in
