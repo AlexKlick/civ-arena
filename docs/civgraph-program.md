@@ -512,3 +512,16 @@ artifact runs/patterns-m19c.json at min-support 10 (9,548 sequential /
 5,838 motifs / 838 heuristics). Strongest promote signal:
 chosen=rush + rival researched>=3 — support 405 high-diff vs 190
 low-diff. 8 hermetic pins incl. the bruteforce-subsequence oracle.
+Codex round 1: NO-GO 3 P1 + 1 P2 — the atomic-write CLASS defect
+(predictable .tmp follows planted symlinks; labels/journal shared the
+same idiom) fixed ONCE as canonical.atomic_write_text (mkstemp/O_EXCL),
+symlinked-input guard hardening, and heuristic evidence made traceable
+to serialized comparison rows (below-threshold counterparts included,
+flagged). All verified + pinned (c08afeb); the production re-run is
+element-for-element identical on every pre-existing list.
+
+M19 COMPLETE. Gates across the milestone: 467 → 479 → 482 → 490 → 492
+passed (+1 skip), the same 2 pre-existing failures throughout; three
+Codex rounds, every finding verified before fixing (4+3, 5+1, 3+1).
+The outcome loop is closed and mining runs on it; retrieval-as-evidence
+in its first form is honestly REJECTED with mechanism.
