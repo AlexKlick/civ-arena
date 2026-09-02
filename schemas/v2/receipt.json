@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:receipt:2",
+  "title": "Civ Arena V2 turn and episode receipts",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "TurnReceiptV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receipt_id",
+        "episode_id",
+        "turn",
+        "player_id",
+        "pre_observation_id",
+        "post_observation_id",
+        "proposal_id",
+        "graph_ids",
+        "authorizations",
+        "results",
+        "replan_count",
+        "termination",
+        "safe_error"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "receipt_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "episode_id": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+        "turn": {"type": "integer", "minimum": 0},
+        "player_id": {"type": "integer", "minimum": 0},
+        "pre_observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "post_observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "proposal_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "graph_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"}
+        },
+        "authorizations": {
+          "type": "array",
+          "items": {"$ref": "urn:civ-arena:action:2#/$defs/AuthorizationV2"}
+        },
+        "results": {
+          "type": "array",
+          "items": {"$ref": "urn:civ-arena:action:2#/$defs/ActionResultV2"}
+        },
+        "replan_count": {"type": "integer", "minimum": 0},
+        "termination": {
+          "enum": ["completed", "failed", "mandatory_unresolved", "replans_exhausted"]
+        },
+        "safe_error": {
+          "oneOf": [
+            {"type": "string", "maxLength": 240},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "ComputeConfigV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_mode", "max_graph_actions", "max_replans_per_turn"],
+      "properties": {
+        "execution_mode": {"enum": ["dag_tx", "sequential", "legal_list", "dag"]},
+        "max_graph_actions": {"type": "integer", "minimum": 1, "maximum": 65536},
+        "max_replans_per_turn": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "EpisodeReceiptV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receipt_id",
+        "episode_id",
+        "parent_episode_id",
+        "parent_terminal_event_hash",
+        "environment",
+        "policies",
+        "seed",
+        "compute",
+        "scored",
+        "termination_reason",
+        "turns_completed",
+        "terminal_event_hash",
+        "artifacts"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "receipt_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "episode_id": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+        "parent_episode_id": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+            {"type": "null"}
+          ]
+        },
+        "parent_terminal_event_hash": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+            {"type": "null"}
+          ]
+        },
+        "environment": {"$ref": "urn:civ-arena:descriptor:2#/$defs/EnvironmentDescriptorV2"},
+        "policies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "urn:civ-arena:descriptor:2#/$defs/PolicyDescriptorV2"}
+        },
+        "seed": {
+          "oneOf": [{"type": "integer"}, {"type": "null"}]
+        },
+        "compute": {"$ref": "#/$defs/ComputeConfigV2"},
+        "scored": {"type": "boolean"},
+        "termination_reason": {
+          "enum": ["success", "failure", "cancelled", "timeout", "recovered_crash"]
+        },
+        "turns_completed": {"type": "integer", "minimum": 0},
+        "terminal_event_hash": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "artifacts": {
+          "type": "array",
+          "items": {"$ref": "urn:civ-arena:artifact:2"}
+        }
+      }
+    }
+  }
+}

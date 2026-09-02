@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:graph:2",
+  "title": "Civ Arena V2 legal-action graph contracts",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "ActionGraphNodeV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "node_id", "action"],
+      "properties": {
+        "schema": {"const": 2},
+        "node_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "action": {"$ref": "urn:civ-arena:action:2#/$defs/LegalActionV2"}
+      }
+    },
+    "ActionGraphEdgeV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "edge_id",
+        "source_action_id",
+        "target_action_id",
+        "kind",
+        "authority",
+        "reason_code",
+        "region"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "edge_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "source_action_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "target_action_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "kind": {
+          "enum": [
+            "MUST_PRECEDE",
+            "REQUIRES",
+            "ENABLES",
+            "CONFLICTS_WITH",
+            "MUTEX",
+            "CONSUMES_SHARED_RESOURCE",
+            "INVALIDATES",
+            "COMMUTES_WITH"
+          ]
+        },
+        "authority": {"enum": ["authoritative", "derived"]},
+        "reason_code": {
+          "enum": [
+            "effect_enables",
+            "exclusive_choice",
+            "insufficient_shared_resource",
+            "mutation_invalidates",
+            "overlapping_effect",
+            "precondition_dependency",
+            "proven_disjoint",
+            "same_actor_sequence",
+            "unknown_relationship"
+          ]
+        },
+        "region": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "ActionGraphMetricsV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "legal_action_count",
+        "edge_count_by_kind",
+        "independent_action_groups",
+        "raw_permutation_estimate",
+        "canonical_plan_count",
+        "reduction_ratio_fixed",
+        "compile_duration_ms",
+        "revalidation_regions",
+        "rejected_reasons"
+      ],
+      "properties": {
+        "legal_action_count": {"type": "integer", "minimum": 0},
+        "edge_count_by_kind": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "MUST_PRECEDE",
+            "REQUIRES",
+            "ENABLES",
+            "CONFLICTS_WITH",
+            "MUTEX",
+            "CONSUMES_SHARED_RESOURCE",
+            "INVALIDATES",
+            "COMMUTES_WITH"
+          ],
+          "properties": {
+            "MUST_PRECEDE": {"type": "integer", "minimum": 0},
+            "REQUIRES": {"type": "integer", "minimum": 0},
+            "ENABLES": {"type": "integer", "minimum": 0},
+            "CONFLICTS_WITH": {"type": "integer", "minimum": 0},
+            "MUTEX": {"type": "integer", "minimum": 0},
+            "CONSUMES_SHARED_RESOURCE": {"type": "integer", "minimum": 0},
+            "INVALIDATES": {"type": "integer", "minimum": 0},
+            "COMMUTES_WITH": {"type": "integer", "minimum": 0}
+          }
+        },
+        "independent_action_groups": {"type": "integer", "minimum": 0},
+        "raw_permutation_estimate": {"type": "integer", "minimum": 1},
+        "canonical_plan_count": {"type": "integer", "minimum": 0},
+        "reduction_ratio_fixed": {"type": "integer", "minimum": 0},
+        "compile_duration_ms": {"type": "integer", "minimum": 0},
+        "revalidation_regions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"}
+        },
+        "rejected_reasons": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 160}
+        }
+      }
+    },
+    "ActionGraphV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "graph_id", "observation_id", "legal_action_set_id", "nodes", "edges", "metrics"],
+      "properties": {
+        "schema": {"const": 2},
+        "graph_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "legal_action_set_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "nodes": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/ActionGraphNodeV2"}
+        },
+        "edges": {
+          "type": "array",
+          "maxItems": 1048576,
+          "items": {"$ref": "#/$defs/ActionGraphEdgeV2"}
+        },
+        "metrics": {"$ref": "#/$defs/ActionGraphMetricsV2"}
+      }
+    }
+  }
+}

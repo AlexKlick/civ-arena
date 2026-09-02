@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:descriptor:2",
+  "title": "Civ Arena V2 environment and policy descriptors",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "EnvironmentDescriptorV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "descriptor_id",
+        "adapter_kind",
+        "adapter_version",
+        "game_version",
+        "ruleset_digest",
+        "mod_digest",
+        "capabilities",
+        "deterministic"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "descriptor_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "adapter_kind": {"enum": ["fake", "firetuner"]},
+        "adapter_version": {"type": "string", "minLength": 1, "maxLength": 80},
+        "game_version": {"type": "string", "minLength": 1, "maxLength": 160},
+        "ruleset_digest": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "mod_digest": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "action_execution",
+              "deterministic_fake_replay",
+              "live_observational_replay",
+              "player_observation",
+              "private_referee_monitor",
+              "save_load_research_only",
+              "turn_events"
+            ]
+          }
+        },
+        "deterministic": {"type": "boolean"}
+      }
+    },
+    "PolicyDescriptorV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "descriptor_id",
+        "policy_kind",
+        "policy_version",
+        "artifact_digest",
+        "provider",
+        "model",
+        "observation_only",
+        "registered_action_kinds"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "descriptor_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "policy_kind": {"enum": ["scripted", "planner", "llm", "replay", "system"]},
+        "policy_version": {"type": "string", "minLength": 1, "maxLength": 80},
+        "artifact_digest": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+            {"type": "null"}
+          ]
+        },
+        "provider": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 80},
+            {"type": "null"}
+          ]
+        },
+        "model": {
+          "oneOf": [
+            {"type": "string", "minLength": 1, "maxLength": 160},
+            {"type": "null"}
+          ]
+        },
+        "observation_only": {"const": true},
+        "registered_action_kinds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/ActionKindV2"}
+        }
+      }
+    }
+  }
+}

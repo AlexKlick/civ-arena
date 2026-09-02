@@ -1,0 +1,284 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:common:2",
+  "title": "Civ Arena V2 common contract definitions",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "Digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/+,-]*$"
+    },
+    "CanonicalScalar": {
+      "oneOf": [
+        {"type": "boolean"},
+        {"type": "integer"},
+        {"type": "string", "maxLength": 512}
+      ]
+    },
+    "CanonicalValue": {
+      "oneOf": [
+        {"$ref": "#/$defs/CanonicalScalar"},
+        {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/CanonicalScalar"}
+        }
+      ]
+    },
+    "KnowledgeValueV2": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "state", "value", "observed_turn"],
+          "properties": {
+            "schema": {"const": 2},
+            "state": {"const": "known"},
+            "value": {"$ref": "#/$defs/CanonicalValue"},
+            "observed_turn": {"type": "integer", "minimum": 0}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "state", "reason", "observed_turn"],
+          "properties": {
+            "schema": {"const": 2},
+            "state": {"const": "unknown"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+            "observed_turn": {
+              "oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "state", "reason", "observed_turn"],
+          "properties": {
+            "schema": {"const": 2},
+            "state": {"const": "not_observed"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+            "observed_turn": {
+              "oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema", "state", "reason", "observed_turn"],
+          "properties": {
+            "schema": {"const": 2},
+            "state": {"const": "not_applicable"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+            "observed_turn": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "EntityRefV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "entity_type",
+        "entity_id",
+        "identity_kind",
+        "identity_version"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "entity_type": {
+          "enum": [
+            "player",
+            "unit",
+            "city",
+            "tile",
+            "technology",
+            "production_item",
+            "resource",
+            "phase",
+            "system"
+          ]
+        },
+        "entity_id": {"$ref": "#/$defs/Identifier"},
+        "identity_kind": {"enum": ["semantic", "ephemeral"]},
+        "identity_version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "ObservableFactV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "subject", "subject_scope", "predicate", "value", "source"],
+      "properties": {
+        "schema": {"const": 2},
+        "subject": {"$ref": "#/$defs/EntityRefV2"},
+        "subject_scope": {
+          "enum": ["self", "owned", "public", "visible_foreign", "remembered_foreign"]
+        },
+        "predicate": {
+          "enum": [
+            "available",
+            "available_production",
+            "available_research",
+            "coord",
+            "cost",
+            "feature",
+            "fortified",
+            "gold",
+            "hp",
+            "hp_bucket",
+            "improvement",
+            "movement",
+            "name",
+            "owner_id",
+            "population",
+            "production_queue",
+            "ranged_strength",
+            "researched",
+            "researching",
+            "resource",
+            "status",
+            "strength",
+            "terrain",
+            "turns_remaining",
+            "type",
+            "yields"
+          ]
+        },
+        "value": {"$ref": "#/$defs/KnowledgeValueV2"},
+        "source": {"enum": ["direct", "remembered", "derived_visible"]}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "subject_scope": {"enum": ["visible_foreign", "remembered_foreign"]}
+            },
+            "required": ["subject_scope"]
+          },
+          "then": {
+            "properties": {
+              "predicate": {
+                "enum": [
+                  "coord",
+                  "hp_bucket",
+                  "name",
+                  "owner_id",
+                  "population",
+                  "ranged_strength",
+                  "status",
+                  "strength",
+                  "type"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"subject_scope": {"const": "remembered_foreign"}},
+            "required": ["subject_scope"]
+          },
+          "then": {
+            "properties": {
+              "predicate": {
+                "enum": ["coord", "name", "owner_id", "status", "type"]
+              },
+              "source": {"const": "remembered"}
+            }
+          }
+        }
+      ]
+    },
+    "ActionParametersV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "city_id": {"$ref": "#/$defs/Identifier"},
+        "dest": {"type": "string", "pattern": "^-?[0-9]+,-?[0-9]+$"},
+        "item_id": {"$ref": "#/$defs/Identifier"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 80},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 160},
+        "target_id": {"$ref": "#/$defs/Identifier"},
+        "tech_id": {"$ref": "#/$defs/Identifier"},
+        "unit_id": {"$ref": "#/$defs/Identifier"}
+      }
+    },
+    "ActionKindV2": {
+      "enum": [
+        "attack",
+        "end_turn",
+        "fortify",
+        "found_city",
+        "move_unit",
+        "purchase",
+        "set_city_production",
+        "set_research"
+      ]
+    },
+    "PreconditionClaimV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "subject", "predicate", "operator", "expected"],
+      "properties": {
+        "schema": {"const": 2},
+        "subject": {"$ref": "#/$defs/EntityRefV2"},
+        "predicate": {
+          "enum": [
+            "available",
+            "coord",
+            "gold",
+            "mandatory_resolved",
+            "movement",
+            "owner_id",
+            "prerequisite",
+            "range",
+            "slot_empty",
+            "target_exists"
+          ]
+        },
+        "operator": {"enum": ["eq", "ne", "gte", "lte", "present", "absent", "contains"]},
+        "expected": {"$ref": "#/$defs/KnowledgeValueV2"}
+      }
+    },
+    "ResourceClaimV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "resource", "owner", "amount", "mode", "region"],
+      "properties": {
+        "schema": {"const": 2},
+        "resource": {"enum": ["gold", "movement", "production_slot", "research_slot", "unit", "turn"]},
+        "owner": {"$ref": "#/$defs/EntityRefV2"},
+        "amount": {"type": "integer", "minimum": 0},
+        "mode": {"enum": ["consume", "reserve", "read"]},
+        "region": {"$ref": "#/$defs/Identifier"}
+      }
+    },
+    "EffectClaimV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "effect_kind", "subject", "attribute", "expected", "region"],
+      "properties": {
+        "schema": {"const": 2},
+        "effect_kind": {
+          "enum": ["create", "damage", "decrement", "delete", "increment", "move", "no_change", "set", "terminal"]
+        },
+        "subject": {"$ref": "#/$defs/EntityRefV2"},
+        "attribute": {
+          "enum": ["coord", "fortified", "gold", "hp", "movement", "population", "production_queue", "researched", "researching", "status", "turn"]
+        },
+        "expected": {"$ref": "#/$defs/KnowledgeValueV2"},
+        "region": {"$ref": "#/$defs/Identifier"}
+      }
+    }
+  }
+}

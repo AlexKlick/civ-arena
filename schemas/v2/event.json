@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:event:2",
+  "title": "EventV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "event_type",
+    "schema_ref",
+    "episode_id",
+    "turn_id",
+    "correlation_id",
+    "causation_id",
+    "sequence_number",
+    "occurred_at",
+    "payload",
+    "previous_event_hash",
+    "semantic_hash",
+    "event_hash"
+  ],
+  "properties": {
+    "schema": {"const": 2},
+    "event_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+    "event_type": {
+      "enum": [
+        "EpisodeStarted",
+        "ObservationRecorded",
+        "LegalActionsRecorded",
+        "ActionGraphCompiled",
+        "PolicyProposalRecorded",
+        "ActionAuthorized",
+        "ActionExecutionStarted",
+        "ActionExecutionCompleted",
+        "PostconditionVerified",
+        "GraphRegionInvalidated",
+        "TurnCompleted",
+        "EpisodeTerminated",
+        "ValidationRecorded"
+      ]
+    },
+    "schema_ref": {"type": "string", "pattern": "^urn:civ-arena:[A-Za-z0-9._-]+:2(?:#.*)?$"},
+    "episode_id": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+    "turn_id": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "null"}
+      ]
+    },
+    "correlation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+    "causation_id": {
+      "oneOf": [
+        {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        {"type": "null"}
+      ]
+    },
+    "sequence_number": {"type": "integer", "minimum": 0},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {"$ref": "urn:civ-arena:artifact:2"},
+        "authorization": {"$ref": "urn:civ-arena:action:2#/$defs/AuthorizationV2"},
+        "episode_receipt": {"$ref": "urn:civ-arena:receipt:2#/$defs/EpisodeReceiptV2"},
+        "message_code": {"type": "string", "minLength": 1, "maxLength": 160},
+        "result": {"$ref": "urn:civ-arena:action:2#/$defs/ActionResultV2"},
+        "turn_receipt": {"$ref": "urn:civ-arena:receipt:2#/$defs/TurnReceiptV2"}
+      },
+      "minProperties": 1,
+      "maxProperties": 1
+    },
+    "previous_event_hash": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+    "semantic_hash": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+    "event_hash": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"}
+  }
+}

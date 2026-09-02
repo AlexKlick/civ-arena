@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:observation:2",
+  "title": "ObservationV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observation_id",
+    "environment_id",
+    "game_version",
+    "ruleset_digest",
+    "turn",
+    "active_player",
+    "observing_player",
+    "phase",
+    "observed_at_seq",
+    "facts",
+    "mandatory_action_kinds"
+  ],
+  "properties": {
+    "schema": {"const": 2},
+    "observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+    "environment_id": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"},
+    "game_version": {"type": "string", "minLength": 1, "maxLength": 160},
+    "ruleset_digest": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+    "turn": {"type": "integer", "minimum": 0},
+    "active_player": {"$ref": "urn:civ-arena:common:2#/$defs/EntityRefV2"},
+    "observing_player": {"$ref": "urn:civ-arena:common:2#/$defs/EntityRefV2"},
+    "phase": {"enum": ["pre_turn", "turn", "post_turn", "terminal"]},
+    "observed_at_seq": {"type": "integer", "minimum": 0},
+    "facts": {
+      "type": "array",
+      "maxItems": 16384,
+      "items": {"$ref": "urn:civ-arena:common:2#/$defs/ObservableFactV2"}
+    },
+    "mandatory_action_kinds": {
+      "type": "array",
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {"$ref": "urn:civ-arena:common:2#/$defs/ActionKindV2"}
+    }
+  }
+}

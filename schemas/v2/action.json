@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:action:2",
+  "title": "Civ Arena V2 action contracts",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "ActionIntentV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "intent_id", "action_kind", "actor", "target", "parameters", "proposal_index"],
+      "properties": {
+        "schema": {"const": 2},
+        "intent_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "action_kind": {"$ref": "urn:civ-arena:common:2#/$defs/ActionKindV2"},
+        "actor": {"$ref": "urn:civ-arena:common:2#/$defs/EntityRefV2"},
+        "target": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/EntityRefV2"},
+            {"type": "null"}
+          ]
+        },
+        "parameters": {"$ref": "urn:civ-arena:common:2#/$defs/ActionParametersV2"},
+        "proposal_index": {"type": "integer", "minimum": 0}
+      }
+    },
+    "LegalActionV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "action_id",
+        "action_kind",
+        "actor",
+        "target",
+        "parameters",
+        "preconditions",
+        "resource_claims",
+        "expected_effects",
+        "affected_regions",
+        "observation_id",
+        "mandatory",
+        "terminal",
+        "safe_to_retry"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "action_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "action_kind": {"$ref": "urn:civ-arena:common:2#/$defs/ActionKindV2"},
+        "actor": {"$ref": "urn:civ-arena:common:2#/$defs/EntityRefV2"},
+        "target": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/EntityRefV2"},
+            {"type": "null"}
+          ]
+        },
+        "parameters": {"$ref": "urn:civ-arena:common:2#/$defs/ActionParametersV2"},
+        "preconditions": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/PreconditionClaimV2"}
+        },
+        "resource_claims": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/ResourceClaimV2"}
+        },
+        "expected_effects": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/EffectClaimV2"}
+        },
+        "affected_regions": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/Identifier"}
+        },
+        "observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "mandatory": {"type": "boolean"},
+        "terminal": {"type": "boolean"},
+        "safe_to_retry": {"type": "boolean"}
+      }
+    },
+    "LegalActionSetV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "legal_action_set_id", "observation_id", "actions"],
+      "properties": {
+        "schema": {"const": 2},
+        "legal_action_set_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "actions": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/LegalActionV2"}
+        }
+      }
+    },
+    "AuthorizationV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "authorization_id",
+        "decision",
+        "intent_id",
+        "action_id",
+        "observation_id",
+        "graph_id",
+        "reason_code"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "authorization_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "decision": {"enum": ["authorized", "refused"]},
+        "intent_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "action_id": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+            {"type": "null"}
+          ]
+        },
+        "observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "graph_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "reason_code": {
+          "enum": [
+            "authorized",
+            "action_absent",
+            "ambiguous_intent",
+            "conflict",
+            "mandatory_unresolved",
+            "stale_graph",
+            "stale_observation",
+            "unregistered_action"
+          ]
+        }
+      }
+    },
+    "ActionResultV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "result_id",
+        "status",
+        "action_id",
+        "authorization_id",
+        "pre_observation_id",
+        "post_observation_id",
+        "verification",
+        "observable_effects",
+        "rejection_code",
+        "safe_message"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "result_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "status": {"enum": ["accepted", "rejected", "duplicate", "diverged"]},
+        "action_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "authorization_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "pre_observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "post_observation_id": {
+          "oneOf": [
+            {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+            {"type": "null"}
+          ]
+        },
+        "verification": {"enum": ["matched", "mismatched", "not_executed", "not_verifiable"]},
+        "observable_effects": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {"$ref": "urn:civ-arena:common:2#/$defs/EffectClaimV2"}
+        },
+        "rejection_code": {
+          "oneOf": [
+            {
+              "enum": [
+                "adapter_rejected",
+                "authorization_refused",
+                "postcondition_diverged",
+                "stale_authorization",
+                "unsafe_retry_refused"
+              ]
+            },
+            {"type": "null"}
+          ]
+        },
+        "safe_message": {
+          "oneOf": [
+            {"type": "string", "maxLength": 240},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "TurnProposalV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "proposal_id", "policy_id", "observation_id", "intents"],
+      "properties": {
+        "schema": {"const": 2},
+        "proposal_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "policy_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "observation_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "intents": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/ActionIntentV2"}
+        }
+      }
+    }
+  }
+}

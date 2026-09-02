@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:civ-arena:artifact:2",
+  "title": "ArtifactRefV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "digest", "schema_ref", "byte_length", "media_type"],
+  "properties": {
+    "schema": {"const": 2},
+    "digest": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+    "schema_ref": {"type": "string", "pattern": "^urn:civ-arena:[A-Za-z0-9._-]+:2(?:#.*)?$"},
+    "byte_length": {"type": "integer", "minimum": 0},
+    "media_type": {"const": "application/json"}
+  }
+}
