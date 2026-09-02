@@ -12,6 +12,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -95,17 +96,28 @@ def _pair(tool: str, args: dict[str, Any], seq: int, pid: int, turn: int,
     return [base("TOOL_CALL", tool=tool, args=args), result]
 
 
-def _write_claim_run(run_dir: Path) -> Path:
+def _write_claim_run(run_dir: Path, agents: list[Any] | None = None,
+                     scores: dict[str, Any] | None = None) -> Path:
     """A finished claim-bearing match: roman set three goals (met, missed,
     self-assess) and two predictions (met, self-assess), observed his own
-    cities at the deadline, and wrote one lesson; korea wrote nothing."""
+    cities at the deadline, and wrote one lesson; korea wrote nothing.
+    ``agents``/``scores`` let tests exercise roster and scoreless-run
+    shapes without touching the default event body."""
     match_id = "claims-run"
+    if agents is None:
+        agents = [["roman", 0, "llm"], ["korean-turtler", 1, "turtler"]]
+    if scores is None:
+        scores = {
+            "ROME": {"cities": 3, "gold": 60, "player_id": 0,
+                     "population": 8, "techs": 1, "units": 5},
+            "KOREA": {"cities": 1, "gold": 10, "player_id": 1,
+                      "population": 2, "techs": 0, "units": 4},
+        }
     records: list[dict[str, Any]] = [
         {"kind": "MATCH_START", "seq": 0, "match_id": match_id,
          "game_instance_id": "g", "turn": 0, "phase_player_id": -1,
          "player_id": None, "agent_id": None, "visibility_scope": "referee",
-         "config": {"agents": [["roman", 0, "llm"],
-                               ["korean-turtler", 1, "turtler"]]}},
+         "config": {"agents": agents}},
     ]
     records += _pair("get_overview", {}, 1, 0, 1, "roman", match_id,
                      observed={"gold": 60, "techs": 1,
@@ -144,12 +156,7 @@ def _write_claim_run(run_dir: Path) -> Path:
         "match_id": match_id, "game_instance_id": "g", "final_turn": 5,
         "aborted": None, "violations_total": 0,
         "final_state_hash": "x" * 64, "telemetry": {},
-        "scores": {
-            "ROME": {"cities": 3, "gold": 60, "player_id": 0,
-                     "population": 8, "techs": 1, "units": 5},
-            "KOREA": {"cities": 1, "gold": 10, "player_id": 1,
-                      "population": 2, "techs": 0, "units": 4},
-        },
+        "scores": scores,
     }, sort_keys=True))
     return run_dir
 
@@ -239,6 +246,12 @@ def test_no_floats_in_labels(claims_run: Path) -> None:
 
 
 def test_shared_differential_agrees_with_old_helpers() -> None:
+    """The shared score_differential must equal the retired private helper
+    bodies wherever they were defined — with ONE deliberate divergence:
+    the no-rival case returns the own score (mirroring value_of's
+    fallback) where the retired bodies CRASHED on max([]). That
+    divergence is intentional and pinned below; the coordinator's
+    behavior-preserving claim is corrected in the docs record, not here."""
     scores = {
         "ROME": {"player_id": 0, "cities": 2, "gold": 462, "population": 9,
                  "techs": 8, "units": 17},
@@ -272,6 +285,15 @@ def test_shared_differential_agrees_with_old_helpers() -> None:
     assert score_differential(tie, 0) == old_differential(tie, 0) == 0
     assert score_differential(tie, 1) == old_differential(tie, 1) == 0
 
+    # the no-rival case is the DELIBERATE divergence: the retired bodies
+    # raised on max([]); the shared function mirrors value_of and returns
+    # the own score instead of crashing a one-player scores dict
+    single = {"ROME": {"player_id": 0, "cities": 1, "gold": 2,
+                       "population": 3, "techs": 4, "units": 5}}
+    assert score_differential(single, 0) == 100 + 3 * 20 + 4 * 30 + 5 * 10 + 2
+    with pytest.raises(ValueError):
+        old_differential(single, 0)  # the retired body crashed here
+
     # the dedupe landed: both scripts use the shared function, neither
     # carries the old private copy
     for script in ("scripts/planner_experiment.py",
@@ -279,3 +301,108 @@ def test_shared_differential_agrees_with_old_helpers() -> None:
         text = (REPO / script).read_text()
         assert "def _differential" not in text, script
         assert "score_differential" in text, script
+
+
+# --------------------------------------------- Codex review round pins
+
+
+def test_index_keyed_by_run_dir_and_duplicate_match_ids_both_kept(
+        tmp_path: Path, monkeypatch: pytest.Monkeypatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "runs"
+    _write_claim_run(root / "a")
+    _write_claim_run(root / "b")  # SAME match_id, different directory
+    index_out = tmp_path / "index.json"
+    monkeypatch.setattr(sys, "argv", [
+        "civ-arena-labels", "--corpus", str(root / "*"),
+        "--index-out", str(index_out)])
+    labels.main()
+    index = json.loads(index_out.read_text())
+    # keyed by run directory: both same-id runs survive as entries
+    assert set(index) == {str(root / "a"), str(root / "b")}
+    assert all(entry["match_id"] == "claims-run"
+               for entry in index.values())
+    assert index[str(root / "a")]["labels_sha256"] \
+        == index[str(root / "b")]["labels_sha256"]  # identical input bytes
+    # the per-run print lines survive, one per labeled run
+    assert capsys.readouterr().out.count(
+        "claims-run: decisions=0 claims=6") == 2
+
+
+def test_index_out_cannot_target_protected_artifacts(tmp_path: Path) -> None:
+    run_dir = _write_claim_run(tmp_path / "run")
+    run_dirs = [run_dir]
+    for rel in labels.PROTECTED_ARTIFACTS:
+        with pytest.raises(SystemExit, match="would overwrite"):
+            labels._assert_index_safe(run_dir / rel, run_dirs)
+    # a symlink to a protected artifact is caught through resolve()
+    link = tmp_path / "sneaky.json"
+    link.symlink_to(run_dir / "summary.json")
+    with pytest.raises(SystemExit, match="would overwrite"):
+        labels._assert_index_safe(link, run_dirs)
+    # a genuinely separate path passes
+    labels._assert_index_safe(tmp_path / "index.json", run_dirs)
+
+
+def test_roster_fail_closed_on_duplicate_seats_and_multiple_match_starts(
+        tmp_path: Path) -> None:
+    dup_pid = _write_claim_run(
+        tmp_path / "dup-pid",
+        agents=[["roman", 0, "llm"], ["other", 0, "turtler"]])
+    with pytest.raises(ValueError, match="duplicate seat identity"):
+        labels.label_run(dup_pid)
+    dup_agent = _write_claim_run(
+        tmp_path / "dup-agent",
+        agents=[["roman", 0, "llm"], ["roman", 1, "turtler"]])
+    with pytest.raises(ValueError, match="duplicate seat identity"):
+        labels.label_run(dup_agent)
+
+    two = _write_claim_run(tmp_path / "two-starts")
+    path = two / "events.jsonl"
+    recs = [json.loads(ln) for ln in path.read_text().splitlines()
+            if ln.strip()]
+    recs.append({**recs[0], "seq": recs[-1]["seq"] + 1})  # second MATCH_START
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                            for r in recs))
+    with pytest.raises(ValueError, match="exactly one MATCH_START"):
+        labels.label_run(two)
+
+
+def test_claims_outside_roster_fail_closed(tmp_path: Path) -> None:
+    run_dir = _write_claim_run(tmp_path / "run")
+    path = run_dir / "events.jsonl"
+    recs = [json.loads(ln) for ln in path.read_text().splitlines()
+            if ln.strip()]
+    # an accepted claim pair authored by unrostered player 2 (agent
+    # "intruder"): from_log would land it in the store, but the label doc
+    # enumerates per roster seat — refusing beats silently omitting it
+    recs += _pair("set_goal", {"text": "foreign goal"}, recs[-1]["seq"] + 1,
+                  2, 3, "intruder", "claims-run")
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                            for r in recs))
+    with pytest.raises(ValueError, match="outside the MATCH_START roster"):
+        labels.label_run(run_dir)
+
+
+def test_scoresless_run_labels_with_null_differential(tmp_path: Path) -> None:
+    # real shape of runs/live-exclusive-004/005: aborted legs whose
+    # summary carries scores: {} — labelable, with unknown (null)
+    # differentials, never fabricated zeros
+    run_dir = _write_claim_run(tmp_path / "run", scores={})
+    doc = labels.label_run(run_dir)
+    assert doc["outcome"]["score_vectors"] == {}
+    assert doc["outcome"]["value_differential"] == {"0": None, "1": None}
+    assert doc["outcome"]["outcome_sign"] == {"0": None, "1": None}
+    assert doc["claims"], "claims do not depend on score vectors"
+    labels.write_labels(run_dir, doc)  # nulls are canonical — writes clean
+    assert json.loads((run_dir / "labels.json").read_text()) == doc
+
+
+def test_numeric_match_id_refused(tmp_path: Path) -> None:
+    run_dir = _write_claim_run(tmp_path / "run")
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["match_id"] = 42  # a numeric id must not be str()-laundered
+    summary_path.write_text(json.dumps(summary, sort_keys=True))
+    with pytest.raises(ValueError, match="non-empty str"):
+        labels.label_run(run_dir)
