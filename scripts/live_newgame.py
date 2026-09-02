@@ -167,7 +167,9 @@ print("{SENTINEL}")
 """
 
 LAUNCH_LUA = f"""
-print("launch-pre|participating=" .. tostring(GameConfiguration.GetParticipatingPlayerCount()) .. "|host=" .. tostring(Network.IsGameHost()))
+print("launch-pre|participating="
+      .. tostring(GameConfiguration.GetParticipatingPlayerCount())
+      .. "|host=" .. tostring(Network.IsGameHost()))
 Network.LaunchGame()
 print("launchgame-called")
 print("{SENTINEL}")
