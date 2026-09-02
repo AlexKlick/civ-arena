@@ -433,8 +433,13 @@ class FireTunerAdapter:
                 lua_translator.finish_all_moves(player_id))
         # h3: no explicit command — wait for the engine to release on its own
         await self._fire_simulate("turn_deactivated", player_id, turn)
+        # RELEASED = our lease is gone: puppet fully off, the turn
+        # advanced, or the lease moved to ANOTHER player (the M18 hotseat
+        # hand-off engages the next seat's lease immediately — waiting for
+        # -1 would time out; single-seat behavior is unchanged: -1 != pid).
         await self._await(
             lambda p: (p.get("PUPPET_ACTIVE") is False
+                       or int(p.get("LEASE_PLAYER", player_id)) != player_id
                        or int(p.get("TURN", -1)) > turn),
             f"lease release for player {player_id} (D7-{self._strategy})",
             timeout_s=self._turn_wait_s)

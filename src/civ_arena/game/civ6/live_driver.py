@@ -442,6 +442,151 @@ async def phase_dispatch(
 _BUILD_PREFERENCE = ["MONUMENT", "WALLS", "WARRIOR", "GRANARY", "SETTLER",
                      "SCOUT", "SLINGER", "BARRACKS"]
 
+
+async def phase_dispatch_hotseat(
+    spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
+    rounds: int, strategy: str, mod_lua: str,
+) -> int:
+    """M18: the hotseat 1v1 — EVERY seat is driven, the engine's own AI is
+    out of the game (the class of engine hangs that ends long games dies
+    with it). The engine hands the turn between human seats; the loop
+    routes each turn to the agent whose lease engaged (LEASE_PLAYER). One
+    round = every driven seat played once; ``rounds`` bounds the match."""
+    events = run_dir / "events.jsonl"
+    _refuse_rerun(events)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    driver = LiveDriver(spec, adapter, run_dir,
+                        f"{spec.match_id}-i{os.getpid()}")
+    seats: dict[int, dict[str, Any]] = {}
+    for agent in spec.agents:
+        profile = AgentProfile(
+            agent_id=agent.agent_id, player_id=agent.player_id,
+            policy=agent.policy, seed=agent.seed, model=agent.model,
+            llm=agent.llm, proposer=agent.proposer)
+        runtime = build_runtime(profile)
+        bind = getattr(runtime, "bind_services", None)
+        if bind is not None:
+            from civ_arena.planner.journal import PlannerJournal
+
+            journal = (PlannerJournal(run_dir / "planner"
+                                      / f"p{agent.player_id}-journal.jsonl")
+                       if agent.policy == "planner" else None)
+            if journal is not None:
+                bind(diary=driver.referee.diary,
+                     strategy=driver.referee.strategy, journal=journal)
+            else:
+                bind(diary=driver.referee.diary,
+                     strategy=driver.referee.strategy)
+        seats[agent.player_id] = {
+            "agent": agent, "runtime": runtime,
+            "session": PlayerSession(driver.referee, agent.player_id,
+                                     agent.agent_id),
+        }
+    await adapter.setup({})
+    await adapter.inject_mod(mod_lua)
+    # ARM A PUPPET PER DRIVEN SEAT: each hotseat hand-off fires the next
+    # player's hook — every seat must be puppeted or its turn is skipped
+    for pid in seats:
+        await adapter.read_raw(lua_translator.set_puppet(pid, True))
+    per_turn: list[dict[str, Any]] = []
+    driven_rounds = 0
+    await driver.match_start()
+    try:
+        while driven_rounds < rounds:
+            status = await adapter.poll_status()
+            seat_pid = status.get("LEASE_PLAYER", -1)
+            if seat_pid not in seats:
+                if per_turn:
+                    # engine processing between seats (or pre-first-hook)
+                    await asyncio.sleep(1.0)
+                    continue
+                # COLD START: no seat has engaged yet. The lease only
+                # appears once a begin_phase fires the seat's hook
+                # (rehearsal) or the engine starts the turn naturally
+                # (live) — waiting for LEASE_PLAYER would deadlock. Target
+                # the first seat's next turn exactly as the single-seat
+                # dispatch does.
+                seat_pid = min(seats)
+                turn = _target_turn(
+                    status, seat_pid, -1,
+                    _last_deact_turn(await adapter.read_trace()))
+            else:
+                turn = int(status.get("LEASE_TURN", status.get("TURN", 0)))
+            seat = seats[seat_pid]
+            agent = seat["agent"]
+            adapter.expect_turn(turn)
+            lease = driver.referee.grant_lease(
+                agent.player_id, agent.agent_id, turn)
+            try:
+                await driver.referee.begin_turn(
+                    agent.player_id, agent.agent_id, turn)
+            except RuntimeError as e:
+                if "lease to engage" not in str(e):
+                    raise
+                await _recover_stall(adapter, agent.player_id, turn)
+                adapter.expect_turn(turn)
+                await driver.referee.begin_turn(
+                    agent.player_id, agent.agent_id, turn)
+            digest_open = await adapter.refresh_digest()
+            await _resolve_blockers(adapter, agent.player_id, turn)
+            housekept = adapter.drain_mutations()
+            driver.referee._ls.acknowledged.extend(housekept)  # noqa: SLF001
+            allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
+            begin_hook = getattr(seat["runtime"], "begin_turn", None)
+            if begin_hook is not None:
+                begin_hook(turn)
+            await seat["session"].take_turn(lease, seat["runtime"])
+            digest_close = adapter.state_hash()
+            allowed = driver.referee._ls.allowed[allowed_open:]  # noqa: SLF001
+            row = {
+                "turn": turn, "player": agent.player_id,
+                "agent": agent.agent_id,
+                "allowed_mutations": len(allowed),
+                "digest_changed": digest_open != digest_close,
+                "mutated": bool(allowed),
+                "violations": driver.referee.violation_count(),
+            }
+            row["unexpected"] = (row["digest_changed"]
+                                 and not (row["mutated"] or housekept))
+            per_turn.append(row)
+            print(f"hotseat turn {turn} p{agent.player_id} "
+                  f"({agent.agent_id}): allowed={row['allowed_mutations']} "
+                  f"digest_changed={row['digest_changed']} "
+                  f"violations={row['violations']}")
+            if seat_pid == max(seats):
+                driven_rounds += 1
+            if row["unexpected"] or row["violations"]:
+                print("ANOMALY — stopping (record dated in §6)")
+                break
+        final_turn = per_turn[-1]["turn"] if per_turn else 0
+        ok = bool(per_turn) and all(
+            not r["unexpected"] and r["violations"] == 0 for r in per_turn) \
+            and driven_rounds == rounds
+        await driver.match_end(final_turn, {
+            "phase": "dispatch-hotseat", "strategy": strategy,
+            "per_turn": per_turn, "clean": ok,
+        })
+        print(f"HOTSEAT {'CLEAN' if ok else 'ANOMALOUS'} "
+              f"({driven_rounds}/{rounds} rounds, "
+              f"{len(per_turn)} driven turns, "
+              f"violations={driver.referee.violation_count()})")
+        return 0 if ok else 1
+    finally:
+        try:
+            if adapter._phase_open != -1:  # noqa: SLF001
+                await adapter.read_raw(lua_translator.release(
+                    adapter._phase_open, adapter._turn_mirror))  # noqa: SLF001
+        except Exception:
+            pass
+        for seat in seats.values():
+            close = getattr(seat["runtime"], "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
+        await adapter.teardown()
+
 # research housekeeping preference: era-1 techs the wire actually offers,
 # then the sorted fallback — a deterministic pick that NEVER leaves
 # research empty while techs remain (an empty slot is the freeze)
@@ -682,7 +827,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("config", type=Path)
     ap.add_argument("--phase", required=True,
-                    choices=["probe", "exclusive-control", "dispatch"])
+                    choices=["probe", "exclusive-control", "dispatch",
+                             "dispatch-hotseat"])
     ap.add_argument("--turns", type=int, default=1)
     ap.add_argument("--run-id", default=None,
                     help="run dir name under runs/ (default: match_id)")
@@ -710,7 +856,9 @@ def main() -> None:
 
     async def run() -> int:
         if opts.fake:
-            server = FakeTunerServer(mod=FakeMod())
+            server = FakeTunerServer(mod=FakeMod(
+                hotseat=[a.player_id for a in spec.agents]
+                if opts.phase == "dispatch-hotseat" else None))
             port = await server.start()
             adapter = FireTunerAdapter(
                 "127.0.0.1", port,
@@ -738,6 +886,9 @@ async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
     run_dir = Path(opts.runs_root) / (opts.run_id or spec.match_id)
     if opts.phase == "exclusive-control":
         return await phase_exclusive_control(
+            spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
+    if opts.phase == "dispatch-hotseat":
+        return await phase_dispatch_hotseat(
             spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
     return await phase_dispatch(
         spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,

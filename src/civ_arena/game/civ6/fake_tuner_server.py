@@ -67,6 +67,7 @@ class FakeMod:
         supports_ledger: bool = True,
         auto_ambient: tuple | None = None,
         injected: bool = True,
+        hotseat: list[int] | None = None,
     ) -> None:
         self.version = version
         self.has_status = has_status
@@ -74,6 +75,9 @@ class FakeMod:
         self.has_command_diff = has_command_diff
         self.supports_freeze = supports_freeze
         self.supports_ledger = supports_ledger
+        # M18 hotseat mode: the driven players hand the turn to each other
+        # (release of the round's last player advances the game turn)
+        self.hotseat = list(hotseat) if hotseat else []
         # engine effect that lands inside every ambient window:
         # (kind, entity_type, numeric_id, attr, before, after)
         self.auto_ambient = auto_ambient
@@ -498,9 +502,15 @@ class FakeMod:
             r"Puppeteer\.Release\(\s*(\d+)\s*,\s*(-?\d+)\s*\)", code)
         if m or "Puppeteer.Release" in code:
             # mod v0.3.1 parity: TURN-BOUND — a release for turn N must
-            # never drop the next turn's freshly-engaged lease (Codex P1-8)
+            # never drop the next turn's freshly-engaged lease (Codex P1-8).
+            # M18: PLAYER-bound too — in hotseat the next seat's lease
+            # engages at the SAME turn, and a stale release for the
+            # previous player must not drop it.
             want_turn = int(m.group(2)) if m else -1
+            want_player = int(m.group(1)) if m else -1
             if (self.lease is not None
+                    and (want_player == -1
+                         or self.lease["player"] == want_player)
                     and (want_turn == -1
                          or self.lease["turn"] == want_turn)):
                 if self.mark is not None:
@@ -542,9 +552,12 @@ class FakeMod:
                 self.ledger_rows.extend(
                     self._diff(self.lease["player"], self.mark))
                 self.mark = None
+            released = self.lease["player"] if self.lease else None
             self.lease = None
             self._diff_cache = None
             self.turn_active = False
+            if self.hotseat and released in self.hotseat:
+                self._hotseat_next(released)
             return ["PUPPET_ACTIVE|false", "ENDTURN_SENT|0"]
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
@@ -605,14 +618,13 @@ class FakeMod:
                 self._diff_cache = None
             return []
         if "Simulate.AdvanceTurn" in code:
+            # hotseat: the hand-off owns advancement (the game turn moves
+            # only after the round's LAST player releases — an advance
+            # here would desync the next seat's lease turn)
+            if self.hotseat:
+                return []
+            self._advance_turn_effects()
             self.turn += 1
-            # engine turn-end effects: per-OWNER-city income lands with the
-            # advance (AFTER the adapter's pre-endturn seal — the live
-            # run-004 bracket)
-            for pid, p in self.players.items():
-                owned = sum(1 for c in self.cities.values()
-                            if c["owner"] == pid)
-                p["gold"] += 5 * owned
             return []
         if "Simulate.Mutate" in code:
             self.state_nonce += 1
@@ -634,6 +646,32 @@ class FakeMod:
                 f"|{m.group(4)}|{m.group(5)}|{m.group(6)}")
             return []
         return None
+
+    def _hotseat_next(self, released: int) -> None:
+        """The M18 hotseat hand-off: the next driven player's turn starts
+        (its hook fires, and a puppeted seat engages its lease). The game
+        turn advances only after the round's LAST player releases."""
+        idx = self.hotseat.index(released)
+        if idx == len(self.hotseat) - 1:
+            self._advance_turn_effects()
+            self.turn += 1
+        nxt = self.hotseat[(idx + 1) % len(self.hotseat)]
+        self.turn_active = True
+        self.trace.append(f"{self.turn}|HOOK_ENTER|{nxt}")
+        if self.puppets.get(nxt):
+            self.lease = {"player": nxt, "turn": self.turn}
+            self.mark = self._snapshot(nxt)
+            self._restored = set()
+            self._diff_cache = None
+            self.trace.append(f"{self.turn}|LEASE_SET|{nxt}|{self.turn}")
+
+    def _advance_turn_effects(self) -> None:
+        """Engine turn-end effects: per-OWNER-city income lands with the
+        advance (AFTER the adapter's pre-endturn seal — the live run-004
+        bracket)."""
+        for pid, p in self.players.items():
+            owned = sum(1 for c in self.cities.values() if c["owner"] == pid)
+            p["gold"] += 5 * owned
 
 
 class FakeTunerServer:

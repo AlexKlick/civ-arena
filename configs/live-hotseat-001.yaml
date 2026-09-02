@@ -1,0 +1,26 @@
+# M18: the hotseat 1v1 — BOTH seats arena-driven. The engine's own AI is
+# out of the game entirely (the class of engine-AI hangs that ended every
+# long game dies with it). Player 0 is the CivGraph planner; player 1 is
+# the scripted turtler — the same baseline the sim experiments measured
+# against, now on the real engine. The match alternates seats each turn
+# exactly as the simulator's interleaved phases do.
+match:
+  match_id: live-hotseat-001
+  seed: 271828
+  max_turns: 30
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+
+agents:
+  - agent_id: hotseat-planner
+    player_id: 0
+    policy: planner
+    seed: 7
+  - agent_id: hotseat-turtler
+    player_id: 1
+    policy: turtler
+    seed: 22
+
+chaos: []
