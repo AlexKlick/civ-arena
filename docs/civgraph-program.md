@@ -427,3 +427,39 @@ learned value head) are chartered in §4. Operator decisions for the wave:
 both milestones executed back-to-back; numpy in the dev group for offline
 fitting only, quantized to ints; zero LLM API spend — every experiment
 model-free.
+
+### 2026-09-02 — M19a BUILT: the outcome-label layer (heads d60494d → feb8197)
+
+`src/civ_arena/labels.py` (module + CLI, the report.py precedent):
+`label_run()` is a pure function of a run's own artifacts — seats
+fail-closed from the single MATCH_START roster (duplicate player/agent
+ids and multiple MATCH_STARTs refuse), claim verdicts/deadlines/observed
+derived through `strategy.scoring` on a `StrategyStore.from_log` rebuild
+(zero re-implementation; Codex's independent probe matched all 13 scored
+rows in a replay run), decisions annotated with the match differential
+and outcome sign, older traces lacking `prior` default `[]`. Writes ONLY
+`runs/<id>/labels.json` (atomic, canonical — a float refuses at write
+time) plus a corpus index keyed by RUN DIRECTORY (match ids repeat
+across exp3 budget arms) with `--index-out` guarded against clobbering
+any run artifact. Runs with `scores: {}` (live-exclusive-004/005) label
+with null differentials — unknown, never fabricated. A shared
+`score_differential()` in value.py dedupes the two byte-identical private
+copies in planner_experiment.py and option_mining.py (winner/loser/tie
+exactly preserved; the no-rival case DELIBERATELY mirrors value_of's
+own-score behavior where the retired bodies crashed — pinned).
+
+Codex round 1 (gpt-5.6-sol): NO-GO, 4 P1 + 3 P2 — index clobber path,
+duplicate-match-id index overwrite, non-fail-closed roster, silently
+dropped foreign claims, scores:{} crash, numeric-match-id laundering,
+no-rival divergence unpinned. All 7 verified by the orchestrator before
+fixing; all fixed + pinned in `feb8197` (6 new pins; test_labels.py now
+11).
+
+Corpus labeled (side artifacts only): exp3 b8/b16/b32 = 360 runs /
+4,693 decisions / 0 claims (the planner never calls claim tools — the
+claims corpus is the llm lane); llm-vs-turtler-002..005 = 4 runs / 155
+claims. Indexes: runs/labels-exp3-b{8,16,32}.json, runs/labels-llm.json.
+
+Gates: 461 → 467 passed (+1 skip), the 2 pre-existing failures
+throughout; ruff no new errors. The VERDICT layer is no longer empty:
+every recorded decision now carries its outcome.
