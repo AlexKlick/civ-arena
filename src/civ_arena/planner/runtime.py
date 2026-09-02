@@ -30,11 +30,14 @@ search trace stays in-memory — analysis artifact, not gameplay state.
 M19b — case base (optional ``case_base``): retrieval-as-evidence prior.
 The world's signature is computed from the SAME determinized world the
 trace root_key comes from (``bstate``), the immutable artifact ranks
-options by historical win rate, the ranking is compiled legal-now
-(the compile_proposal narrowing) and merged AFTER any live proposer
-ranking. Per-turn failures degrade to no case prior; the prior rides
-the TRACE (``case_prior`` entry), never the event log; the case
+options by mean differential among takens, the ranking is compiled
+legal-now (the compile_proposal narrowing) and merged AFTER any live
+proposer ranking. Per-turn failures degrade to no case prior; the prior
+rides the TRACE (``case_prior`` entry), never the event log; the case
 hit/miss counters are journaled diagnostics that never affect ranking.
+Resume binds the artifact BYTES: the journaled digest is checked against
+the loaded artifact and a mismatch degrades the leg to unprimed with an
+on-disk ``artifact_mismatch`` flag — never a silent evidence swap.
 """
 
 from __future__ import annotations
@@ -113,6 +116,7 @@ class PlannerRuntime:
         self.case_base = case_base  # casebase.CaseBase | None (M19b prior)
         self.case_hits = 0         # diagnostics only, journaled as case_stats
         self.case_misses = 0
+        self._case_artifact_mismatch = False  # set on resume artifact swap
 
     async def _propose(self, bstate: SimState, turn: int) -> tuple[
             list[str] | None, dict[str, Any]]:
@@ -165,6 +169,20 @@ class PlannerRuntime:
             return (compiled or None), doc
         except Exception:
             return None, {"turn": turn, "error": "case_prior_failed"}
+
+    def _case_stats_doc(self) -> dict[str, Any]:
+        """The journal's case_stats block: the artifact digest in force,
+        the cumulative counters, and — after a resume-time artifact swap
+        degraded the runtime — the on-disk flag that says so."""
+        stats: dict[str, Any] = {
+            "artifact_sha256": (self.case_base.artifact_sha256
+                                if self.case_base is not None else None),
+            "hits": self.case_hits,
+            "misses": self.case_misses,
+        }
+        if self._case_artifact_mismatch:
+            stats["artifact_mismatch"] = True
+        return stats
 
     async def _filter_to_wire_vocabulary(
             self, facade: Any, bstate: Any,
@@ -273,6 +291,20 @@ class PlannerRuntime:
         stats = last.get("case_stats") or {}
         self.case_hits = int(stats.get("hits", 0))
         self.case_misses = int(stats.get("misses", 0))
+        # The journal binds the artifact BYTES the prior leg ran with. A
+        # swapped (or removed) artifact across legs must never silently
+        # re-prime the match with different evidence: on digest mismatch the
+        # runtime DEGRADES explicitly — unprimed for the rest of the match —
+        # and the next journal append flags the swap on disk
+        # (case_stats.artifact_mismatch). No journaled digest (old journal
+        # or a prior unarmed leg) leaves the construction-time arming as is.
+        journal_sha = stats.get("artifact_sha256")
+        if journal_sha:
+            current = (self.case_base.artifact_sha256
+                       if self.case_base is not None else None)
+            if current != journal_sha:
+                self.case_base = None
+                self._case_artifact_mismatch = True
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()
@@ -338,10 +370,5 @@ class PlannerRuntime:
                 },
                 "active": self.active, "chosen_at_turn": self.chosen_at_turn,
                 "proposer_posts": self.proposer_posts,
-                "case_stats": {
-                    "artifact_sha256": (self.case_base.artifact_sha256
-                                        if self.case_base is not None else None),
-                    "hits": self.case_hits,
-                    "misses": self.case_misses,
-                },
+                "case_stats": self._case_stats_doc(),
             })

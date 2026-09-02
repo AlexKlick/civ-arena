@@ -4,18 +4,26 @@ Pinned: the signature is the turn/development-dropped projection of the
 search root_key, and the RUNTIME's signature equals the projection of the
 RECORDED root_key (the seed-math seam — bstate is the same determinized
 world root_key comes from); retrieval can only permute (legal-now compile,
-prior subset of candidates); per-turn failures degrade to unprimed and the
-match completes; the prior rides the TRACE, never the event log; resume
-with a case base armed stays bit-identical (counters are journaled
-diagnostics that never affect ranking); the artifact loads loudly and
-validates at construction; config gates case_base to planner policies
-under the configs/ bare-filename charset.
+prior subset of candidates) and ranks by MEAN DIFFERENTIAL with exact
+integer cross-multiplication (no float, 2**53-scale false ties ordered);
+per-turn failures degrade to unprimed and the match completes; the prior
+rides the TRACE, never the event log; resume with a case base armed stays
+bit-identical (counters are journaled diagnostics that never affect
+ranking) while a SWAPPED artifact degrades to unprimed and flags
+artifact_mismatch on disk; the artifact loads loudly, validates impossible
+stats away at construction, and the CLI's --mine is provenance-bound
+(every labels doc covered by an index with a matching digest; --out never
+clobbers an input); both live dispatch paths arm the runtime through the
+same profile builder; config gates case_base to planner policies under
+the configs/ bare-filename charset.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -180,21 +188,39 @@ def test_mine_aggregates_label_docs() -> None:
     }
 
 
-def test_rank_orders_by_win_rate_with_canonical_ties() -> None:
+def test_rank_orders_by_mean_diff_exact_rational() -> None:
+    """Mean differential primary (the exp3 corpus is win-saturated — win
+    rate alone collapses to alphabetical), win rate secondary, option_id
+    tertiary; every comparison an exact integer cross-multiplication."""
     cb = CaseBase({"sig": {
-        "alpha": {"n": 5, "taken": 4, "wins": 3, "diff_sum": 30},
-        "beta": {"n": 2, "taken": 2, "wins": 1, "diff_sum": 5},
-        "gamma": {"n": 2, "taken": 2, "wins": 1, "diff_sum": 9},
-        "delta": {"n": 3, "taken": 3, "wins": 0, "diff_sum": -9},
+        # ba: mean diff 50 with ZERO wins — outranks bo's perfect win rate
+        "ba": {"n": 2, "taken": 2, "wins": 0, "diff_sum": 100},
+        # ta/tb: mean diff 1, identical stats -> option_id asc
+        "ta": {"n": 3, "taken": 3, "wins": 1, "diff_sum": 3},
+        "tb": {"n": 3, "taken": 3, "wins": 1, "diff_sum": 3},
+        # bo/ga: mean diff 0, win rate breaks the tie (1.0 > 0.5)
+        "bo": {"n": 4, "taken": 4, "wins": 4, "diff_sum": 0},
+        "ga": {"n": 2, "taken": 2, "wins": 1, "diff_sum": 0},
+        # negative diff_sum is legal; never-taken carries no evidence
+        "delta": {"n": 3, "taken": 3, "wins": 3, "diff_sum": -9},
         "eps": {"n": 9, "taken": 0, "wins": 0, "diff_sum": 0},
     }})
-    # 0.75, then the 0.5 tie resolved by option_id asc, then 0.0; a
-    # never-taken option carries no win-rate evidence and is excluded
-    assert cb.rank("sig") == ["alpha", "beta", "gamma", "delta"]
+    assert cb.rank("sig") == ["ba", "ta", "tb", "bo", "ga", "delta"]
     assert cb.rank("missing") == []
     assert CaseBase({"sig2": {
         "x": {"n": 4, "taken": 0, "wins": 0, "diff_sum": 0},
     }}).rank("sig2") == []
+
+    # the float false-tie pin (Codex M19b P2): 2**53/(2**54+1) vs 1/2 collide
+    # as IEEE doubles (both round to 0.5) — the exact cross-multiplication
+    # 2**53 * 2 < 2**54 + 1 orders them correctly
+    assert 2**53 / (2**54 + 1) == 0.5  # the float hazard is real
+    exact = CaseBase({"sig3": {
+        "big": {"n": 2**54 + 1, "taken": 2**54 + 1, "wins": 2**53,
+                "diff_sum": 0},
+        "half": {"n": 2, "taken": 2, "wins": 1, "diff_sum": 0},
+    }})
+    assert exact.rank("sig3") == ["half", "big"]
 
 
 # ------------------------------------------------------------ loud loading
@@ -225,6 +251,22 @@ def test_casebase_from_file_refuses_loudly(tmp_path):
     ), encoding="utf-8")
     with pytest.raises(ValueError):
         CaseBase.from_file(bad_stats)
+
+    # F4: impossible stats refuse at construction — n=0 (no candidacies, so
+    # no record can exist) and wins > taken > n must never rank
+    for cases in (
+        {"sig": {"x": {"n": 0, "taken": 1, "wins": 2, "diff_sum": 0}}},
+        {"sig": {"x": {"n": 1, "taken": 2, "wins": 1, "diff_sum": 0}}},
+        {"sig": {"x": {"n": 2, "taken": 2, "wins": 3, "diff_sum": 0}}},
+    ):
+        impossible = tmp_path / "impossible.json"
+        impossible.write_text(json.dumps({"schema": 1, "cases": cases}),
+                              encoding="utf-8")
+        with pytest.raises(ValueError, match="impossible stats|candidacies"):
+            CaseBase.from_file(impossible)
+    with pytest.raises(ValueError):
+        CaseBase({"sig": {"x": {"n": 0, "taken": 1, "wins": 2,
+                                "diff_sum": 0}}})
 
     # happy path: sha pinned to the file bytes, hit finds the mined case
     key = abstract_key(playout(21, 4), 0)
@@ -456,6 +498,53 @@ async def test_casebase_resume_bit_identical(tmp_path):
             + resumed.runtimes[0].case_misses) > 0
 
 
+def test_case_artifact_mismatch_degrades_and_flags(tmp_path):
+    """F5: resume binds the artifact BYTES. The journaled digest is checked
+    against the currently-loaded artifact — same bytes changes nothing
+    (bit-identity pin lives in test_casebase_resume_bit_identical);
+    DIFFERENT bytes degrades the leg to unprimed and the next journal
+    append carries artifact_mismatch: true, so the swap is on disk, never
+    silent."""
+    from civ_arena.planner.journal import PlannerJournal
+
+    row = {"root_key": abstract_key(playout(21, 4), 0),
+           "candidates": ["economy"], "chosen": "economy"}
+    path_a = _write_casebase([_label_doc([row], diff=7)], tmp_path / "a.json")
+    path_b = _write_casebase([_label_doc([row], diff=9)], tmp_path / "b.json")
+    cb_a, cb_b = CaseBase.from_file(path_a), CaseBase.from_file(path_b)
+    assert cb_a.artifact_sha256 != cb_b.artifact_sha256
+
+    j = PlannerJournal(tmp_path / "j" / "p0-journal.jsonl")
+    j.append(4, {"turn": 4, "belief": {
+        "own_player": {"player_id": 0, "civ_name": "ROME", "gold": 50,
+                       "researched": [], "researching": ""},
+        "public_players": {1: {"civ_name": "KOREA", "alive": True}},
+        "own_units": {}, "own_cities": {}, "foreign_units": {},
+        "foreign_cities": {}, "tiles": {}, "turn": 4},
+        "active": "rush", "chosen_at_turn": 4,
+        "case_stats": {"artifact_sha256": cb_b.artifact_sha256,
+                       "hits": 1, "misses": 2}})
+
+    swapped = PlannerRuntime(0, 7, case_base=cb_a)
+    swapped.journal = j
+    swapped._restore_from_journal(5)
+    assert swapped.case_base is None  # degraded, never re-primed on new bytes
+    assert swapped._case_artifact_mismatch is True
+    assert swapped.case_hits == 1 and swapped.case_misses == 2  # counters ride
+    stats = swapped._case_stats_doc()
+    assert stats["artifact_mismatch"] is True
+    assert stats["artifact_sha256"] is None  # the artifact no longer arms it
+
+    # the quiet direction: same bytes -> nothing changes, no flag
+    twin = PlannerRuntime(0, 7, case_base=cb_b)
+    twin.journal = j
+    twin._restore_from_journal(5)
+    assert twin.case_base is not None
+    assert twin._case_artifact_mismatch is False
+    assert "artifact_mismatch" not in twin._case_stats_doc()
+    assert twin._case_stats_doc()["artifact_sha256"] == cb_b.artifact_sha256
+
+
 # ------------------------------------------------------------ config gate
 
 
@@ -487,3 +576,114 @@ def test_config_case_base_gating() -> None:
 
     with pytest.raises(ConfigError, match="case_base block must be a mapping"):
         parse_config(_cfg_doc(case_base="cb.json"))
+
+
+# ------------------------------------------------------------- live wiring
+
+
+def test_live_dispatch_profiles_carry_case_base(tmp_path, monkeypatch):
+    """F1: BOTH live dispatch paths (M14d single-seat and M18 hotseat) build
+    their runtimes through _agent_profile + build_runtime — a configured
+    case base reaches the live runtime ARMED, a configured-but-missing
+    artifact fails loudly at construction (pre-spend), and an unarmed spec
+    stays unarmed. With the shared builder, pinning it pins both paths."""
+    from civ_arena.config import CaseBaseSpec
+    from civ_arena.game.civ6.live_driver import _agent_profile
+
+    (tmp_path / "configs").mkdir()
+    row = {"root_key": abstract_key(playout(21, 4), 0),
+           "candidates": ["economy"], "chosen": "economy"}
+    _write_casebase([_label_doc([row])], tmp_path / "configs" / "live-cb.json")
+    monkeypatch.chdir(tmp_path)  # build_runtime resolves configs/ against cwd
+
+    armed = AgentSpec(agent_id="planner", player_id=0, policy="planner",
+                      seed=7, case_base=CaseBaseSpec(path="live-cb.json"))
+    rt = build_runtime(_agent_profile(armed))
+    assert rt.case_base is not None and rt.case_base.artifact_sha256
+
+    missing = AgentSpec(agent_id="planner2", player_id=0, policy="planner",
+                        seed=7, case_base=CaseBaseSpec(path="gone.json"))
+    with pytest.raises(ValueError, match="does not exist"):
+        build_runtime(_agent_profile(missing))
+
+    plain = AgentSpec(agent_id="turtler", player_id=1, policy="turtler",
+                      seed=22)
+    assert _agent_profile(plain).case_base is None
+
+
+# ---------------------------------------------------------- CLI guards F2/F3
+
+
+def _mini_corpus(tmp_path: Path) -> Path:
+    """Two hermetic runs with labels.json + a corpus index covering BOTH
+    (the labels.py index shape: run-dir key -> labels_sha256)."""
+    key = abstract_key(playout(21, 4), 0)
+    rows = [{"root_key": key, "candidates": ["economy"], "chosen": "economy",
+             "outcome_sign": 1, "match_value_differential": 5}]
+    entries: dict[str, Any] = {}
+    for rid in ("r1", "r2"):
+        run = tmp_path / "runs" / rid
+        run.mkdir(parents=True)
+        (run / "labels.json").write_text(
+            json.dumps({"schema": 1, "decisions": rows}, sort_keys=True),
+            encoding="utf-8")
+        digest = hashlib.sha256(
+            (run / "labels.json").read_bytes()).hexdigest()
+        entries[f"runs/{rid}"] = {"labels_sha256": digest}
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps(entries), encoding="utf-8")
+    return index
+
+
+def test_cli_guards_out_and_provenance(tmp_path, monkeypatch):
+    """F2: --out must never clobber a matched labels.json, a run artifact
+    beside it, or an --index file. F3: the indexes are AUTHORITATIVE — a
+    globbed doc not covered by any index, or one whose digest disagrees
+    with the index, refuses; --mine without --index refuses."""
+    from civ_arena.planner.casebase import main as casebase_main
+
+    index = _mini_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    def run_cli(*argv: str) -> None:
+        monkeypatch.setattr(sys, "argv", ["casebase", *argv])
+        casebase_main()
+
+    out = "casebase-out.json"
+    run_cli("--mine", "--labels-glob", "runs/*/labels.json",
+            "--index", "index.json", "--out", out)
+    doc = json.loads((tmp_path / out).read_text())
+    assert doc["source"]["runs"] == 2
+    assert doc["source"]["indexes"] == [{
+        "path": "index.json",
+        "sha256": hashlib.sha256(index.read_bytes()).hexdigest()}]
+    assert len(doc["cases"]) == 1  # both runs share the one signature
+
+    # F2: self-clobber refuses — the labels doc itself, the run's events
+    # log, and the index are all off-limits for --out
+    for bad_out in ("runs/r1/labels.json", "runs/r1/events.jsonl",
+                    "runs/r2/summary.json", "index.json"):
+        with pytest.raises(SystemExit, match="would overwrite"):
+            run_cli("--mine", "--labels-glob", "runs/*/labels.json",
+                    "--index", "index.json", "--out", bad_out)
+
+    # F3: an uncovered run refuses — every mined doc must be provenanced
+    (tmp_path / "runs" / "r3").mkdir()
+    (tmp_path / "runs" / "r3" / "labels.json").write_text(
+        json.dumps({"schema": 1, "decisions": []}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="not covered by any --index"):
+        run_cli("--mine", "--labels-glob", "runs/*/labels.json",
+                "--index", "index.json", "--out", out)
+
+    # F3: a labels file edited after indexing refuses on digest mismatch
+    shutil.rmtree(tmp_path / "runs" / "r3")
+    (tmp_path / "runs" / "r2" / "labels.json").write_text(
+        json.dumps({"schema": 1, "decisions": []}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="digest does not match"):
+        run_cli("--mine", "--labels-glob", "runs/*/labels.json",
+                "--index", "index.json", "--out", out)
+
+    # F3: --mine without an index refuses (provenance is not optional)
+    with pytest.raises(SystemExit):
+        run_cli("--mine", "--labels-glob", "runs/r1/labels.json",
+                "--out", out)

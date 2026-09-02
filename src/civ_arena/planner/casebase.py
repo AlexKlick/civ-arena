@@ -7,9 +7,11 @@ the option menu is sensitive to — the candidates vector, cities,
 population, gold bucket, research state, unit counts — stays). The miner
 aggregates M19a label docs into per-signature per-option outcome stats;
 the runtime looks up the CURRENT world's signature and ranks options by
-historical win rate among takens. The prior can only PERMUTE the search's
-visit order (the M16b authority model): it is compiled legal-now exactly
-like a proposer ranking and merges AFTER the live proposer's.
+MEAN DIFFERENTIAL among takens (win rate as the secondary tiebreak — the
+exp3 corpus is win-saturated, so win rate alone collapses to alphabetical).
+The prior can only PERMUTE the search's visit order (the M16b authority
+model): it is compiled legal-now exactly like a proposer ranking and
+merges AFTER the live proposer's.
 
 Determinism contract: the signature is a pure function of the same
 determinized world the trace ``root_key`` came from
@@ -33,6 +35,7 @@ import hashlib
 import json
 import os
 from collections.abc import Iterable
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 
@@ -108,7 +111,12 @@ def mine(label_docs: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 def _validate_cases(cases: Any) -> dict[str, dict[str, dict[str, Any]]]:
     """Fail-closed shape check (construction time — the runtime's per-turn
-    fail-soft boundary RELIES on the artifact having been validated here)."""
+    fail-soft boundary RELIES on the artifact having been validated here).
+    Beyond types, per-record COHERENCE: n >= 1 (an option with zero
+    candidacies cannot carry a record at all) and 0 <= wins <= taken <= n
+    (every win was a taking, every taking was a candidacy); diff_sum is any
+    integer (losses are negative). A hand-edited n=0/taken=1/wins=2 refuses
+    here — impossible stats must never rank."""
     if not isinstance(cases, dict):
         raise ValueError(f"case base artifact 'cases' must be a mapping, "
                          f"got {type(cases).__name__}")
@@ -120,17 +128,25 @@ def _validate_cases(cases: Any) -> dict[str, dict[str, dict[str, Any]]]:
             if not isinstance(oid, str) or not isinstance(rec, dict):
                 raise ValueError("case base artifact option entries must map "
                                  "option ids to stat mappings")
+            where = f"case base artifact stat {sig[:12]}..{oid}"
             for field in ("n", "taken", "wins"):
                 val = rec.get(field)
                 if not isinstance(val, int) or isinstance(val, bool) or val < 0:
                     raise ValueError(
-                        f"case base artifact stat {sig[:12]}..{oid}.{field} "
-                        f"must be a non-negative integer, got {val!r}")
+                        f"{where}.{field} must be a non-negative integer, "
+                        f"got {val!r}")
             diff_sum = rec.get("diff_sum")
             if not isinstance(diff_sum, int) or isinstance(diff_sum, bool):
                 raise ValueError(
-                    f"case base artifact stat {sig[:12]}..{oid}.diff_sum "
-                    f"must be an integer, got {diff_sum!r}")
+                    f"{where}.diff_sum must be an integer, got {diff_sum!r}")
+            if rec["n"] < 1:
+                raise ValueError(f"{where}.n must be >= 1 — an option with "
+                                 "zero candidacies cannot carry a record")
+            if not rec["wins"] <= rec["taken"] <= rec["n"]:
+                raise ValueError(
+                    f"{where}: impossible stats — need "
+                    f"0 <= wins <= taken <= n, got wins={rec['wins']} "
+                    f"taken={rec['taken']} n={rec['n']}")
     return cases
 
 
@@ -179,18 +195,38 @@ class CaseBase:
         return sig in self._cases
 
     def rank(self, sig: str) -> list[str]:
-        """Options for that signature ordered by win rate among takens
-        (ties by option_id asc). Options never taken under this signature
-        carry no win-rate evidence and are excluded; a missing signature or
-        one with zero takens yields []. The rates are ordering-only floats —
-        they never reach an artifact."""
+        """Options for that signature ordered by (1) MEAN DIFFERENTIAL among
+        takens, (2) win rate among takens, (3) option_id asc. Every rate
+        comparison is an EXACT integer cross-multiplication (a/b vs c/d is
+        a*d vs c*b; both denominators are > 0) — no float ever touches the
+        ordering, because at 2**53 scale IEEE doubles collide (0.5-scale
+        rates like 2**53/(2**54+1) vs 1/2 falsely tie, Codex M19b P2) and a
+        win-saturated corpus (every exp3 planner run beat the turtler) makes
+        mean DIFFERENTIAL, not win rate, the live discriminant. A never-taken
+        option carries no evidence and is excluded; a missing signature or
+        one with zero takens yields []."""
         bucket = self._cases.get(sig)
         if not bucket:
             return []
-        rated = [(rec["wins"] / rec["taken"], oid)
-                 for oid, rec in bucket.items() if rec["taken"] > 0]
-        rated.sort(key=lambda pair: (-pair[0], pair[1]))
-        return [oid for _, oid in rated]
+
+        def _cmp(a: tuple[str, dict[str, Any]],
+                 b: tuple[str, dict[str, Any]]) -> int:
+            (oid_a, ra), (oid_b, rb) = a, b
+            # primary: mean diff_sum/taken, higher first
+            lhs = ra["diff_sum"] * rb["taken"]
+            rhs = rb["diff_sum"] * ra["taken"]
+            if lhs != rhs:
+                return -1 if lhs > rhs else 1
+            # secondary: win rate wins/taken, higher first
+            lhs = ra["wins"] * rb["taken"]
+            rhs = rb["wins"] * ra["taken"]
+            if lhs != rhs:
+                return -1 if lhs > rhs else 1
+            return -1 if oid_a < oid_b else (1 if oid_a > oid_b else 0)
+
+        rated = [(oid, rec) for oid, rec in bucket.items() if rec["taken"] > 0]
+        rated.sort(key=cmp_to_key(_cmp))
+        return [oid for oid, _ in rated]
 
     def __len__(self) -> int:
         return len(self._cases)
@@ -211,6 +247,76 @@ class CaseBase:
 
 def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _load_index_entries(index_paths: list[Path]) -> dict[str, str]:
+    """Merge corpus indexes into a run-dir -> labels_sha256 lookup (each key
+    stored both as written and resolved, so a glob from another cwd still
+    binds). Fail-closed on malformed entries and on conflicting digests for
+    the same run across --index files — provenance that disagrees with
+    itself is refused, never averaged."""
+    lookup: dict[str, str] = {}
+    for path in index_paths:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"error: --index {path} is not valid JSON: {exc}") from exc
+        if not isinstance(doc, dict):
+            raise SystemExit(f"error: --index {path} is not a corpus index "
+                             "(expected a JSON object keyed by run directory)")
+        for run_dir, entry in doc.items():
+            if not isinstance(run_dir, str) or not isinstance(entry, dict) \
+                    or not isinstance(entry.get("labels_sha256"), str):
+                raise SystemExit(f"error: --index {path} entry {run_dir!r} is "
+                                 "malformed (need run_dir -> labels_sha256)")
+            sha = entry["labels_sha256"]
+            prior = lookup.get(run_dir)
+            if prior is not None and prior != sha:
+                raise SystemExit(
+                    f"error: run {run_dir} carries conflicting labels_sha256 "
+                    "across --index files — refusing ambiguous provenance")
+            lookup[run_dir] = sha
+            lookup[str(Path(run_dir).resolve())] = sha
+    return lookup
+
+
+def _verify_provenance(label_paths: list[Path],
+                       lookup: dict[str, str]) -> None:
+    """Every mined labels.json must be covered by an index with a MATCHING
+    digest — the index files are the AUTHORITATIVE provenance record, so an
+    unindexed doc or a labels file edited after indexing refuses."""
+    for path in label_paths:
+        run_dir = path.parent
+        expected = lookup.get(str(run_dir)) \
+            or lookup.get(str(run_dir.resolve()))
+        if expected is None:
+            raise SystemExit(
+                f"error: {path} is not covered by any --index — mined "
+                "labels must be provenanced by a corpus index")
+        if _sha256_file(path) != expected:
+            raise SystemExit(
+                f"error: {path} digest does not match its --index "
+                "labels_sha256 (labels changed after indexing?) — refusing")
+
+
+def _assert_out_safe(out: Path, label_paths: list[Path],
+                     index_paths: list[Path]) -> None:
+    """--out must never clobber the inputs (the labels.py --index-out
+    discipline): the resolved out path is checked against every --index
+    file and every PROTECTED run artifact beside the matched label docs —
+    including the labels.json files themselves."""
+    from civ_arena.labels import PROTECTED_ARTIFACTS
+
+    resolved_out = out.resolve()
+    protected: list[Path] = list(index_paths)
+    for path in label_paths:
+        for rel in PROTECTED_ARTIFACTS:
+            protected.append(path.parent / rel)
+    for target in protected:
+        if target.resolve() == resolved_out:
+            raise SystemExit(f"error: --out {out} would overwrite the run "
+                             f"artifact {target} — refusing")
 
 
 def write_artifact(out: Path, artifact: dict[str, Any]) -> None:
@@ -234,8 +340,11 @@ def main() -> None:
                          "'runs/exp3/b8/planner-*/labels.json'")
     ap.add_argument("--index", action="append", type=Path, default=[],
                     metavar="PATH",
-                    help="corpus index the label docs came from (repeatable); "
-                         "recorded in the artifact source as path+sha256")
+                    help="corpus index binding the label docs to their runs "
+                         "(repeatable, REQUIRED for --mine): every mined "
+                         "labels.json must appear with a matching "
+                         "labels_sha256, and the indexes are recorded in the "
+                         "artifact source as path+sha256")
     ap.add_argument("--out", type=Path, help="artifact path to write")
     ap.add_argument("--path", type=Path,
                     help="load + print a summary of an existing artifact")
@@ -250,20 +359,28 @@ def main() -> None:
         ap.error("give --mine (with --labels-glob and --out) or --path")
     if not opts.labels_glob or opts.out is None:
         ap.error("--mine requires --labels-glob and --out")
+    if not opts.index:
+        ap.error("--mine requires at least one --index — the corpus index "
+                 "is the provenance record for the mined labels")
 
-    paths = sorted(glob.glob(opts.labels_glob))
+    paths = [Path(p) for p in sorted(glob.glob(opts.labels_glob))]
     if not paths:
         raise SystemExit(f"error: no label docs under {opts.labels_glob}")
+    for index in opts.index:
+        if not index.is_file():
+            raise SystemExit(f"error: --index {index} does not exist")
+    # guards before ANY write: --out must not clobber an input, and every
+    # mined doc must be provenanced by an index with a matching digest
+    _assert_out_safe(opts.out, paths, opts.index)
+    _verify_provenance(paths, _load_index_entries(opts.index))
+
     docs: list[dict[str, Any]] = []
     for p in paths:
-        doc = json.loads(Path(p).read_text(encoding="utf-8"))
+        doc = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(doc, dict):
             raise SystemExit(f"error: {p} is not a JSON object")
         docs.append(doc)
     mined = mine(docs)
-    for index in opts.index:
-        if not index.is_file():
-            raise SystemExit(f"error: --index {index} does not exist")
     artifact = {
         "schema": SCHEMA,
         "source": {

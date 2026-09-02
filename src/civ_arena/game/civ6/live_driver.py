@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -33,7 +34,7 @@ from civ_arena.arena.events import EventLog
 from civ_arena.arena.referee import Referee, RefereeConfig
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
-from civ_arena.config import MatchSpec, load_config
+from civ_arena.config import AgentSpec, MatchSpec, load_config
 from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
 from civ_arena.game.civ6 import lua_translator, response_parser
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
@@ -265,10 +266,7 @@ async def phase_dispatch(
     _refuse_rerun(events)
     run_dir.mkdir(parents=True, exist_ok=True)
     agent = spec.agents[0]
-    profile = AgentProfile(
-        agent_id=agent.agent_id, player_id=agent.player_id,
-        policy=agent.policy, seed=agent.seed, model=agent.model,
-        llm=agent.llm, proposer=agent.proposer)
+    profile = _agent_profile(agent)
     runtime = build_runtime(profile)
     driver = LiveDriver(spec, adapter, run_dir,
                         f"{spec.match_id}-i{os.getpid()}")
@@ -443,6 +441,20 @@ _BUILD_PREFERENCE = ["MONUMENT", "WALLS", "WARRIOR", "GRANARY", "SETTLER",
                      "SCOUT", "SLINGER", "BARRACKS"]
 
 
+def _agent_profile(agent: AgentSpec) -> AgentProfile:
+    """The ONE AgentSpec -> AgentProfile mapping for every live dispatch
+    path (M14d single-seat and M18 hotseat). Both paths MUST go through
+    this — a second hand-rolled constructor is exactly how a config field
+    (the M19b case_base) silently stops reaching the live runtime. The
+    case base itself loads inside build_runtime: LOUD at construction
+    (missing/corrupt artifact refuses pre-spend), never mid-match."""
+    return AgentProfile(
+        agent_id=agent.agent_id, player_id=agent.player_id,
+        policy=agent.policy, seed=agent.seed, model=agent.model,
+        llm=agent.llm, proposer=agent.proposer,
+        case_base=agent.case_base)
+
+
 async def phase_dispatch_hotseat(
     spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
     rounds: int, strategy: str, mod_lua: str,
@@ -459,10 +471,7 @@ async def phase_dispatch_hotseat(
                         f"{spec.match_id}-i{os.getpid()}")
     seats: dict[int, dict[str, Any]] = {}
     for agent in spec.agents:
-        profile = AgentProfile(
-            agent_id=agent.agent_id, player_id=agent.player_id,
-            policy=agent.policy, seed=agent.seed, model=agent.model,
-            llm=agent.llm, proposer=agent.proposer)
+        profile = _agent_profile(agent)
         runtime = build_runtime(profile)
         bind = getattr(runtime, "bind_services", None)
         if bind is not None:
@@ -581,10 +590,8 @@ async def phase_dispatch_hotseat(
         for seat in seats.values():
             close = getattr(seat["runtime"], "aclose", None)
             if close is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await close()
-                except Exception:
-                    pass
         await adapter.teardown()
 
 # research housekeeping preference: era-1 techs the wire actually offers,
