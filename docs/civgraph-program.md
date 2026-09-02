@@ -525,3 +525,63 @@ passed (+1 skip), the same 2 pre-existing failures throughout; three
 Codex rounds, every finding verified before fixing (4+3, 5+1, 3+1).
 The outcome loop is closed and mining runs on it; retrieval-as-evidence
 in its first form is honestly REJECTED with mechanism.
+
+### 2026-09-02 — M20a BUILT + exp-M20a: self-play does NOT de-saturate; seating dominates; MCGS STAYS PARKED (b2b9b7c → 881dce2)
+
+scripts/league.py (generalizing planner_experiment): populations of
+variants, every unordered pair × both seatings × seeds from the third
+block 300_003+i*7919, per-match replayable config, per-seat traces.
+Codex round 1 caught SEVEN P1 before any production evidence was
+trusted — headline: the inferential unit is the (pair, seed) CLUSTER,
+not the seating (both seatings of one map are one correlated unit);
+the flawed-inference first batch was killed and re-run on fixed code.
+Also: wall-clock left the deterministic doc, non-empty match dirs
+refuse (EventLog appends), the artifact is all-integers, and
+planner_analyze gained --arm-a/--arm-b byte-identically.
+
+exp-M20a (144-match round-robin + 60-match probe, 0 dirty, all 40
+turns, cluster-correct inference):
+
+| comparison | decidable seeds | verdict |
+|---|---|---|
+| mcgs-b32 vs mcts-b32 (the revival probe) | 2 for / 1 against / 27 split; p=0.50; 31-29 descriptive | NULL — MCGS STAYS PARKED (no discriminative difference; the b32 null-uncertainty of exp3 now has a discriminative-opponent replication) |
+| every budget pair (RR) | 0-1 decidable of 12 seeds each | variants near-indistinguishable in mirrors |
+
+THE finding: seating, not variant, explains the outcomes. In planner
+mirrors the p1 seat wins almost everything (e.g. mcts-b32 vs mcts-b8:
+p1 won 23 of 24 seatings) — the same asymmetry exp3's b8 leg and both
+prior-harm experiments showed, now measured at full strength. The
+turtler saturated; the planners mutually cancel and the SECOND-MOVER
+advantage dwarfs search configuration. Descriptive aggregate (72
+matches each): mcgs-b32 .597, mcts-b8 .500, mcts-b32 .528, mcts-b16
+.375 — but with 0-1 decidable seeds per pair these are seating
+artifacts, not strength claims. Follow-on the data names: model or
+neutralize the seat asymmetry before any mirror league is interpreted;
+the recorded MCGS revival conditions (budget >= 128, depth >= 3,
+per-world keys) remain unmet.
+
+### 2026-09-02 — M20b BUILT + exp-M20b: the online bandit also loses to the static order (0fc2ac4 → e52f9c7)
+
+planner/bandit.py: fixed-point per-(context, option) learning at the
+prior seam (contexts bucketed on the M19c ladders, advantages computed
+model-free at successive decision worlds, journaled state + pending
+with a learned-state-equality resume pin — the counterfactual proof
+showed the hash pin alone would false-pass a lost update). Codex round
+1: 4 P1 + 2 P2 (display-only validity gate — backported to the
+casebase runner too; eviction asymmetry; rewind-aware reuse retaining
+future learned state; lax context/pending validation). All fixed +
+pinned.
+
+exp-M20b (budget 4 — the regime where the prior seam engages — 30
+seeds × 2 sides vs turtler, 0 dirty): base wins 16 / bandit wins 5 /
+39 ties, mean paired diff −41, p(H: bandit>base)=0.996. The mechanism
+ENGAGED (786 updates, recurring contexts, rankings shifted) and made
+play worse — concentrated as player 0 (side 1: all 30 pairs tied;
+rankings fired on both sides but only p0's reorderings changed the
+final choice). Combined with exp-M19b: BOTH learned priors lose to the
+canonical ordering at scarce exploration against the turtler. The
+consistent reading: the fixed order + UCT exploration is a strong
+default in this regime, and evidence-derived reorderings steer the
+scarce budget toward historically-aggressive options the turtler
+punishes. Learning that pays: opponent modeling and value calibration,
+not exploration ordering.
