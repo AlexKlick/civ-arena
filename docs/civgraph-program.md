@@ -585,3 +585,47 @@ default in this regime, and evidence-derived reorderings steer the
 scarce budget toward historically-aggressive options the turtler
 punishes. Learning that pays: opponent modeling and value calibration,
 not exploration ordering.
+
+### 2026-09-02 — M20c BUILT + exp-M20c: the learned value head is a NULL (b92ca94 → ab560a8)
+
+numpy>=2 in the DEV group only (AST purity pin + pyproject check); the
+offline ridge fitter is index-provenanced (every labels.json
+byte-verified, manifest-bound), quantizes to sum|w|==161 exactly, and
+the final weights are REFIT ON ALL ROWS after λ selection. The seam
+(search_option weights → value_of at the single leaf site) preserves
+every default behavior byte-identically. Codex round 1: NO-SHIP 5 P1 +
+4 P2 — provenance not binding the fitted data, eval not binding what it
+evaluated, the display-only validity gate (KNOWN-CLASS, third runner),
+descriptives over decidable-only, --out clobber path, quantization
+direction distortion, batch/rows honesty, bypassable purity regex, and
+an inaccurate endpoint caveat. All fixed + pinned; one RULING recorded:
+UCT_C=140 was NOT recalibrated for the learned head (L1 bounds the
+norm, not per-branch dispersion) — declared limitation, calibration is
+a future rung. Gate at ab560a8: 519 passed + 1 skip, the 2 pre-existing
+failures unchanged (the commit body's "525" is a transcription error —
+this line is the count of record).
+
+PRODUCTION FIT (240 docs, train 3293 / val 1400 rows, λ=0.1, val MSE
+fixed 77031383, manifest ea760071..311c79d):
+  cities=111 population=11 gold=0 techs=37 units=-2  (sum|w|=161)
+— the corpus prices military units below zero and gold at zero against
+the turtler (the sign-carrying finding; the original positive-int
+artifact pin was an overconstraint, relaxed by ruling).
+
+exp-M20c (budget 16, 30 seeds × 2 sides vs turtler, fifth seed block,
+0 dirty, enforced validity gate): learned 28 / base 32 / 0 ties, mean
+paired diff −61, p(H: learned>base)=0.74 — a NULL with a slight
+negative direction, balanced across sides (13/17 and 15/15). Under the
+fixed DEFAULT endpoint scorer both arms play strongly (mean diffs +340
+/+401). VERDICT: the learned head neither helps nor harms at b16 vs
+the turtler; the hand-set DEFAULT weights remain the default. The
+declared UCT-C limitation bounds interpretation — a recalibrated
+constant might change the reading.
+
+M20 COMPLETE — and with it the wave's central empirical finding: in
+THIS environment (scripted turtler, 40 turns, sim scale), every learned
+component measured against the hand-authored substrate — case prior
+(harm), bandit (harm), learned value head (null) — fails to beat it.
+The substrate is the value carrier (the exp3 conclusion, replicated
+three new ways); the outcome loop, provenance discipline, league
+machinery, and calibration tooling are the durable gains.
