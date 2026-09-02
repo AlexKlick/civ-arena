@@ -252,8 +252,12 @@ def parse_available_research(lines: list[str]) -> list[dict[str, Any]]:
 
 
 def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
-    """ITEMROW|kind|item_id|cost|turns -> [{item_id, cost, turns, kind}],
-    units before buildings (the sim's grouping), id-sorted within each."""
+    """Parse production rows, including V2's optional observed gold cost.
+
+    Five-field rows remain accepted for frozen V1 captures. New live reads use
+    ``ITEMROW|kind|item_id|cost|turns|purchase_cost`` so V2 can enumerate
+    purchases from observations instead of guessing from simulator rules.
+    """
     out: list[dict[str, Any]] = []
     for line in _split_lines(lines):
         line = line.strip()
@@ -263,13 +267,24 @@ def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
         if prefix != "ITEMROW":
             raise ValueError(f"non-item row in production read: {line!r}")
         parts = rest.split("|")
-        if len(parts) != 4:
-            raise ValueError(f"malformed ITEMROW (want 4 fields): {line!r}")
-        kind, item_id, cost, turns = parts
+        if len(parts) not in {4, 5}:
+            raise ValueError(f"malformed ITEMROW (want 4 or 5 fields): {line!r}")
+        kind, item_id, cost, turns, *purchase = parts
         if kind not in ("unit", "building"):
             raise ValueError(f"unknown production kind: {line!r}")
-        out.append({"item_id": item_id, "cost": _coerce_strict(cost),
-                    "turns": _coerce_strict(turns), "kind": kind})
+        item = {
+            "item_id": item_id,
+            "cost": _coerce_strict(cost),
+            "turns": _coerce_strict(turns),
+            "kind": kind,
+        }
+        if purchase:
+            purchase_cost = _coerce_strict(purchase[0])
+            if type(purchase_cost) is not int or purchase_cost < -1:
+                raise ValueError(f"invalid ITEMROW purchase cost: {line!r}")
+            if purchase_cost >= 0:
+                item["purchase_cost"] = purchase_cost
+        out.append(item)
     order = {"unit": 0, "building": 1}
     return sorted(out, key=lambda i: (order[i["kind"]], i["item_id"]))
 
@@ -361,4 +376,3 @@ def parse_act(lines: list[str]) -> dict[str, Any]:
     if row is None:
         raise ValueError(f"no ACT row in act response: {lines!r}")
     return row
-

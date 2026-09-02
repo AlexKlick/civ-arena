@@ -55,6 +55,15 @@ from civ_arena.v2.contracts import (
     ValidationReceiptV2,
     VerificationStatusV2,
 )
+from civ_arena.v2.enumeration import ActionEnumeratorV2, GraphOverflowError
+from civ_arena.v2.environment import (
+    EnvironmentExecutionV2,
+    ObservableExecutionFacetV2,
+    PrivateRefereeMonitorV2,
+    firetuner_facets_v2,
+    simulator_facets_v2,
+    split_adapter_v2,
+)
 from civ_arena.v2.schemas import ContractError
 
 __all__ = [
@@ -62,6 +71,7 @@ __all__ = [
     "ActionGraphMetricsV2",
     "ActionGraphNodeV2",
     "ActionGraphV2",
+    "ActionEnumeratorV2",
     "ActionIntentV2",
     "ActionKindV2",
     "ActionResultV2",
@@ -82,6 +92,7 @@ __all__ = [
     "EntityTypeV2",
     "EnvironmentCapabilityV2",
     "EnvironmentDescriptorV2",
+    "EnvironmentExecutionV2",
     "EpisodeReceiptV2",
     "EpisodeTerminationV2",
     "EventTypeV2",
@@ -97,8 +108,10 @@ __all__ = [
     "ObservableFactV2",
     "ObservationPhaseV2",
     "ObservationV2",
+    "ObservableExecutionFacetV2",
     "PolicyDescriptorV2",
     "PolicyKindV2",
+    "PrivateRefereeMonitorV2",
     "PreconditionClaimV2",
     "PreconditionOperatorV2",
     "RejectionCodeV2",
@@ -112,4 +125,8 @@ __all__ = [
     "ValidationCommandV2",
     "ValidationReceiptV2",
     "VerificationStatusV2",
+    "GraphOverflowError",
+    "firetuner_facets_v2",
+    "simulator_facets_v2",
+    "split_adapter_v2",
 ]

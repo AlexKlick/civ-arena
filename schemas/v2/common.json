@@ -84,6 +84,95 @@
         }
       ]
     },
+    "KnowledgeIntegerV2": {
+      "allOf": [
+        {"$ref": "#/$defs/KnowledgeValueV2"},
+        {
+          "if": {
+            "properties": {"state": {"const": "known"}},
+            "required": ["state"]
+          },
+          "then": {"properties": {"value": {"type": "integer"}}}
+        }
+      ]
+    },
+    "KnowledgeBooleanV2": {
+      "allOf": [
+        {"$ref": "#/$defs/KnowledgeValueV2"},
+        {
+          "if": {
+            "properties": {"state": {"const": "known"}},
+            "required": ["state"]
+          },
+          "then": {"properties": {"value": {"type": "boolean"}}}
+        }
+      ]
+    },
+    "KnowledgeStringV2": {
+      "allOf": [
+        {"$ref": "#/$defs/KnowledgeValueV2"},
+        {
+          "if": {
+            "properties": {"state": {"const": "known"}},
+            "required": ["state"]
+          },
+          "then": {"properties": {"value": {"type": "string"}}}
+        }
+      ]
+    },
+    "KnowledgeCoordV2": {
+      "allOf": [
+        {"$ref": "#/$defs/KnowledgeValueV2"},
+        {
+          "if": {
+            "properties": {"state": {"const": "known"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "pattern": "^(0|-?[1-9][0-9]*),(0|-?[1-9][0-9]*)$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "KnowledgeStringArrayV2": {
+      "allOf": [
+        {"$ref": "#/$defs/KnowledgeValueV2"},
+        {
+          "if": {
+            "properties": {"state": {"const": "known"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "array",
+                "maxItems": 1024,
+                "items": {"type": "string", "maxLength": 512}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "KnowledgeProductionKindV2": {
+      "allOf": [
+        {"$ref": "#/$defs/KnowledgeValueV2"},
+        {
+          "if": {
+            "properties": {"state": {"const": "known"}},
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {"value": {"enum": ["building", "unit"]}}
+          }
+        }
+      ]
+    },
     "EntityRefV2": {
       "type": "object",
       "additionalProperties": false,
@@ -129,23 +218,35 @@
             "available",
             "available_production",
             "available_research",
+            "alive",
+            "border_radius",
+            "buildings",
+            "city_id",
+            "civ_name",
             "coord",
             "cost",
             "feature",
+            "food_bucket",
             "fortified",
             "gold",
             "hp",
             "hp_bucket",
             "improvement",
+            "kind",
+            "max_movement",
             "movement",
             "name",
             "owner_id",
             "population",
+            "prereq",
+            "production_bucket",
             "production_queue",
+            "purchase_cost",
             "ranged_strength",
             "researched",
             "researching",
             "resource",
+            "science_bucket",
             "status",
             "strength",
             "terrain",
@@ -196,6 +297,109 @@
               "source": {"const": "remembered"}
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "enum": [
+                  "border_radius",
+                  "cost",
+                  "food_bucket",
+                  "gold",
+                  "hp",
+                  "hp_bucket",
+                  "max_movement",
+                  "movement",
+                  "owner_id",
+                  "population",
+                  "production_bucket",
+                  "purchase_cost",
+                  "ranged_strength",
+                  "science_bucket",
+                  "strength",
+                  "turns_remaining"
+                ]
+              }
+            },
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {"value": {"$ref": "#/$defs/KnowledgeIntegerV2"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "enum": [
+                  "available",
+                  "available_production",
+                  "available_research",
+                  "alive",
+                  "fortified"
+                ]
+              }
+            },
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {"value": {"$ref": "#/$defs/KnowledgeBooleanV2"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {"predicate": {"const": "coord"}},
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {"value": {"$ref": "#/$defs/KnowledgeCoordV2"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "enum": [
+                  "city_id",
+                  "civ_name",
+                  "name",
+                  "researching",
+                  "status",
+                  "terrain",
+                  "type"
+                ]
+              }
+            },
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {"value": {"$ref": "#/$defs/KnowledgeStringV2"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "predicate": {
+                "enum": ["buildings", "prereq", "production_queue", "researched"]
+              }
+            },
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {"value": {"$ref": "#/$defs/KnowledgeStringArrayV2"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {"predicate": {"const": "kind"}},
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {
+              "value": {"$ref": "#/$defs/KnowledgeProductionKindV2"}
+            }
+          }
         }
       ]
     },
@@ -236,6 +440,7 @@
           "enum": [
             "available",
             "coord",
+            "fortified",
             "gold",
             "mandatory_resolved",
             "movement",
@@ -243,7 +448,9 @@
             "prerequisite",
             "range",
             "slot_empty",
-            "target_exists"
+            "target_exists",
+            "terrain",
+            "type"
           ]
         },
         "operator": {"enum": ["eq", "ne", "gte", "lte", "present", "absent", "contains"]},
@@ -274,7 +481,7 @@
         },
         "subject": {"$ref": "#/$defs/EntityRefV2"},
         "attribute": {
-          "enum": ["coord", "fortified", "gold", "hp", "movement", "population", "production_queue", "researched", "researching", "status", "turn"]
+          "enum": ["buildings", "coord", "created", "fortified", "gold", "hp", "movement", "population", "production_queue", "researched", "researching", "status", "turn"]
         },
         "expected": {"$ref": "#/$defs/KnowledgeValueV2"},
         "region": {"$ref": "#/$defs/Identifier"}

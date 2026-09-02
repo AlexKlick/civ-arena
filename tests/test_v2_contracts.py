@@ -184,6 +184,26 @@ def test_observation_rejects_privileged_fields() -> None:
         ObservationV2.from_doc(foreign)
 
 
+@pytest.mark.parametrize("bad_gold", [True, "100", [100]])
+def test_observation_fact_predicates_enforce_machine_types(bad_gold: object) -> None:
+    doc = _observation(gold=100).to_doc()
+    doc["facts"][0]["value"]["value"] = bad_gold
+    with pytest.raises(ContractError, match=r"facts\[0\].value"):
+        ObservationV2.from_doc(doc)
+
+
+def test_observation_coordinate_requires_canonical_spelling() -> None:
+    tile = EntityRefV2(EntityTypeV2.TILE, "tile:1,2")
+    with pytest.raises(ContractError, match=r"value"):
+        ObservableFactV2(
+            subject=tile,
+            subject_scope=FactSubjectScopeV2.PUBLIC,
+            predicate="coord",
+            value=KnowledgeValueV2.known("01,2", observed_turn=0),
+            source=FactSourceV2.DIRECT,
+        )
+
+
 def test_unknown_schema_version_fails_closed() -> None:
     doc = _observation().to_doc()
     doc["schema"] = 3

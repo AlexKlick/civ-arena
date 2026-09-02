@@ -299,6 +299,29 @@ local me = Game.GetLocalPlayer()
 local pCity = CityManager.GetCity(me, {city_id})
 if pCity == nil then print("---END---") return end
 local bq = pCity:GetBuildQueue()
+local goldYield = GameInfo.Yields['YIELD_GOLD']
+local formation = MilitaryFormationTypes.STANDARD_MILITARY_FORMATION
+local function purchaseCost(paramKey, itemHash, isUnit)
+    if goldYield == nil then return -1 end
+    local params = {{}}
+    params[paramKey] = itemHash
+    params[CityCommandTypes.PARAM_YIELD_TYPE] = goldYield.Index
+    if isUnit then
+        params[CityCommandTypes.PARAM_MILITARY_FORMATION_TYPE] = formation
+    end
+    local can = false
+    pcall(function()
+        can = CityManager.CanStartCommand(
+            pCity, CityCommandTypes.PURCHASE, false, params, true)
+    end)
+    if not can then return -1 end
+    local amount = -1
+    pcall(function()
+        amount = math.floor(pCity:GetGold():GetPurchaseCost(
+            goldYield.Index, itemHash, formation))
+    end)
+    return amount
+end
 for row in GameInfo.Units() do
     local ok = false
     pcall(function() ok = bq:CanProduce(row.Hash, true) end)
@@ -314,7 +337,10 @@ for row in GameInfo.Units() do
             if string.sub(nm, 1, 5) == "UNIT_" then nm = string.sub(nm, 6) end
             local t = -1
             pcall(function() t = math.floor(bq:GetTurnsLeft(row.Hash)) end)
-            print("ITEMROW|unit|" .. nm .. "|" .. math.floor(row.Cost or 0) .. "|" .. t)
+            local pcost = purchaseCost(
+                CityCommandTypes.PARAM_UNIT_TYPE, row.Hash, true)
+            print("ITEMROW|unit|" .. nm .. "|" .. math.floor(row.Cost or 0)
+                .. "|" .. t .. "|" .. pcost)
         end
     end
 end
@@ -333,7 +359,10 @@ for row in GameInfo.Buildings() do
             if string.sub(nm, 1, 9) == "BUILDING_" then nm = string.sub(nm, 10) end
             local t = -1
             pcall(function() t = math.floor(bq:GetTurnsLeft(row.Hash)) end)
-            print("ITEMROW|building|" .. nm .. "|" .. math.floor(row.Cost or 0) .. "|" .. t)
+            local pcost = purchaseCost(
+                CityCommandTypes.PARAM_BUILDING_TYPE, row.Hash, false)
+            print("ITEMROW|building|" .. nm .. "|" .. math.floor(row.Cost or 0)
+                .. "|" .. t .. "|" .. pcost)
         end
     end
 end

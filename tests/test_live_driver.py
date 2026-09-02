@@ -488,10 +488,18 @@ def test_parse_observes_are_sim_shaped():
     assert overview["players"]["1"]["researching"] is None
     research = parse_available_research(["TECHROW|MINING|25"])
     assert research == [{"tech_id": "MINING", "cost": 25}]
-    production = parse_available_production(["ITEMROW|building|WALLS|70|12",
-                                             "ITEMROW|unit|WARRIOR|40|5"])
+    production = parse_available_production(["ITEMROW|building|WALLS|70|12|140",
+                                             "ITEMROW|unit|WARRIOR|40|5|80"])
     assert [p["item_id"] for p in production] == ["WARRIOR", "WALLS"]
     assert production[0]["kind"] == "unit"
+    assert production[0]["purchase_cost"] == 80
+    assert parse_available_production(["ITEMROW|unit|SCOUT|30|4"]) == [
+        {"item_id": "SCOUT", "cost": 30, "turns": 4, "kind": "unit"}
+    ]
+    with pytest.raises(ValueError, match="purchase cost"):
+        parse_available_production(["ITEMROW|unit|SCOUT|30|4|true"])
+    with pytest.raises(ValueError, match="purchase cost"):
+        parse_available_production(["ITEMROW|unit|SCOUT|30|4|-2"])
 
 
 async def test_observes_over_fake_and_foreign_projection():
@@ -518,8 +526,13 @@ async def test_observes_over_fake_and_foreign_projection():
         production = await adapter.observe(ObserveRequest(
             kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=0,
             subject_id="c1"))
-        assert {"item_id": "MONUMENT", "cost": 60, "turns": 10,
-                "kind": "building"} in production
+        assert {
+            "item_id": "MONUMENT",
+            "cost": 60,
+            "turns": 10,
+            "kind": "building",
+            "purchase_cost": 120,
+        } in production
         vmap = await adapter.observe(
             ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
         assert vmap["tiles"], "M17c: the revealed-tiles read is real"

@@ -402,7 +402,7 @@ class FakeMod:
                     if t not in p["researched"]]
             return ["AVRES|1", *rows, "---END---"]
         if 'print("AVPROD|1")' in code:
-            rows = [f"ITEMROW|{kind}|{item}|{cost}|10"
+            rows = [f"ITEMROW|{kind}|{item}|{cost}|10|{cost * 2}"
                     for item, (cost, kind) in sorted(self.BUILDABLE.items())]
             return ["AVPROD|1", *rows, "---END---"]
         # -- M14d acts (the translator's inert marker identifies the tool) --
