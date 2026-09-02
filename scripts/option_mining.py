@@ -18,16 +18,7 @@ import argparse
 import json
 from pathlib import Path
 
-from civ_arena.game.sim.value import DEFAULT_WEIGHTS
-
-
-def _differential(scores: dict, pid: int) -> int:
-    vals = {}
-    for entry in scores.values():
-        vals[entry["player_id"]] = sum(
-            DEFAULT_WEIGHTS[k] * entry[k] for k in DEFAULT_WEIGHTS)
-    rivals = [v for p, v in vals.items() if p != pid]
-    return vals[pid] - max(rivals)
+from civ_arena.game.sim.value import score_differential
 
 
 def mine_root(root: Path) -> list[dict]:
@@ -40,7 +31,7 @@ def mine_root(root: Path) -> list[dict]:
         trace = json.loads(trace_p.read_text())
         summary = json.loads(summary_p.read_text())
         pid = next(a_pid for a_pid, s in _planner_seats(summary, run_dir))
-        diff = _differential(summary["scores"], pid)
+        diff = score_differential(summary["scores"], pid)
         rows.append({
             "match": run_dir.name, "budget": _budget_of(run_dir.name),
             "diff": diff, "turns": summary["final_turn"],

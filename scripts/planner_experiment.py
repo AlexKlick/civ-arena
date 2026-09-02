@@ -23,7 +23,7 @@ from pathlib import Path
 from civ_arena.agents.runtime import AgentProfile, build_runtime
 from civ_arena.arena.coordinator import Arena
 from civ_arena.config import AgentSpec, MatchSpec
-from civ_arena.game.sim.value import DEFAULT_WEIGHTS
+from civ_arena.game.sim.value import score_differential
 from civ_arena.planner.runtime import PlannerRuntime
 
 METHODS = ("mcts", "mcgs")
@@ -42,15 +42,6 @@ def spec_for(match_id: str, seed: int, turns: int,
                       policy=policies[1], seed=22),
         ],
     )
-
-
-def _differential(scores: dict, pid: int) -> int:
-    vals = {}
-    for entry in scores.values():
-        vals[entry["player_id"]] = sum(
-            DEFAULT_WEIGHTS[k] * entry[k] for k in DEFAULT_WEIGHTS)
-    rivals = [v for p, v in vals.items() if p != pid]
-    return vals[pid] - max(rivals)
 
 
 async def run_planner_match(runs_root: Path, method: str, seed: int,
@@ -86,7 +77,7 @@ async def run_planner_match(runs_root: Path, method: str, seed: int,
         "side": side, "budget": budget, "turns": summary["final_turn"],
         "violations": summary["violations_total"],
         "planner_rejections": rejected,
-        "value_differential": _differential(summary["scores"], side),
+        "value_differential": score_differential(summary["scores"], side),
         "decisions": len(bot.trace),
         "nodes_expanded": sum(s["nodes_expanded"] for s in bot.trace),
         "transposition_hits": sum(s["transposition_hits"] for s in bot.trace),
@@ -106,7 +97,7 @@ async def run_baseline_match(runs_root: Path, policies: tuple[str, str],
         "match_id": match_id, "arm": f"{policies[0]}-vs-{policies[1]}",
         "seed": seed, "side": 0, "turns": summary["final_turn"],
         "violations": summary["violations_total"],
-        "value_differential": _differential(summary["scores"], 0),
+        "value_differential": score_differential(summary["scores"], 0),
     }
 
 

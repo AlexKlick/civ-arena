@@ -42,6 +42,23 @@ def scalarize(vec: dict[str, int], weights: dict[str, int] | None = None) -> int
     return sum(w[k] * vec[k] for k in SCORE_COMPONENTS)
 
 
+def score_differential(scores: dict, pid: int,
+                       weights: dict[str, int] | None = None) -> int:
+    """Own scalarized score minus the strongest rival's, over the
+    summary.json ``scores`` shape (civ name -> per-civ component dict
+    carrying ``player_id``) — the same objective as ``value_of``.
+
+    NOTE: the FIRST function in this module consuming the civ-keyed
+    summary shape; every other function here reads a SimState. Rival =
+    any entry whose player_id differs; with no rival the own score
+    stands (mirroring ``value_of``).
+    """
+    vals = {entry["player_id"]: scalarize(entry, weights)
+            for entry in scores.values()}
+    rivals = [v for p, v in vals.items() if p != pid]
+    return vals[pid] - max(rivals) if rivals else vals[pid]
+
+
 def value_of(state: SimState, player_id: int,
              weights: dict[str, int] | None = None) -> int:
     """Own scalar score minus the strongest rival's — the search objective."""
