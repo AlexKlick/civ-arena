@@ -69,8 +69,13 @@ class SearchResult:
         }
 
 
-def abstract_key(state: SimState, pid: int) -> str:
-    """Exact integer strategic abstraction — the MCGS equivalence key.
+def abstract_doc(state: SimState, pid: int) -> dict[str, Any]:
+    """The un-hashed abstract-key document (the exact integer strategic
+    abstraction). Single source shared by two consumers: the MCGS
+    equivalence key (``abstract_key`` — canonical text of the whole doc)
+    and the M19b case signature (``planner/casebase._project`` — the
+    turn/development-dropped projection of the SAME doc, so a runtime
+    signature equals the projection of the trace root_key by construction).
 
     Coarse on the axes options do not read (gold in buckets of 25, unit
     COUNTS by type) but exact on everything that changes which options are
@@ -104,7 +109,13 @@ def abstract_key(state: SimState, pid: int) -> str:
                  c["production_queue"][0] if c["production_queue"] else ""]
                 for c in cities),
         }
-    return canonical(doc)
+    return doc
+
+
+def abstract_key(state: SimState, pid: int) -> str:
+    """Canonical text of ``abstract_doc`` — the MCGS equivalence key and
+    the trace's recorded root_key."""
+    return canonical(abstract_doc(state, pid))
 
 
 def _apply_step(state: SimState, pid: int, option: Option) -> None:

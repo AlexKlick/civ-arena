@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from civ_arena.session.player_session import AgentRuntime
@@ -20,6 +21,7 @@ class AgentProfile:
     model: str | None = None  # display hint only; the wire label is LLMSpec.model_id
     llm: Any = None  # config.LLMSpec when policy == "llm"
     proposer: Any = None  # config.LLMSpec when policy == "planner" + proposer block
+    case_base: Any = None  # config.CaseBaseSpec when policy == "planner" + case_base
 
 
 @dataclass
@@ -65,8 +67,16 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
 
             proposer_client = MiniMaxMessagesClient(
                 profile.proposer, on_post=on_post)
+        # M19b: the case base loads LOUDLY at construction (from_file raises
+        # on missing/corrupt/wrong-schema) — a bad artifact fails the match
+        # at startup, pre-spend, never mid-match
+        case_base = None
+        if profile.case_base is not None:
+            from civ_arena.planner.casebase import CaseBase
+
+            case_base = CaseBase.from_file(Path("configs") / profile.case_base.path)
         return PlannerRuntime(profile.player_id, profile.seed,
-                              proposer=proposer_client)
+                              proposer=proposer_client, case_base=case_base)
     raise ValueError(f"unknown policy: {profile.policy}")
 
 

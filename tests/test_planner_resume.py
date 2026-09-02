@@ -39,9 +39,9 @@ def spec_for(match_id: str, max_turns: int = 8) -> MatchSpec:
     )
 
 
-def runtimes(budget: int = 4) -> dict[int, Any]:
+def runtimes(budget: int = 4, case_base: Any = None) -> dict[int, Any]:
     return {
-        0: PlannerRuntime(0, 7, budget=budget),
+        0: PlannerRuntime(0, 7, budget=budget, case_base=case_base),
         1: build_runtime(AgentProfile(agent_id="turtler", player_id=1,
                                       policy="turtler", seed=22)),
     }
@@ -144,6 +144,9 @@ async def test_killed_target_stays_retired_across_resume(tmp_path):
     fresh_rt = PlannerRuntime(0, 7)
     fresh_rt.journal = j
     fresh_rt._restore_from_journal(4)
+    # M19b additive field: a journal snapshot PREDATING case_stats restores
+    # the case counters to zeros
+    assert fresh_rt.case_hits == 0 and fresh_rt.case_misses == 0
     assert fresh_rt.belief.foreign_units == {} or (
         enemy["unit_id"] not in fresh_rt.belief.foreign_units)
     assert _belief_snapshot_of(fresh_rt.belief)["foreign_units"] \

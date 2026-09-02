@@ -26,16 +26,27 @@ genuinely new decisions. Proposer spend is capped runtime-side and
 JOURNALED, so resume cannot reset the budget. The journal is advisory
 only (see planner/journal.py for the trust model). The per-decision
 search trace stays in-memory — analysis artifact, not gameplay state.
+
+M19b — case base (optional ``case_base``): retrieval-as-evidence prior.
+The world's signature is computed from the SAME determinized world the
+trace root_key comes from (``bstate``), the immutable artifact ranks
+options by historical win rate, the ranking is compiled legal-now
+(the compile_proposal narrowing) and merged AFTER any live proposer
+ranking. Per-turn failures degrade to no case prior; the prior rides
+the TRACE (``case_prior`` entry), never the event log; the case
+hit/miss counters are journaled diagnostics that never affect ranking.
 """
 
 from __future__ import annotations
 
 import copy
 import random
+from collections.abc import Iterable
 from typing import Any
 
 from civ_arena.game.sim.state import SimState
 from civ_arena.planner.belief import PlannerBelief, build_state_doc
+from civ_arena.planner.casebase import signature_from_state
 from civ_arena.planner.executor import execute_plan
 from civ_arena.planner.options import OPTIONS
 from civ_arena.planner.proposer import build_request, compile_proposal
@@ -56,12 +67,37 @@ RESELECT_EVERY = 3
 PROPOSER_POST_CAP = 64
 
 
+def _compile_case_ranking(ranked: Iterable[str], state: SimState,
+                          pid: int) -> list[str]:
+    """Case ranking -> LEGAL-now ranking, mirroring compile_proposal's
+    narrowing EXACTLY: non-str/unknown/duplicate ids drop (first kept),
+    only initiation-true options survive — retrieval can only permute,
+    never widen the search's choice set."""
+    out: list[str] = []
+    for oid in ranked:
+        if not isinstance(oid, str) or oid in out or oid not in OPTIONS:
+            continue
+        if OPTIONS[oid].initiation(state, pid):
+            out.append(oid)
+    return out
+
+
+def _merge_prior(proposer_ranked: list[str] | None,
+                 case_ranked: list[str] | None) -> list[str] | None:
+    """Proposer FIRST (the live, more specific signal), then case-ranked ids
+    not already present; first occurrence wins. Both optional — both empty
+    stays None (unprimed)."""
+    merged = list(dict.fromkeys(list(proposer_ranked or [])
+                                + list(case_ranked or [])))
+    return merged or None
+
+
 class PlannerRuntime:
     """Belief-fair option planner. Deterministic in (player_id, seed)."""
 
     def __init__(self, player_id: int, seed: int, *,
                  method: str = SEARCH_METHOD, budget: int = SEARCH_BUDGET,
-                 proposer: Any = None) -> None:
+                 proposer: Any = None, case_base: Any = None) -> None:
         self.player_id = player_id
         self.rng = random.Random(seed)
         self.method = method
@@ -74,6 +110,9 @@ class PlannerRuntime:
         self._processed_through = 0  # last turn this runtime completed
         self.proposer = proposer  # ModelClient | None (M16b, untrusted prior)
         self.proposer_posts = 0   # journaled; resume cannot reset the budget
+        self.case_base = case_base  # casebase.CaseBase | None (M19b prior)
+        self.case_hits = 0         # diagnostics only, journaled as case_stats
+        self.case_misses = 0
 
     async def _propose(self, bstate: SimState, turn: int) -> tuple[
             list[str] | None, dict[str, Any]]:
@@ -99,6 +138,33 @@ class PlannerRuntime:
                                "assumptions": proposal.raw_assumptions,
                                "contingencies": proposal.raw_contingencies}
         return (proposal.ranked or None), doc
+
+    def _case_prior(self, bstate: SimState,
+                    turn: int) -> tuple[list[str] | None, dict[str, Any]]:
+        """M19b retrieval-as-evidence prior: signature of the CURRENT
+        determinized world, historical option ranking, compiled legal-now.
+        ``bstate`` is the exact world the trace root_key is computed from —
+        search_option rebuilds ``build_state_doc(belief, seed=turn)`` with
+        the same seed and the same (unmutated) belief, so
+        signature_from_state(bstate) == projection of the recorded root_key
+        BY CONSTRUCTION (pinned by test_signature_matches_root_key). The
+        whole chain is fail-soft: the artifact was validated at
+        construction, but ANY per-turn failure degrades to no case prior —
+        the case base never blocks or breaks the match."""
+        try:
+            sig = signature_from_state(bstate, self.player_id)
+            ranked = self.case_base.rank(sig)
+            hit = 1 if self.case_base.hit(sig) else 0
+            if hit:
+                self.case_hits += 1
+            else:
+                self.case_misses += 1
+            compiled = _compile_case_ranking(ranked, bstate, self.player_id)
+            doc: dict[str, Any] = {"turn": turn, "ranked": compiled,
+                                   "signature": sig, "hit": hit}
+            return (compiled or None), doc
+        except Exception:
+            return None, {"turn": turn, "error": "case_prior_failed"}
 
     async def _filter_to_wire_vocabulary(
             self, facade: Any, bstate: Any,
@@ -199,6 +265,14 @@ class PlannerRuntime:
         self.active = last["active"]
         self.chosen_at_turn = last["chosen_at_turn"]
         self.proposer_posts = int(last.get("proposer_posts", 0))
+        # M19b case counters ride the journal the same way (additive: an old
+        # journal without case_stats restores to zeros). DIAGNOSTICS ONLY —
+        # the case prior stays a pure function of (belief, immutable
+        # artifact), so restoring these counters can never shift ranking and
+        # resume bit-identity holds.
+        stats = last.get("case_stats") or {}
+        self.case_hits = int(stats.get("hits", 0))
+        self.case_misses = int(stats.get("misses", 0))
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()
@@ -221,8 +295,13 @@ class PlannerRuntime:
         if needs_choice:
             prior: list[str] | None = None
             proposal_doc: dict[str, Any] | None = None
+            case_doc: dict[str, Any] | None = None
             if self.proposer is not None:
                 prior, proposal_doc = await self._propose(bstate, turn)
+            if self.case_base is not None:
+                case_ranked, case_doc = self._case_prior(bstate, turn)
+                if case_ranked:
+                    prior = _merge_prior(prior, case_ranked)
             result = search_option(
                 self.belief, self.player_id, method=self.method,
                 budget=self.budget, epoch_turns=EPOCH_TURNS, seed=turn,
@@ -232,6 +311,8 @@ class PlannerRuntime:
             entry = {"turn": turn, **result.to_doc()}
             if proposal_doc is not None:
                 entry["proposal"] = proposal_doc
+            if case_doc is not None:
+                entry["case_prior"] = case_doc
             self.trace.append(entry)
 
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
@@ -257,4 +338,10 @@ class PlannerRuntime:
                 },
                 "active": self.active, "chosen_at_turn": self.chosen_at_turn,
                 "proposer_posts": self.proposer_posts,
+                "case_stats": {
+                    "artifact_sha256": (self.case_base.artifact_sha256
+                                        if self.case_base is not None else None),
+                    "hits": self.case_hits,
+                    "misses": self.case_misses,
+                },
             })

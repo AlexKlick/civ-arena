@@ -85,6 +85,27 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
     )
 
 
+@dataclass(frozen=True)
+class CaseBaseSpec:
+    """M19b: retrieval-as-evidence case base for policy "planner". ``path``
+    is a BARE filename under configs/ (the recall_runs safe-id charset: no
+    '/', no leading dot) — the artifact ships with the config surface, an
+    arbitrary host path never rides a match config."""
+    path: str
+
+
+def _parse_case_base(block: Any, where: str) -> CaseBaseSpec:
+    if not isinstance(block, dict):
+        raise ConfigError(f"{where}: case_base block must be a mapping")
+    raw = _require(block, "path", where)
+    if not isinstance(raw, str) \
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", raw):
+        raise ConfigError(
+            f"{where}.case_base.path must be a bare filename under configs/ "
+            "([A-Za-z0-9][A-Za-z0-9._-]{0,63}), not a path")
+    return CaseBaseSpec(path=raw)
+
+
 @dataclass
 class AgentSpec:
     agent_id: str
@@ -95,6 +116,8 @@ class AgentSpec:
     llm: LLMSpec | None = None
     # M16b: untrusted LLM strategy proposer for policy "planner" only.
     proposer: LLMSpec | None = None
+    # M19b: case-base prior artifact for policy "planner" only.
+    case_base: CaseBaseSpec | None = None
 
 
 @dataclass
@@ -169,6 +192,8 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             llm=_parse_llm(entry["llm"], where) if "llm" in entry else None,
             proposer=_parse_llm(entry["proposer"], f"{where}.proposer")
             if "proposer" in entry else None,
+            case_base=_parse_case_base(entry["case_base"], f"{where}.case_base")
+            if "case_base" in entry else None,
         )
         if agent.policy not in VALID_POLICIES:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
@@ -183,6 +208,11 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             raise ConfigError(
                 f"{where}: proposer: block on policy {agent.policy!r} — the "
                 "proposer rides the planner's search (set policy: planner)"
+            )
+        if agent.policy != "planner" and agent.case_base is not None:
+            raise ConfigError(
+                f"{where}: case_base: block on policy {agent.policy!r} — the "
+                "case prior rides the planner's search (set policy: planner)"
             )
         if agent.player_id in seen_players:
             raise ConfigError(f"{where}: duplicate player_id {agent.player_id}")
