@@ -123,6 +123,22 @@ print("hostgame-called")
 print("{SENTINEL}")
 """
 
+# M18: the hotseat HOST — Network.HostGame takes a SERVER TYPE (the engine's
+# own automation suite passes it; mainmenu.lua derives it from the lobby
+# mode via ServerTypeForMPLobbyType). The ARGUMENTLESS HostGame used in SP
+# takes the local fast path: it auto-launches and the launch resolution
+# DEMOTES every non-local seated human to AI (four live attempts). With
+# SERVER_TYPE_HOTSEAT the host opens the HOTSEAT STAGING SESSION instead —
+# the seated players survive, and Network.LaunchGame() starts the game.
+HOST_HOTSEAT_LUA = f"""
+print("mode-before|" .. tostring(GameConfiguration.GetGameMode()))
+Network.HostGame(ServerType.SERVER_TYPE_HOTSEAT)
+print("hostgame-hotseat-called")
+print("InSession|" .. tostring(Network.IsSessionActive()))
+print("Humans|" .. tostring(GameConfiguration.GetHumanPlayerCount()))
+print("{SENTINEL}")
+"""
+
 # Read-back verification gates the launch: every value set here must read
 # back exactly, or the operator (not the script) decides what to do.
 # Map size is TINY, not DUEL: on duel-with-2-majors the engine AI's
@@ -217,7 +233,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=4318)
-    ap.add_argument("phase_arg", choices=["host", "config", "hotseat",
+    ap.add_argument("phase_arg", choices=["host", "config", "hotseat", "hostseat",
                                           "launch"],
                     help="host: create the local session; config: apply + "
                          "verify the duel setup; hotseat: the two-human-seat "
@@ -228,7 +244,7 @@ def main() -> int:
     opts = ap.parse_args()
 
     lua = {"host": HOST_LUA, "config": CONFIG_LUA,
-           "hotseat": CONFIG_HOTSEAT_LUA,
+           "hotseat": CONFIG_HOTSEAT_LUA, "hostseat": HOST_HOTSEAT_LUA,
            "launch": LAUNCH_LUA}[opts.phase_arg]
     try:
         return asyncio.run(phase(opts.host, opts.port, lua, opts.state,
