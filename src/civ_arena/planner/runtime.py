@@ -59,8 +59,16 @@ uninterrupted twin's. DECLARED LIMIT: a crash BETWEEN the in-memory
 pending update and the next journal append still loses that one update
 (the bandit is advisory learning state; gameplay determinism is bounded
 to the missing update's ranking effect and the pin covers the resumed
-leg). An unarmed resume over an armed journal (or vice versa) ignores
-the block, mirroring the case-stats additive rule.
+leg). Restore (Codex M20b B4/B6): a snapshot whose bandit block is
+ABSENT predates bandit state (old journal / unarmed first leg), so the
+learned state rewinds to the constructor's INITIAL snapshot (deep-copied
+at __init__) with no pending — a rewind-reused runtime never carries
+learning from past the snapshot into the rewound leg; a PRESENT but
+malformed block (non-dict, invalid state, incoherent pending) disarms
+the bandit for the leg (fail-soft, never a mid-resume crash); an
+unarmed runtime ignores the block entirely. The pending parser is
+STRICT: only four coherent nulls or four fully valid fields — a partial
+pending raises rather than silently dropping one update.
 
 M20c — learned value head (optional ``weights``): integer component
 weights threaded VERBATIM into ``search_option``'s leaf evaluation. None
@@ -163,6 +171,18 @@ class PlannerRuntime:
         # state): {"turn", "context", "option", "value"} of the last
         # completed selection, settled at the NEXT needs_choice
         self._bandit_pending: dict[str, Any] | None = None
+        # The constructor's INITIAL bandit snapshot (deep copy of the
+        # arming doc; None when unarmed — Codex M20b B4). A restore whose
+        # selected snapshot PREDATES bandit state (no bandit block — an
+        # old or unarmed-leg journal) rewinds the learned state to THIS,
+        # never keeps whatever the instance learned past the snapshot: a
+        # rewind-reuse must not carry turn-40 learning back into turn 20.
+        self._bandit_initial_doc: dict[str, Any] | None = None
+        if bandit is not None:
+            try:
+                self._bandit_initial_doc = copy.deepcopy(bandit.to_doc())
+            except Exception:
+                self._bandit_initial_doc = None  # no snapshot to rewind to
 
     async def _propose(self, bstate: SimState, turn: int) -> tuple[
             list[str] | None, dict[str, Any]]:
@@ -273,16 +293,37 @@ class PlannerRuntime:
     @staticmethod
     def _bandit_pending_from_doc(doc: dict[str, Any]) -> dict[str, Any] | None:
         """Parse the journal block's pending fields back to the in-memory
-        shape (JSON round-trips the context tuple as a list of ints)."""
-        ctx = doc.get("last_context")
-        option = doc.get("last_option")
-        value = doc.get("last_value")
-        turn = doc.get("last_decision_turn")
-        if (not isinstance(ctx, list) or not isinstance(option, str)
-                or not isinstance(value, int) or isinstance(value, bool)
-                or not isinstance(turn, int) or isinstance(turn, bool)):
+        shape. STRICT (Codex M20b B6): only two coherent shapes are
+        accepted — all four fields null (no pending decision), or all
+        four fully valid (last_decision_turn / last_value non-bool ints,
+        last_context a list of exactly CONTEXT_AXES non-bool ints,
+        last_option a str). Anything partial or malformed RAISES so the
+        restore's fail-soft boundary disarms the bandit for the leg: a
+        silently-dropped pending would lose one update and quietly
+        diverge the learned state from its uninterrupted twin."""
+        from civ_arena.planner.bandit import CONTEXT_AXES
+
+        fields = ("last_decision_turn", "last_context", "last_option",
+                  "last_value")
+        values = [doc.get(f) for f in fields]
+        if all(v is None for v in values):
             return None
-        return {"turn": turn, "context": tuple(int(x) for x in ctx),
+        turn, ctx, option, value = values
+        if not (isinstance(turn, int) and not isinstance(turn, bool)):
+            raise ValueError(f"bandit pending last_decision_turn must be "
+                             f"an int, got {turn!r}")
+        if not (isinstance(ctx, list) and len(ctx) == CONTEXT_AXES
+                and all(isinstance(x, int) and not isinstance(x, bool)
+                        for x in ctx)):
+            raise ValueError(f"bandit pending last_context must be a list "
+                             f"of {CONTEXT_AXES} ints, got {ctx!r}")
+        if not isinstance(option, str):
+            raise ValueError(f"bandit pending last_option must be a str, "
+                             f"got {option!r}")
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"bandit pending last_value must be an int, "
+                             f"got {value!r}")
+        return {"turn": turn, "context": tuple(ctx),
                 "option": option, "value": value}
 
     async def _filter_to_wire_vocabulary(
@@ -407,20 +448,38 @@ class PlannerRuntime:
                 self.case_base = None
                 self._case_artifact_mismatch = True
         # M20b additive restore: the bandit state AND the pending decision
-        # ride the journal's bandit block. An armed runtime over a journal
-        # WITHOUT a bandit block (old journal, or an unarmed first leg)
-        # keeps its construction-time arming, mirroring the case-stats
-        # rule; an unarmed runtime ignores the block. A bandit block that
-        # refuses validation degrades the leg to unprimed (the journal is
-        # advisory; the referee is untouched) — never a crash mid-resume.
-        bandit_doc = last.get("bandit")
-        if self.bandit is not None and isinstance(bandit_doc, dict):
-            try:
-                self.bandit = Bandit.from_doc(bandit_doc)
-                self._bandit_pending = self._bandit_pending_from_doc(bandit_doc)
-            except Exception:
-                self.bandit = None
+        # ride the journal's bandit block. Three armed-runtime cases
+        # (Codex M20b B4/B6): a VALID block restores state + pending; a
+        # snapshot with NO block predates bandit state (old journal, or an
+        # unarmed first leg), so the learned state rewinds to the
+        # constructor's INITIAL snapshot with no pending — a rewind-reuse
+        # never keeps learning from past the snapshot; a PRESENT but
+        # malformed block (non-dict, bad state, incoherent pending) raises
+        # into the fail-soft boundary and DISARMS the bandit for the leg —
+        # never a crash mid-resume. An unarmed runtime ignores the block
+        # entirely, mirroring the case-stats additive rule.
+        if self.bandit is not None:
+            if "bandit" not in last:
                 self._bandit_pending = None
+                if self._bandit_initial_doc is not None:
+                    try:
+                        self.bandit = Bandit.from_doc(self._bandit_initial_doc)
+                    except Exception:
+                        self.bandit = None
+                else:
+                    self.bandit = None
+            else:
+                try:
+                    bandit_doc = last["bandit"]
+                    if not isinstance(bandit_doc, dict):
+                        raise ValueError("journal bandit block is not a "
+                                         "mapping")
+                    self.bandit = Bandit.from_doc(bandit_doc)
+                    self._bandit_pending = \
+                        self._bandit_pending_from_doc(bandit_doc)
+                except Exception:
+                    self.bandit = None
+                    self._bandit_pending = None
 
     async def take_turn(self, facade: Any) -> None:
         overview = await facade.get_overview()

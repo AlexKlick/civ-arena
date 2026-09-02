@@ -119,7 +119,34 @@ async def run_match(runs_root: Path, arm: str, seed: int, side: int,
     }
 
 
-def paired_report(rows: list[dict]) -> str:
+def _validity_problems(rows: list[dict], requested_turns: int) -> list[str]:
+    """Inference validity gate (Codex M20b B1): inference is refused unless
+    ZERO dirty rows (violations/rejections), every row reached the
+    requested horizon, and every (seed, side) carries EXACTLY one row per
+    arm — otherwise the polluted rows would still flow into the diffs and
+    the binomial as display-only numbers."""
+    problems: list[str] = []
+    dirty = [r for r in rows if r["violations"] or r.get("planner_rejections")]
+    if dirty:
+        problems.append(f"{len(dirty)} dirty row(s) (violations/rejections)")
+    short = [r for r in rows if r["turns"] != requested_turns]
+    if short:
+        problems.append(f"{len(short)} row(s) short of the requested "
+                        f"horizon {requested_turns}")
+    per_pair: dict[tuple[int, int], dict[str, int]] = {}
+    for r in rows:
+        arms = per_pair.setdefault((r["seed"], r["side"]), {})
+        arms[r["arm"]] = arms.get(r["arm"], 0) + 1
+    for (seed, side), arms in sorted(per_pair.items()):
+        bad_arms = sorted(arm for arm in ARMS if arms.get(arm, 0) != 1)
+        if bad_arms:
+            problems.append(f"pair (seed={seed}, side={side}): arms "
+                            f"{bad_arms} not exactly-once")
+    return problems
+
+
+def paired_report(rows: list[dict], requested_turns: int) -> str:
+    problems = _validity_problems(rows, requested_turns)
     bad = [r for r in rows if r["violations"] or r.get("planner_rejections")]
     turns_set = {r["turns"] for r in rows}
     by_key: dict[tuple[int, int], dict[str, dict]] = {}
@@ -132,26 +159,38 @@ def paired_report(rows: list[dict]) -> str:
     for r in bad:
         out.append(f"  DIRTY: {r['match_id']} viol={r['violations']} "
                    f"rej={r.get('planner_rejections')}")
-    diffs = [bandit["value_differential"] - base["value_differential"]
-             for _, bandit, base in pairs]
-    clean = [d for d in diffs if d != 0]
-    wins = sum(1 for d in clean if d > 0)
-    ties = len(diffs) - len(clean)
-    out.append(f"bandit wins {wins} / base wins {len(clean) - wins} "
-               f"/ ties {ties}")
-    if clean:
-        out.append(f"paired diff mean={statistics.mean(clean):+.0f} "
-                   f"median={statistics.median(clean):+.0f} "
-                   f"min={min(clean):+d} max={max(clean):+d}")
-        out.append(f"one-sided exact binomial p (H: bandit>base) = "
-                   f"{_binom_p_ge(len(clean), wins):.4f}")
-    for side in sorted({k[1] for k, _, _ in pairs}):
-        sd = [bandit["value_differential"] - base["value_differential"]
-              for k, bandit, base in pairs if k[1] == side]
-        w = sum(1 for d in sd if d > 0)
-        lost = sum(1 for d in sd if d < 0)
-        out.append(f"side {side}: bandit {w} / base {lost} "
-                   f"/ tie {len(sd) - w - lost}")
+    if problems:
+        # inference refused — the reason is printed, never a p-value or a
+        # win count computed over polluted rows
+        out.append("INFERENCE SUPPRESSED — validity gate failed: "
+                   + "; ".join(problems))
+    else:
+        diffs = [bandit["value_differential"] - base["value_differential"]
+                 for _, bandit, base in pairs]
+        clean = [d for d in diffs if d != 0]
+        wins = sum(1 for d in clean if d > 0)
+        ties = len(diffs) - len(clean)
+        out.append(f"bandit wins {wins} / base wins {len(clean) - wins} "
+                   f"/ ties {ties}")
+        if clean:
+            # descriptive over DECIDABLE pairs only (the exp3 house
+            # convention) — labeled as such (Codex M20b B2)
+            out.append(f"paired diff decidable-only mean="
+                       f"{statistics.mean(clean):+.0f} "
+                       f"median={statistics.median(clean):+.0f} "
+                       f"min={min(clean):+d} max={max(clean):+d}")
+        out.append(f"paired diff all-pairs mean="
+                   f"{statistics.mean(diffs):+.0f} (ties count as 0)")
+        if clean:
+            out.append(f"one-sided exact binomial p (H: bandit>base) = "
+                       f"{_binom_p_ge(len(clean), wins):.4f}")
+        for side in sorted({k[1] for k, _, _ in pairs}):
+            sd = [bandit["value_differential"] - base["value_differential"]
+                  for k, bandit, base in pairs if k[1] == side]
+            w = sum(1 for d in sd if d > 0)
+            lost = sum(1 for d in sd if d < 0)
+            out.append(f"side {side}: bandit {w} / base {lost} "
+                       f"/ tie {len(sd) - w - lost}")
     armed = [r for r in rows if r["arm"] == "bandit"]
     if armed:
         total_updates = sum(r["bandit_updates"] for r in armed)
@@ -190,7 +229,8 @@ async def main() -> None:
                       f"ctx={r['bandit_contexts']} wall={r['wall_ms']}ms",
                       flush=True)
 
-    doc = {"results": results, "paired": paired_report(results)}
+    doc = {"results": results,
+           "paired": paired_report(results, opts.turns)}
     out = opts.runs_root / "exp20b-results.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")

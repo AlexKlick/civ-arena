@@ -21,6 +21,7 @@ the configs/ bare-filename charset.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import shutil
 import sys
@@ -687,3 +688,66 @@ def test_cli_guards_out_and_provenance(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         run_cli("--mine", "--labels-glob", "runs/r1/labels.json",
                 "--out", out)
+
+
+# ------------------------------------------------- experiment report B1/B2
+
+
+def test_casebase_experiment_report_validity_and_stats() -> None:
+    """Codex M20b B1/B2 backport pin (hermetic, synthetic rows — no
+    matches): the paired report REFUSES inference unless zero dirty rows,
+    every row at the requested horizon, and exactly one row per arm per
+    (seed, side) — reason printed, no p-value over polluted rows — and
+    labels BOTH descriptive conventions (decidable-only, the exp3 house
+    convention, AND the all-pairs mean with ties as 0). The historical
+    exp-M19b legs were all-clean, so their recorded verdicts stand under
+    this gate."""
+    spec = importlib.util.spec_from_file_location(
+        "casebase_experiment",
+        Path(__file__).resolve().parent.parent / "scripts"
+        / "casebase_experiment.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+    def row(arm: str, seed: int, side: int, diff: int, *, turns: int = 40,
+            viol: int = 0) -> dict[str, Any]:
+        return {
+            "match_id": f"synthetic-{arm}-s{seed}-p{side}", "arm": arm,
+            "seed": seed, "side": side, "budget": 4, "turns": turns,
+            "violations": viol, "planner_rejections": 0,
+            "value_differential": diff, "decisions": 3,
+            "case_hits": 1 if arm == "case" else 0,
+            "case_misses": 2 if arm == "case" else 0,
+            "chosen": [], "wall_ms": 1,
+        }
+
+    # three complete pairs, diffs +30 / -12 / 0
+    rows: list[dict[str, Any]] = []
+    for i, case_diff in enumerate((30, -12, 0)):
+        seed = 200_003 + i * 7919
+        rows.append(row("case", seed, i % 2, case_diff))
+        rows.append(row("base", seed, i % 2, 0))
+
+    clean = mod.paired_report(rows, 40)
+    assert "INFERENCE SUPPRESSED" not in clean
+    assert "one-sided exact binomial p (H: case>base)" in clean
+    assert "case wins 1 / base wins 1 / ties 1" in clean
+    assert "paired diff decidable-only mean=+9 median=+9 min=-12 max=+30" \
+        in clean
+    assert "paired diff all-pairs mean=+6 (ties count as 0)" in clean
+
+    rows[0]["violations"] = 1  # dirty row
+    dirty = mod.paired_report(rows, 40)
+    assert "INFERENCE SUPPRESSED" in dirty and "dirty row" in dirty
+    assert "binomial p" not in dirty and "case wins" not in dirty
+
+    rows[0]["violations"] = 0
+    rows[1]["turns"] = 37  # short of the requested horizon
+    short = mod.paired_report(rows, 40)
+    assert "INFERENCE SUPPRESSED" in short and "horizon" in short
+    assert "binomial p" not in short
+
+    duplicate = rows + [row("case", 200_003, 0, 5)]  # arm not exactly-once
+    dup = mod.paired_report(duplicate, 40)
+    assert "INFERENCE SUPPRESSED" in dup and "exactly-once" in dup
+    assert "binomial p" not in dup

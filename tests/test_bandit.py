@@ -7,19 +7,30 @@ over a FULL permutation of the given menu with a deterministic untried
 tail; context buckets are the M19c mining ladders over the search
 abstract doc (below-threshold drifts share a context, crossings split
 it, and the rung counts equal mining.feature_items' item counts on the
-same doc); the state bound evicts smallest-n (ties -> lexicographically
-smallest) deterministically; the runtime chain fails soft (a poisoned
-bandit degrades to unprimed and the match completes hash-identical to
-the unarmed twin); same seed -> identical traces; the resume pin holds
-WITH the bandit armed because the bandit state AND the pending decision
-ride the journal's bandit block; and an init state that dominates a
-context actually ACTS — the search's first visit goes to the dominant
-option at sub-menu budget.
+same doc); the state bound evicts smallest-n POST-STATE (insert+credit
+first — the incoming context can itself be the evictee; ties ->
+lexicographically smallest) deterministically; context keys are the
+canonical six-component form only (aliases refuse, B5); the journal's
+bandit block is strict (a partial pending RAISES and disarms the leg,
+never a silent one-update loss; a non-dict block disarms too, B6); a
+rewind-reuse onto a snapshot that predates bandit state rewinds the
+learned state to the constructor's initial snapshot (B4); the runtime
+chain fails soft (a poisoned bandit degrades to unprimed and the match
+completes hash-identical to the unarmed twin); same seed -> identical
+traces; the resume pin holds WITH the bandit armed because the bandit
+state AND the pending decision ride the journal's bandit block; an init
+state that dominates a context actually ACTS — the search's first visit
+goes to the dominant option at sub-menu budget; and the experiment
+runner's paired report gates inference on validity (dirty/short/
+duplicate rows suppress the p-value entirely, B1) and labels BOTH
+descriptive conventions (decidable-only and all-pairs means, B2).
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,10 +43,12 @@ from civ_arena.config import AgentSpec, MatchSpec
 from civ_arena.game.sim.layouts import duel_start
 from civ_arena.game.sim.state import SimState
 from civ_arena.planner.bandit import (
+    CONTEXT_AXES,
     MAX_CONTEXTS,
     Bandit,
     context_bucket,
 )
+from civ_arena.planner.journal import PlannerJournal
 from civ_arena.planner.mining import (
     GOLD_THRESHOLDS,
     RESEARCHED_THRESHOLDS,
@@ -121,6 +134,15 @@ def test_bandit_fixed_point_no_floats() -> None:
                 {"0,0": {"x": {"n": 1, "adv_sum": 0.5}}}})
     with pytest.raises(ValueError):
         Bandit({"schema": 1, "contexts": {"zero": {}}})  # bad context key
+    # B5 — context keys are the CANONICAL six-component form only:
+    # aliases ("00,..", "-0,.."), wrong arity, and non-canonical re-emits
+    # refuse, so two spellings of one context can never collide in state
+    good_rec = {"economy": {"n": 1, "adv_sum": 2}}
+    for alias in ("00,0,0,0,0,0", "-0,0,0,0,0,0", "+1,0,0,0,0,0",
+                  "0,0,0,0,0", "0,0,0,0,0,0,0", " 0,0,0,0,0,0"):
+        with pytest.raises(ValueError):
+            Bandit({"schema": 1, "contexts": {alias: good_rec}})
+    Bandit({"schema": 1, "contexts": {"0,0,0,0,0,0": good_rec}})  # canonical
 
 
 # ------------------------------------------------------- ranking rules
@@ -287,6 +309,23 @@ def test_bandit_state_bound_deterministic() -> None:
         assert ",".join(map(str, [i] + [0] * 5)) not in trimmed_keys
     assert ",".join(map(str, [3] + [0] * 5)) in trimmed_keys
 
+    # B3 — the bound is a POST-STATE rule: insert + credit FIRST, then
+    # evict, so an update to a NEW context that ends up smallest (here a
+    # first trial against a table of n=2 contexts) evicts THE NEW CONTEXT
+    post = Bandit()
+    for i in range(MAX_CONTEXTS):
+        post.update(tuple([i] + [0] * 5), "economy", 1)
+        post.update(tuple([i] + [0] * 5), "economy", 1)  # every context n=2
+    assert len(post) == MAX_CONTEXTS
+    post.update(tuple([999] + [0] * 5), "rush", 7)  # new context -> n=1
+    post_keys = post.to_doc()["contexts"]
+    assert len(post_keys) == MAX_CONTEXTS
+    assert "999,0,0,0,0,0" not in post_keys  # the newcomer was smallest
+    assert "0,0,0,0,0,0" in post_keys and "511,0,0,0,0,0" in post_keys
+    # and the update still counted (credit happened before eviction)
+    assert post.updates == MAX_CONTEXTS * 2 + 1
+    assert post.abs_adv_sum == MAX_CONTEXTS * 2 + 7
+
 
 # ------------------------------------------------------ runtime fail-soft
 
@@ -431,3 +470,240 @@ async def test_bandit_resume_bit_identical(tmp_path) -> None:
     journal_text = (tmp_path / "run" / "planner" / "p0-journal.jsonl"
                     ).read_text()
     assert "bandit" in journal_text and "last_option" in journal_text
+
+
+# ----------------------------------------------- B4: rewind-aware reuse
+
+
+async def test_bandit_rewind_reuse_drops_future_learned_state(tmp_path):
+    """B4 pin — the exact reported repro: an armed runtime resumes an OLD
+    (unarmed-leg) journal and runs to 40, so the journal's snapshots at
+    and below turn 20 predate bandit state. Rewinding that SAME runtime
+    back to 21 must rewind the learned state to the constructor's INITIAL
+    snapshot with no pending — never keep the turn-21..40 learning."""
+    # leg 1: UNARMED to 20 — journal turns 1..20 carry no bandit block
+    arena1 = Arena(tmp_path / "run", resume_spec_for("bandit-rewind", 20),
+                   runtimes=resume_runtimes(budget=2))
+    s1 = await arena1.run()
+    assert s1["final_turn"] == 20 and s1["violations_total"] == 0
+
+    ckpt = CheckpointState.from_doc(json.loads(
+        (tmp_path / "run" / "checkpoints" / "ckpt-turn-0020.json").read_text()))
+
+    # leg 2: armed runtime resumes the old journal and runs to 40, learning
+    arena2 = Arena(tmp_path / "run", resume_spec_for("bandit-rewind", 40),
+                   runtimes=resume_runtimes(budget=2, bandit=Bandit()))
+    s2 = await arena2.run(resume_state=ckpt)
+    assert s2["final_turn"] == 40 and s2["violations_total"] == 0
+    rt = arena2.runtimes[0]
+    learned = rt.bandit.to_doc()
+    assert learned["updates"] > 0  # the future learned state exists to lose
+
+    # rewind-reuse to 21: the selected snapshot (turn 20) predates bandit
+    # state -> the constructor's INITIAL snapshot + no pending, never the
+    # turn-40 learned state
+    rt._restore_from_journal(21)
+    assert rt.bandit.to_doc() == Bandit().to_doc()
+    assert rt.bandit.to_doc()["updates"] == 0
+    assert rt._bandit_pending is None
+    assert rt.bandit.to_doc() != learned
+
+
+# --------------------------------------- B5/B6: journal block validation
+
+
+_ABSENT = object()  # sentinel: snapshot carries no bandit key at all
+
+
+def _rt_with_journal_block(tmp_path, block, name: str) -> PlannerRuntime:
+    """An armed runtime whose journal's latest snapshot (turn 4) carries
+    the given bandit block (or none, for _ABSENT) — the
+    test_case_artifact_mismatch harness shape."""
+    rt = PlannerRuntime(0, 7, bandit=Bandit())
+    j = PlannerJournal(tmp_path / name / "p0-journal.jsonl")
+    snapshot: dict[str, Any] = {
+        "turn": 4,
+        "belief": {
+            "own_player": {"player_id": 0, "civ_name": "ROME", "gold": 50,
+                           "researched": [], "researching": ""},
+            "public_players": {1: {"civ_name": "KOREA", "alive": True}},
+            "own_units": {}, "own_cities": {}, "foreign_units": {},
+            "foreign_cities": {}, "tiles": {}, "turn": 4},
+        "active": "rush", "chosen_at_turn": 4,
+    }
+    if block is not _ABSENT:
+        snapshot["bandit"] = block
+    j.append(4, snapshot)
+    rt.journal = j
+    return rt
+
+
+def _state_block(**pending: Any) -> dict[str, Any]:
+    return {"schema": 1, "contexts": {}, "updates": 0, "abs_adv_sum": 0,
+            **pending}
+
+
+def test_bandit_journal_block_validation(tmp_path) -> None:
+    """B5+B6: the journal's bandit block is validated strictly at restore.
+    A PRESENT-but-malformed block (non-dict, alias/arity context keys, a
+    PARTIAL pending) disarms the bandit for the leg — never a crash, never
+    a silent one-update loss; a snapshot with no block at all predates
+    bandit state and rewinds to the initial snapshot (B4, pinned above)."""
+    # the pending parser itself: coherent nulls, full validity, strictness
+    parse = PlannerRuntime._bandit_pending_from_doc
+    assert parse(_state_block()) is None  # four coherent nulls
+    full = _state_block(last_decision_turn=3, last_context=[0, 0, 0, 1, 0, 0],
+                        last_option="rush", last_value=310)
+    assert parse(full) == {"turn": 3, "context": (0, 0, 0, 1, 0, 0),
+                           "option": "rush", "value": 310}
+    for bad in (
+        {"last_decision_turn": 3, "last_context": [0] * CONTEXT_AXES,
+         "last_option": "rush", "last_value": None},          # partial
+        {"last_decision_turn": 3, "last_context": [0] * 5,
+         "last_option": "rush", "last_value": 1},             # arity
+        {"last_decision_turn": True, "last_context": [0] * CONTEXT_AXES,
+         "last_option": "rush", "last_value": 1},             # bool turn
+        {"last_decision_turn": 3, "last_context": [0] * CONTEXT_AXES,
+         "last_option": "rush", "last_value": True},          # bool value
+        {"last_decision_turn": 3, "last_context": [0] * CONTEXT_AXES,
+         "last_option": 7, "last_value": 1},                  # non-str option
+        {"last_decision_turn": 3, "last_context": ["0"] * CONTEXT_AXES,
+         "last_option": "rush", "last_value": 1},             # non-int ctx
+    ):
+        with pytest.raises(ValueError):
+            parse(_state_block(**bad))
+
+    # a valid block restores state + pending exactly
+    rt = _rt_with_journal_block(tmp_path, full, "valid")
+    rt._restore_from_journal(5)
+    assert rt.bandit is not None and rt.bandit.to_doc()["updates"] == 0
+    assert rt._bandit_pending == {"turn": 3, "context": (0, 0, 0, 1, 0, 0),
+                                  "option": "rush", "value": 310}
+    # coherent nulls restore state with NO pending
+    rt = _rt_with_journal_block(tmp_path, _state_block(), "nulls")
+    rt._restore_from_journal(5)
+    assert rt.bandit is not None and rt._bandit_pending is None
+
+    # malformed blocks DISARM the leg (fail-soft at the restore boundary)
+    for name, block in (
+        ("nondict", ["not", "a", "mapping"]),
+        ("alias-key", {"schema": 1, "contexts":
+                       {"00,0,0,0,0,0": {"rush": {"n": 1, "adv_sum": 1}}},
+                       "updates": 0, "abs_adv_sum": 0}),       # B5
+        ("arity-key", {"schema": 1, "contexts":
+                       {"0,0,0,0,0": {"rush": {"n": 1, "adv_sum": 1}}},
+                       "updates": 0, "abs_adv_sum": 0}),       # B5
+        ("partial-pending", _state_block(
+            last_decision_turn=3, last_context=[0] * CONTEXT_AXES,
+            last_option=None, last_value=None)),               # B6
+        ("half-pending", _state_block(
+            last_decision_turn=3, last_context=None, last_option="rush",
+            last_value=None)),                                 # B6
+        ("bad-schema", {"schema": 2, "contexts": {}}),
+    ):
+        rt = _rt_with_journal_block(tmp_path, block, name)
+        rt._restore_from_journal(5)
+        assert rt.bandit is None, f"{name} block must disarm the bandit"
+        assert rt._bandit_pending is None
+
+    # a snapshot with NO bandit key is not malformed — it predates bandit
+    # state (the B4 initial-snapshot rewind, unit-level here)
+    rt = _rt_with_journal_block(tmp_path, _ABSENT, "absent")
+    rt._bandit_pending = {"turn": 39, "context": (9, 9, 9, 9, 9, 9),
+                          "option": "rush", "value": 5}
+    rt._restore_from_journal(5)
+    assert rt.bandit is not None
+    assert rt.bandit.to_doc() == Bandit().to_doc()  # initial snapshot
+    assert rt._bandit_pending is None
+
+
+# ------------------------------------- B1/B2: experiment report validity
+
+
+def _load_script(module_name: str):
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        Path(__file__).resolve().parent.parent / "scripts" / f"{module_name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _exp_row(arm: str, seed: int, side: int, diff: int, *, turns: int = 40,
+             viol: int = 0) -> dict[str, Any]:
+    armed = arm == "bandit"
+    return {
+        "match_id": f"synthetic-{arm}-s{seed}-p{side}", "arm": arm,
+        "seed": seed, "side": side, "budget": 4, "turns": turns,
+        "violations": viol, "planner_rejections": 0,
+        "value_differential": diff, "decisions": 3,
+        "bandit_updates": 2 if armed else 0,
+        "bandit_abs_adv_sum": 20 if armed else 0,
+        "mean_abs_advantage": 10 if armed else 0,
+        "bandit_contexts": 1 if armed else 0,
+        "chosen": [], "wall_ms": 1,
+    }
+
+
+def _exp_rows() -> list[dict[str, Any]]:
+    """Three complete pairs with diffs +30 / -12 / 0: decidable-only
+    mean=median=+9, all-pairs mean=+6."""
+    rows: list[dict[str, Any]] = []
+    for i, bandit_diff in enumerate((30, -12, 0)):
+        seed = 400_003 + i * 7919
+        rows.append(_exp_row("bandit", seed, i % 2, bandit_diff))
+        rows.append(_exp_row("base", seed, i % 2, 0))
+    return rows
+
+
+def test_bandit_experiment_report_gates_inference() -> None:
+    """B1: dirty rows, short-horizon rows, and not-exactly-once arms each
+    REFUSE inference — the reason prints, no p-value and no win count is
+    computed over the polluted rows; a clean corpus infers normally."""
+    mod = _load_script("bandit_experiment")
+    clean = mod.paired_report(_exp_rows(), 40)
+    assert "INFERENCE SUPPRESSED" not in clean
+    assert "one-sided exact binomial p (H: bandit>base)" in clean
+    assert "bandit wins 1 / base wins 1 / ties 1" in clean
+
+    dirty = _exp_rows()
+    dirty[0]["violations"] = 1
+    text = mod.paired_report(dirty, 40)
+    assert "INFERENCE SUPPRESSED" in text and "dirty row" in text
+    assert "binomial p" not in text and "bandit wins" not in text
+
+    short = _exp_rows()
+    short[1]["turns"] = 39
+    text = mod.paired_report(short, 40)
+    assert "INFERENCE SUPPRESSED" in text and "horizon" in text
+    assert "binomial p" not in text
+
+    duplicate = _exp_rows() + [_exp_row("bandit", 400_003, 0, 5)]
+    text = mod.paired_report(duplicate, 40)
+    assert "INFERENCE SUPPRESSED" in text and "exactly-once" in text
+    assert "binomial p" not in text
+
+
+def test_bandit_experiment_report_descriptive_stats() -> None:
+    """B2: BOTH labeled conventions report — decidable-only mean/median/
+    min/max (the exp3 house convention) and the all-pairs mean (ties
+    count as 0)."""
+    text = _load_script("bandit_experiment").paired_report(_exp_rows(), 40)
+    assert "paired diff decidable-only mean=+9 median=+9 min=-12 max=+30" \
+        in text
+    assert "paired diff all-pairs mean=+6 (ties count as 0)" in text
+
+
+# ------------------------------------------------- all-ties edge (B2)
+
+
+def test_bandit_experiment_report_all_ties() -> None:
+    """A gate-clean all-ties corpus: no decidable pairs (no p-value), but
+    the all-pairs mean still reports (0 over ties) and nothing suppresses."""
+    rows = [_exp_row(arm, 400_003, side, 7)
+            for side in (0, 1) for arm in ("bandit", "base")]
+    text = _load_script("bandit_experiment").paired_report(rows, 40)
+    assert "INFERENCE SUPPRESSED" not in text
+    assert "binomial p" not in text
+    assert "bandit wins 0 / base wins 0 / ties 2" in text
+    assert "all-pairs mean=+0" in text

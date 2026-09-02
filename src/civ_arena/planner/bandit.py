@@ -40,14 +40,22 @@ STATE — per (context, option): ``{"n": int, "adv_sum": int}``. The
 constructor takes an optional init state doc (offline initialization
 from labels; ``updates``/``abs_adv_sum`` stay 0 there — they count
 ONLINE updates only). exp-M20b starts EMPTY, both arms. ``to_doc``/
-``from_doc`` are a canonical round-trip (context keys serialize as
-comma-joined integers, e.g. ``"0,0,0,1,0,0"``).
+``from_doc`` are a canonical round-trip: context keys serialize as
+comma-joined integers, e.g. ``"0,0,0,1,0,0"`` — EXACTLY six components
+(``CONTEXT_AXES``), all integers, and the key must equal its own
+canonical re-emit (``_ctx_key(_parse_ctx_key(key)) == key``), so alias
+forms like ``"00,0,..."`` or ``"-0,..."`` are REFUSED and can never
+collide with the canonical key inside one state (Codex M20b B5).
 
-STATE BOUND — at most ``MAX_CONTEXTS`` (512) distinct contexts. When an
-update would create context 513, the SMALLEST-n context (total trials
-across its arms; ties -> the lexicographically smallest context tuple)
-is dropped first — deterministic, enforced at update time and again at
-construction, and pinned.
+STATE BOUND — at most ``MAX_CONTEXTS`` (512) distinct contexts. The
+bound is a POST-STATE rule, identical at update time and construction
+(Codex M20b B3): insert + credit first, then evict while over bound —
+the smallest-total-n context (total trials across its arms; ties -> the
+lexicographically smallest context tuple) goes first. The INCOMING
+context can therefore itself be the evictee when it ends up smallest
+(a first-trial context at a full table loses to every established
+context with n >= 2, and loses ties only to lexicographically smaller
+tuples). Deterministic, and pinned.
 
 SELECTION — ``rank(context, candidates)`` returns a FULL ranking of the
 given candidates: informed arms (n > 0) ordered by mean advantage
@@ -74,8 +82,13 @@ from civ_arena.planner.search import abstract_doc
 
 SCHEMA = 1
 
+# Context arity: context_bucket emits exactly this many axes (the six
+# documented axes); state keys must re-emit to exactly this many ints.
+CONTEXT_AXES = 6
+
 # State-size bound: at most this many distinct context keys (documented
-# module contract; overflow evicts smallest-n, then lexicographically).
+# module contract; overflow evicts smallest-n post-state, then
+# lexicographic).
 MAX_CONTEXTS = 512
 
 
@@ -118,16 +131,29 @@ def _ctx_key(ctx: tuple[int, ...]) -> str:
 
 
 def _parse_ctx_key(key: Any) -> tuple[int, ...]:
+    """Journal/init-doc context key -> its context tuple. LOUD on anything
+    that is not the CANONICAL form (Codex M20b B5): exactly
+    ``CONTEXT_AXES`` comma-joined integers, and the key must equal its
+    own canonical re-emit — alias spellings ("00,..", "-0,..", "+1,..",
+    whitespace, wrong arity) refuse, so two spellings of one context can
+    never both enter a state (collision-proof by construction)."""
     if not isinstance(key, str) or not key:
         raise ValueError(f"bandit context key must be a comma-joined "
                          f"integer string, got {key!r}")
     parts = key.split(",")
+    if len(parts) != CONTEXT_AXES:
+        raise ValueError(f"bandit context key {key!r} must carry exactly "
+                         f"{CONTEXT_AXES} components, got {len(parts)}")
     for part in parts:
         digits = part[1:] if part.startswith("-") else part
         if not digits or not digits.isdigit():
             raise ValueError(f"bandit context key {key!r} is not "
                              "comma-joined integers")
-    return tuple(int(part) for part in parts)
+    ctx = tuple(int(part) for part in parts)
+    if _ctx_key(ctx) != key:
+        raise ValueError(f"bandit context key {key!r} is not canonical "
+                         f"(re-emits as {_ctx_key(ctx)!r})")
+    return ctx
 
 
 def _validated(init: Any) -> tuple[dict[tuple[int, ...],
@@ -261,21 +287,20 @@ class Bandit:
     def update(self, context: tuple[int, ...], option: str,
                advantage: int) -> None:
         """n += 1, adv_sum += advantage for (context, option); called ONCE
-        per settled decision with the realized advantage. Creating context
-        513 first evicts the smallest-n context (deterministic bound)."""
+        per settled decision with the realized advantage. The bound is a
+        POST-STATE rule (Codex M20b B3, matching construction): insert +
+        credit first, then evict while over bound — so the incoming
+        context can itself be the evictee when it ends up smallest."""
         if not isinstance(option, str):
             raise ValueError(f"bandit option id must be a str, "
                              f"got {option!r}")
         if not isinstance(advantage, int) or isinstance(advantage, bool):
             raise ValueError(f"bandit advantage must be an int (the "
                              f"fixed-point contract), got {advantage!r}")
-        if context not in self._arms:
-            if len(self._arms) >= MAX_CONTEXTS:
-                drop = min(self._arms, key=lambda c: (self._total_n(c), c))
-                del self._arms[drop]
-            self._arms[context] = {}
+        self._arms.setdefault(context, {})
         rec = self._arms[context].setdefault(option, {"n": 0, "adv_sum": 0})
         rec["n"] += 1
         rec["adv_sum"] += advantage
         self.updates += 1
         self.abs_adv_sum += abs(advantage)
+        self._enforce_bound()
