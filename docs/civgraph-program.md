@@ -614,13 +614,21 @@ artifact pin was an overconstraint, relaxed by ruling).
 
 exp-M20c (budget 16, 30 seeds × 2 sides vs turtler, fifth seed block,
 0 dirty, enforced validity gate): learned 28 / base 32 / 0 ties, mean
-paired diff −61, p(H: learned>base)=0.74 — a NULL with a slight
+paired diff −61, p(H: learned>base)=0.7405 — a NULL with a slight
 negative direction, balanced across sides (13/17 and 15/15). Under the
 fixed DEFAULT endpoint scorer both arms play strongly (mean diffs +340
-/+401). VERDICT: the learned head neither helps nor harms at b16 vs
-the turtler; the hand-set DEFAULT weights remain the default. The
+/+401). VERDICT: this result **DOES NOT SUPPORT** the preregistered
+improvement hypothesis at b16 vs the turtler; the hand-set DEFAULT
+weights remain the default. The observed direction is negative, but
+this run does not establish a general harm claim. The
 declared UCT-C limitation bounds interpretation — a recalibrated
 constant might change the reading.
+
+Retained result: `runs/exp20c-prod/exp20c-results.json` (120 matches,
+60 complete pairs, all turn 40, SHA-256
+`6e6c7ea477960e68afaeb4bdfc81631201b70826c11629ab33bf5edb8880a23a`).
+The evaluated learned artifact SHA-256 was
+`40102b9e1bcf600e37615700ed19dcf79bab2b36419fbdcdc5b653012940fdec`.
 
 M20 COMPLETE — and with it the wave's central empirical finding: in
 THIS environment (scripted turtler, 40 turns, sim scale), every learned
