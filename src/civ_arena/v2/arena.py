@@ -363,6 +363,7 @@ class ArenaV2:
         *,
         expected_phases: int,
         reset_environment: bool,
+        recovered_crash_after_phases: int | None = None,
     ) -> dict[str, Any]:
         """Run one already-authorized phase schedule under a single V2 ledger."""
 
@@ -441,6 +442,14 @@ class ArenaV2:
                     stopped = True
                     break
                 phases_completed += 1
+                if (
+                    recovered_crash_after_phases is not None
+                    and phases_completed >= recovered_crash_after_phases
+                ):
+                    termination = EpisodeTerminationV2.RECOVERED_CRASH
+                    aborted = "crash recovered at a completed phase boundary"
+                    stopped = True
+                    break
             if not stopped and phases_completed == expected_phases:
                 termination = EpisodeTerminationV2.SUCCESS
             elif not stopped:
@@ -497,10 +506,21 @@ class ArenaV2:
             },
         }
 
-    async def run(self) -> dict[str, Any]:
+    async def run(self, *, recover_after_turn: int | None = None) -> dict[str, Any]:
         """Run and terminally receipt a normal deterministic match."""
 
         agents = self.spec.agents
+        if recover_after_turn is not None:
+            if type(recover_after_turn) is not int or not (
+                1 <= recover_after_turn <= self.spec.max_turns
+            ):
+                raise ContractError(
+                    "recover_after_turn must be within the configured horizon"
+                )
+            if self.spec.scored:
+                raise ContractError("scored V2 matches cannot inject a recovered crash")
+            if self.resume_plan is not None or self.parent_episode_id is not None:
+                raise ContractError("a V2 child cannot inject another recovered crash")
         phase_start = (
             self.resume_plan.completed_phases if self.resume_plan is not None else 0
         )
@@ -515,6 +535,11 @@ class ArenaV2:
             phases(),
             expected_phases=phase_stop - phase_start,
             reset_environment=True,
+            recovered_crash_after_phases=(
+                recover_after_turn * len(agents)
+                if recover_after_turn is not None
+                else None
+            ),
         )
 
     async def run_prepared(

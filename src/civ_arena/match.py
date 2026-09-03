@@ -29,11 +29,10 @@ async def _main_async(argv: list[str] | None = None) -> int:
     opts = ap.parse_args(argv)
 
     spec = load_config(opts.config)
-    if opts.crash_after_turn is not None:
-        raise SystemExit(
-            "--crash-after-turn belonged to the in-place V1 checkpoint path; "
-            "V2 never creates an unterminated episode as resume authority"
-        )
+    if opts.crash_after_turn is not None and opts.resume:
+        raise SystemExit("--crash-after-turn cannot be combined with --resume")
+    if opts.crash_after_turn is not None and spec.scored:
+        raise SystemExit("scored V2 matches cannot inject a recovered crash")
 
     parent_dir: Path | None = None
     if opts.resume:
@@ -52,7 +51,7 @@ async def _main_async(argv: list[str] | None = None) -> int:
         run_dir,
         spec,
         parent_episode_dir=parent_dir,
-    ).run()
+    ).run(recover_after_turn=opts.crash_after_turn)
     _print_summary(summary)
     return 0 if summary["termination_reason"] == "success" else 3
 

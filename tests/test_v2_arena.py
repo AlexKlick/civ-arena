@@ -26,6 +26,7 @@ from civ_arena.v2.contracts import (
     ArtifactRefV2,
     EpisodeConfigV2,
     EpisodeReceiptV2,
+    EpisodeTerminationV2,
     EventTypeV2,
     PolicyStateV2,
     TurnReceiptV2,
@@ -488,3 +489,85 @@ async def test_non_scored_resume_creates_child_without_rewriting_parent(
     recall = RecallCorpus.from_runs(tmp_path, "future-match", [child_id])
     assert recall.size("seat-0") == 2
     assert len(recall.query("seat-0", "river observable")) == 2
+
+
+@pytest.mark.asyncio
+async def test_recovered_crash_receipt_seeds_immutable_child(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "recovered-parent"
+    parent_env, parent_monitor = simulator_facets_v2()
+    parent_summary = await ArenaV2(
+        parent,
+        _spec("recovered-parent", max_turns=2, seats=2),
+        runtimes={0: _OneTurnPolicy(), 1: _OneTurnPolicy()},
+        environment=parent_env,
+        private_monitor=parent_monitor,
+    ).run(recover_after_turn=1)
+
+    assert parent_summary["termination_reason"] == "recovered_crash"
+    assert parent_summary["final_turn"] == 1
+    assert parent_summary["phases_completed"] == 2
+    parent_bytes = (parent / "events.jsonl").read_bytes()
+    parent_terminal = load_events_v2(parent / "events.jsonl")[-1].payload_value
+    assert isinstance(parent_terminal, EpisodeReceiptV2)
+    assert (
+        parent_terminal.termination_reason
+        is EpisodeTerminationV2.RECOVERED_CRASH
+    )
+    assert parent_terminal.turns_completed == 2
+    verified = verify_ledger_v2(parent)
+    assert verified.termination_reason == "recovered_crash"
+
+    child_env, child_monitor = simulator_facets_v2()
+    child = tmp_path / "recovered-child"
+    child_summary = await ArenaV2(
+        child,
+        _spec("recovered-parent", max_turns=2, seats=2),
+        runtimes={0: _OneTurnPolicy(), 1: _OneTurnPolicy()},
+        environment=child_env,
+        private_monitor=child_monitor,
+        parent_episode_dir=parent,
+        episode_id="recovered-child",
+    ).run()
+
+    assert child_summary["termination_reason"] == "success"
+    assert child_summary["phases_completed"] == 2
+    assert child_summary["parent_episode_id"] == "recovered-parent"
+    assert (
+        child_summary["parent_terminal_event_hash"]
+        == verified.terminal_event_hash
+    )
+    assert (parent / "events.jsonl").read_bytes() == parent_bytes
+
+
+@pytest.mark.asyncio
+async def test_recovered_crash_injection_refuses_unsafe_scopes(tmp_path: Path) -> None:
+    for invalid in (0, 3, True):
+        with pytest.raises(ContractError, match="configured horizon"):
+            await ArenaV2(
+                tmp_path / f"invalid-{invalid}",
+                _spec(f"invalid-{invalid}", max_turns=2),
+            ).run(recover_after_turn=invalid)
+
+    with pytest.raises(ContractError, match="scored"):
+        await ArenaV2(
+            tmp_path / "scored-crash",
+            _spec("scored-crash", max_turns=2, scored=True),
+        ).run(recover_after_turn=1)
+
+    parent = tmp_path / "nested-parent"
+    await ArenaV2(
+        parent,
+        _spec("nested-parent", max_turns=1),
+    ).run()
+    child_env, child_monitor = simulator_facets_v2()
+    child_arena = ArenaV2(
+        tmp_path / "nested-child",
+        _spec("nested-parent", max_turns=2),
+        environment=child_env,
+        private_monitor=child_monitor,
+        parent_episode_dir=parent,
+    )
+    with pytest.raises(ContractError, match="child cannot inject"):
+        await child_arena.run(recover_after_turn=1)

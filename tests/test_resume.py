@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from civ_arena.v2.contracts import EpisodeReceiptV2
+from civ_arena.v2.contracts import EpisodeReceiptV2, EpisodeTerminationV2
 from civ_arena.v2.ledger import load_events_v2, verify_ledger_v2
 
 REPO = Path(__file__).resolve().parents[1]
@@ -106,7 +106,9 @@ def test_cli_resume_creates_child_and_never_rewrites_parent(tmp_path: Path) -> N
     assert (child / "events.jsonl").exists()
 
 
-def test_cli_refuses_v1_config_and_retired_in_place_crash_flag(tmp_path: Path) -> None:
+def test_cli_refuses_v1_config_and_recovers_crash_as_immutable_child(
+    tmp_path: Path,
+) -> None:
     run_root = tmp_path / "runs"
     legacy = tmp_path / "legacy.yaml"
     legacy.write_text(
@@ -118,8 +120,34 @@ def test_cli_refuses_v1_config_and_retired_in_place_crash_flag(tmp_path: Path) -
     assert old.returncode != 0
     assert "top-level schema: 2" in old.stderr
 
-    v2 = _write_config(tmp_path, "no-in-place-crash", 1)
+    v2 = _write_config(tmp_path, "recovered-crash", 2)
     crash = _run(v2, run_root, "--crash-after-turn", "1")
-    assert crash.returncode != 0
-    assert "in-place V1 checkpoint path" in crash.stderr
-    assert not (run_root / "no-in-place-crash" / "events.jsonl").exists()
+    assert crash.returncode == 3, crash.stderr[-800:]
+    parent = run_root / "recovered-crash"
+    parent_bytes = (parent / "events.jsonl").read_bytes()
+    verified = verify_ledger_v2(parent)
+    terminal = load_events_v2(parent / "events.jsonl")[-1].payload_value
+    assert isinstance(terminal, EpisodeReceiptV2)
+    assert terminal.termination_reason is EpisodeTerminationV2.RECOVERED_CRASH
+    # EpisodeReceiptV2.turns_completed is the historical completed-PHASE count.
+    assert terminal.turns_completed == 2
+    assert "crash recovered at a completed phase boundary" in crash.stdout
+
+    resumed = _run(v2, run_root, "--resume")
+    assert resumed.returncode == 0, resumed.stderr[-800:]
+    child_id = f"recovered-crash-child-{verified.terminal_event_hash[:12]}"
+    child = run_root / child_id
+    child_terminal = load_events_v2(child / "events.jsonl")[-1].payload_value
+    assert isinstance(child_terminal, EpisodeReceiptV2)
+    assert child_terminal.termination_reason is EpisodeTerminationV2.SUCCESS
+    assert child_terminal.parent_episode_id == "recovered-crash"
+    assert (
+        child_terminal.parent_terminal_event_hash
+        == verified.terminal_event_hash
+    )
+    assert child_terminal.turns_completed == 2
+    assert (parent / "events.jsonl").read_bytes() == parent_bytes
+
+    duplicate = _run(v2, run_root, "--resume")
+    assert duplicate.returncode != 0
+    assert (parent / "events.jsonl").read_bytes() == parent_bytes
