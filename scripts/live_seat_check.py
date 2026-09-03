@@ -1,12 +1,17 @@
-"""M18 ad-hoc: in-game seat census via the tuner (GameCore context).
+"""In-game seat census via the tuner (GameCore context).
 
-Reads the live game's players: human/major/alive per seat + leader names.
-GameCore_Tuner has no front-end tables (GameConfiguration et al are nil
-there), so only Game/Player objects are used.
+Reads the live game's players: human/major/alive per seat + leader names,
+the PlayerConfiguration slot status and hotseat pause flag, and IsHuman
+read BOTH ways (the Player object and the PlayerConfiguration — the
+LoadGame(SERVER_TYPE_NONE) demote may move one and not the other, which is
+exactly what the A1 re-flag probe decides). GameCore_Tuner has no front-end
+tables (GameConfiguration et al are nil there), so only Game/Player objects
+and PlayerConfigurations are used.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
@@ -19,21 +24,33 @@ LUA = """
 local out = {}
 local ps = Game.GetPlayers()
 for i, p in ipairs(ps) do
+  local pid = p:GetID()
   local leader = "?"
-  local cfg = PlayerConfigurations[p:GetID()]
-  if cfg ~= nil then leader = tostring(cfg:GetLeaderTypeName()) end
-  table.insert(out, "P" .. p:GetID()
+  local slot = "?"
+  local pause = "?"
+  local cfghuman = "?"
+  local cfg = PlayerConfigurations[pid]
+  if cfg ~= nil then
+    leader = tostring(cfg:GetLeaderTypeName())
+    slot = tostring(cfg:GetSlotStatus())
+    pause = tostring(cfg:GetWantsPause())
+    cfghuman = tostring(cfg:IsHuman())
+  end
+  table.insert(out, "P" .. pid
     .. "|human=" .. tostring(p:IsHuman())
+    .. "|cfghuman=" .. cfghuman
     .. "|major=" .. tostring(p:IsMajor())
     .. "|alive=" .. tostring(p:IsAlive())
-    .. "|leader=" .. leader)
+    .. "|leader=" .. leader
+    .. "|slot=" .. slot
+    .. "|pause=" .. pause)
 end
 print(table.concat(out, "\\n"))
 """
 
 
-async def main() -> None:
-    conn = GameConnection("127.0.0.1", 4318)
+async def main(host: str, port: int) -> None:
+    conn = GameConnection(host, port)
     await conn.connect()
     try:
         lines = await conn.execute_read(LUA, timeout=8.0)
@@ -44,4 +61,8 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=4318)
+    opts = ap.parse_args()
+    asyncio.run(main(opts.host, opts.port))

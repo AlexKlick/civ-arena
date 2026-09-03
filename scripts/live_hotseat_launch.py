@@ -44,6 +44,9 @@ from civ_arena.game.civ6.vendor import SENTINEL, tuner_client  # noqa: E402
 LEADER_SEAT_0 = "LEADER_CLEOPATRA"
 LEADER_SEAT_1 = "LEADER_GILGAMESH"
 
+# The A1 wire-save name (Saves/ root-routed by the engine's save type).
+SAVE_NAME_DEFAULT = "civ-arena-a1"
+
 READ_LUA = f"""
 local lp = Network.GetLocalPlayerID()
 print("LocalPlayer|" .. tostring(lp))
@@ -120,6 +123,90 @@ print("loadgame-returned|" .. tostring(ok))
 print("{SENTINEL}")
 """
 
+# A1 (2026-09-03): the Architecture-1 session runs with EMPTY hotseat
+# passwords — the shipped playerchange.lua auto-OKs the hand-off panel on
+# Return ONLY when GetHotseatPassword() == "" (nil does NOT count), so the
+# read-back must print the empty string. Derived from live_newgame's block
+# (single source of truth) with loud assertions against silent drift.
+CONFIG_HOTSEAT_EMPTY_LUA = CONFIG_HOTSEAT_LUA.replace(
+    'SetHotseatPassword("arena")', 'SetHotseatPassword("")'
+).replace(
+    f'print("{SENTINEL}")',
+    'print("P0PW|" .. tostring(PlayerConfigurations[0]:GetHotseatPassword()))\n'
+    'print("P1PW|" .. tostring(PlayerConfigurations[1]:GetHotseatPassword()))\n'
+    f'print("{SENTINEL}")',
+)
+assert 'SetHotseatPassword("")' in CONFIG_HOTSEAT_EMPTY_LUA, (
+    "live_newgame's password literal drifted — update the empty variant")
+assert "P0PW|" in CONFIG_HOTSEAT_EMPTY_LUA, (
+    "live_newgame's sentinel drifted — password read-backs not injected")
+
+# Wire-side save (the engine's own quicksave/automation recipe: ingame.lua
+# OnInputActionTriggered + automation_standardtests SharedGame_OnSaveComplete).
+# InGame context: Network/SaveLocations/SaveFileTypes live there. The save
+# TYPE the engine wants for THIS game is printed so the manual load can use
+# the same value.
+def save_lua(name: str) -> str:
+    return f"""
+local t = Network.GetGameConfigurationSaveType()
+print("SAVETYPE|" .. tostring(t))
+local p = {{
+  Name = "{name}",
+  Location = SaveLocations.LOCAL_STORAGE,
+  Type = t,
+  IsAutosave = false,
+  IsQuicksave = false,
+}}
+Network.SaveGame(p)
+print("savegame-called")
+print("{SENTINEL}")
+"""
+
+# A1 rung 7: the decisive probe — re-flag a demoted seat human IN-GAME.
+# No shipped Lua does this mid-game; SetSlotStatus + broadcast is the
+# candidate. Read-backs print BOTH IsHuman paths so the census and the
+# probe agree on what actually flipped.
+REFLAG_LUA_TMPL = """
+local pid = {seat}
+PlayerConfigurations[pid]:SetSlotStatus(SlotStatus.SS_TAKEN)
+pcall(function() PlayerConfigurations[pid]:SetWantsPause(false) end)
+pcall(function() Network.BroadcastPlayerInfo(pid) end)
+print("REFLAG_SLOT|" .. tostring(pid) .. "|" .. tostring(PlayerConfigurations[pid]:GetSlotStatus()))
+print("REFLAG_CFGHUMAN|" .. tostring(pid) .. "|" .. tostring(PlayerConfigurations[pid]:IsHuman()))
+local p = Players[pid]
+if p ~= nil then
+  print("REFLAG_PHUMAN|" .. tostring(pid) .. "|" .. tostring(p:IsHuman()))
+else
+  print("REFLAG_PHUMAN|" .. tostring(pid) .. "|nil")
+end
+print("{sent}")
+"""
+
+
+def reflag_lua(seat: int) -> str:
+    return REFLAG_LUA_TMPL.format(seat=seat, sent=SENTINEL)
+
+
+# Manual load of the wire-saved game (parameterized LOAD_LUA): the type is
+# whatever SAVETYPE| printed at save time (raw number), defaulting to the
+# engine's SINGLE_PLAYER (0 is the shipped enum's first value; pass the
+# printed number explicitly if the load falls through to defaults).
+def load_manual_lua(name: str, save_type: int | None) -> str:
+    type_expr = (str(save_type) if save_type is not None
+                 else "SaveTypes.SINGLE_PLAYER")
+    return f"""
+local p = {{
+  Location = SaveLocations.LOCAL_STORAGE,
+  Type = {type_expr},
+  IsAutosave = false,
+  IsQuicksave = false,
+  Name = "{name}",
+}}
+local ok = Network.LoadGame(p, ServerType.SERVER_TYPE_NONE)
+print("loadgame-returned|" .. tostring(ok))
+print("{SENTINEL}")
+"""
+
 
 async def run(host: str, port: int, lua: str, state: str,
               settle: float) -> int:
@@ -163,6 +250,7 @@ def find_state_sync(states: dict[int, str], name: str) -> int | None:
 
 
 async def run_full(host: str, port: int, state: str,
+                   empty_passwords: bool = False,
                    transition_timeout: float = 180.0) -> int:
     """The whole hotseat launch on ONE tuner connection, held open across
     the HostGame transition (the disconnect is what the degraded-boot
@@ -171,12 +259,14 @@ async def run_full(host: str, port: int, state: str,
 
     Gates: every phase's read-back must match before the next mutation.
     """
+    config_lua = (CONFIG_HOTSEAT_EMPTY_LUA if empty_passwords
+                  else CONFIG_HOTSEAT_LUA)
     conn = await connect_state(host, port, state)
     try:
         # 1. seat + verify (live_newgame's proven Lua, same read-backs)
         idx = await find_state(conn, state)
         assert idx is not None
-        for ln in await run_lua(conn, idx, CONFIG_HOTSEAT_LUA):
+        for ln in await run_lua(conn, idx, config_lua):
             print(ln)
         # 2. host the hotseat staging session
         for ln in await run_lua(conn, idx, HOST_HOTSEAT_LUA):
@@ -218,28 +308,64 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=4318)
-    ap.add_argument("--state", default="StagingRoom")
+    ap.add_argument("--state", default=None,
+                    help="tuner state (default: per-phase, see below)")
     ap.add_argument("--settle", type=float, default=0.0)
+    ap.add_argument("--empty", action="store_true",
+                    help="with --full/--complete: empty hotseat passwords")
+    ap.add_argument("--reflag-seat", type=int, default=1,
+                    help="seat to re-flag human for --reflag")
+    ap.add_argument("--save-name", default=SAVE_NAME_DEFAULT)
+    ap.add_argument("--load-type", type=int, default=None,
+                    help="raw SaveTypes value printed by --save's SAVETYPE|")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--read", action="store_true")
     g.add_argument("--complete", action="store_true")
     g.add_argument("--launch", action="store_true")
     g.add_argument("--load", action="store_true",
-                   help="Network.LoadGame the hotseat autosave (HOTSEAT)")
+                   help="Network.LoadGame the hotseat autosave (NONE)")
+    g.add_argument("--load-manual", action="store_true",
+                   help="Network.LoadGame the --save'd game (NONE)")
+    g.add_argument("--save", action="store_true",
+                   help="Network.SaveGame now (InGame context)")
+    g.add_argument("--reflag", action="store_true",
+                   help="re-flag a demoted seat human (InGame context)")
     g.add_argument("--full", action="store_true",
                    help="config → host → complete → launch on ONE connection")
     opts = ap.parse_args()
 
+    # Per-phase default states: the front-end tables (Network, Save* enums)
+    # live in different VMs — LoadGameMenu proved sufficient for loads, the
+    # game's InGame context carries the save/reflag surface.
+    state = opts.state
+    if state is None:
+        if opts.save or opts.reflag:
+            state = "InGame"
+        elif opts.load_manual:
+            state = "LoadGameMenu"
+        else:
+            state = "StagingRoom"
+
     try:
         if opts.full:
             return asyncio.run(
-                run_full(opts.host, opts.port, opts.state))
-        lua = {"read": READ_LUA, "complete": COMPLETE_LUA,
-               "launch": LAUNCH_LUA, "load": LOAD_LUA}[
-            ("load" if opts.load else
-             "read" if opts.read else
-             "complete" if opts.complete else "launch")]
-        return asyncio.run(run(opts.host, opts.port, lua, opts.state,
+                run_full(opts.host, opts.port, opts.state or "StagingRoom",
+                         empty_passwords=opts.empty))
+        if opts.save:
+            lua = save_lua(opts.save_name)
+        elif opts.reflag:
+            lua = reflag_lua(opts.reflag_seat)
+        elif opts.load_manual:
+            lua = load_manual_lua(opts.save_name, opts.load_type)
+        elif opts.load:
+            lua = LOAD_LUA
+        elif opts.read:
+            lua = READ_LUA
+        elif opts.complete:
+            lua = COMPLETE_LUA
+        else:
+            lua = LAUNCH_LUA
+        return asyncio.run(run(opts.host, opts.port, lua, state,
                                opts.settle))
     except (ConnectionError, RuntimeError) as e:
         print(f"FAILED: {e}", file=sys.stderr)
