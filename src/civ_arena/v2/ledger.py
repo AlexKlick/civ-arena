@@ -356,37 +356,58 @@ def verify_ledger_v2(
     events = load_events_v2(root / "events.jsonl")
     if not events:
         raise LedgerIntegrityError("episode ledger is empty")
+    if events[0].event_type is not EventTypeV2.EPISODE_STARTED:
+        raise LedgerIntegrityError("ledger does not start with EpisodeStarted")
+    if any(event.event_type is EventTypeV2.EPISODE_STARTED for event in events[1:]):
+        raise LedgerIntegrityError("ledger contains multiple EpisodeStarted events")
+    terminal_positions = [
+        index
+        for index, event in enumerate(events)
+        if event.event_type is EventTypeV2.EPISODE_TERMINATED
+    ]
+    if terminal_positions and terminal_positions != [len(events) - 1]:
+        raise LedgerIntegrityError("EpisodeTerminated must be the unique final event")
     if require_terminal and events[-1].event_type is not EventTypeV2.EPISODE_TERMINATED:
         raise LedgerIntegrityError("episode ledger has no terminal receipt")
     store = ObjectStoreV2(root)
     refs: dict[str, ArtifactRefV2] = {}
-    event_ref_digests: set[str] = set()
+    event_refs: set[ArtifactRefV2] = set()
     for event in events:
         if isinstance(event.payload_value, ArtifactRefV2):
-            refs[event.payload_value.digest] = event.payload_value
-            event_ref_digests.add(event.payload_value.digest)
+            ref = event.payload_value
+            existing = refs.get(ref.digest)
+            if existing is not None and existing != ref:
+                raise LedgerIntegrityError(
+                    f"artifact digest has conflicting references: {ref.digest}"
+                )
+            refs[ref.digest] = ref
+            event_refs.add(ref)
+            store.read_doc(ref)
         if isinstance(event.payload_value, EpisodeReceiptV2):
             for ref in event.payload_value.artifacts:
+                existing = refs.get(ref.digest)
+                if existing is not None and existing != ref:
+                    raise LedgerIntegrityError(
+                        f"terminal receipt conflicts for artifact: {ref.digest}"
+                    )
                 refs[ref.digest] = ref
-    for ref in refs.values():
-        store.read_doc(ref)
+                store.read_doc(ref)
 
     termination_reason = "open"
     if events[-1].event_type is EventTypeV2.EPISODE_TERMINATED:
         receipt = events[-1].payload_value
         assert isinstance(receipt, EpisodeReceiptV2)
+        if receipt.episode_id != events[0].episode_id:
+            raise LedgerIntegrityError("terminal receipt episode identity mismatch")
         if (
             expected_environment_id is not None
             and receipt.environment.descriptor_id != expected_environment_id
         ):
             raise LedgerIntegrityError("episode environment descriptor mismatch")
-        receipt_digests = {ref.digest for ref in receipt.artifacts}
-        if receipt_digests != event_ref_digests:
+        if set(receipt.artifacts) != event_refs:
             raise LedgerIntegrityError("terminal receipt artifact manifest mismatch")
         start = events[0]
-        if start.event_type is not EventTypeV2.EPISODE_STARTED or not isinstance(
-            start.payload_value, ArtifactRefV2
-        ):
+        if not isinstance(start.payload_value, ArtifactRefV2):
             raise LedgerIntegrityError("ledger does not start with environment custody")
         if store.read_doc(start.payload_value) != receipt.environment.to_doc():
             raise LedgerIntegrityError("started environment does not match terminal receipt")

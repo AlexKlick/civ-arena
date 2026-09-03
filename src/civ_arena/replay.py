@@ -21,6 +21,7 @@ from typing import Any
 
 from civ_arena.arena.coordinator import Arena
 from civ_arena.config import MatchSpec
+from civ_arena.v1_compat import load_v1_events_read_only
 
 # positional argument order per tool (mirrors session.tools signatures)
 ARG_ORDER: dict[str, list[str]] = {
@@ -178,15 +179,10 @@ def _final_hash(run_dir: Path) -> str | None:
 
 
 def _load_records(path: Path) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            break
-    return out
+    # Historical replay keeps accepting a torn final V1 record, but parsing is
+    # read-only and corruption before the tail no longer masquerades as a
+    # shorter successful episode.
+    return list(load_v1_events_read_only(path).records)
 
 
 async def _main_async(argv: list[str] | None = None) -> int:

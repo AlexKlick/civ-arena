@@ -9,6 +9,7 @@ from civ_arena.canonical import canonical
 from civ_arena.v2 import (
     ActionKindV2,
     AdapterKindV2,
+    ArtifactRefV2,
     ComputeConfigV2,
     ContractError,
     EntityRefV2,
@@ -212,6 +213,49 @@ def test_nonterminal_episode_cannot_resume_in_place(tmp_path: Path) -> None:
     with pytest.raises(LedgerIntegrityError, match="create a child episode"):
         EventLedgerV2(tmp_path, "episode-1", clock=_clock)
     assert (tmp_path / "events.jsonl").read_bytes() == before
+
+
+def test_verifier_refuses_multiple_episode_starts(tmp_path: Path) -> None:
+    ledger = EventLedgerV2(tmp_path, "episode-1", clock=_clock)
+    reference = ledger.write_artifact(_environment())
+    for _ in range(2):
+        ledger.append(
+            EventTypeV2.EPISODE_STARTED,
+            schema_ref=reference.schema_ref,
+            payload_value=reference,
+            turn_id=None,
+            correlation_id="episode-1",
+        )
+    ledger.close()
+    with pytest.raises(LedgerIntegrityError, match="multiple EpisodeStarted"):
+        verify_ledger_v2(tmp_path, require_terminal=False)
+
+
+def test_verifier_refuses_conflicting_refs_for_one_digest(tmp_path: Path) -> None:
+    ledger = EventLedgerV2(tmp_path, "episode-1", clock=_clock)
+    reference = ledger.write_artifact(_environment())
+    ledger.append(
+        EventTypeV2.EPISODE_STARTED,
+        schema_ref=reference.schema_ref,
+        payload_value=reference,
+        turn_id=None,
+        correlation_id="episode-1",
+    )
+    conflicting = ArtifactRefV2(
+        digest=reference.digest,
+        schema_ref=reference.schema_ref,
+        byte_length=reference.byte_length + 1,
+    )
+    ledger.append(
+        EventTypeV2.VALIDATION_RECORDED,
+        schema_ref=conflicting.schema_ref,
+        payload_value=conflicting,
+        turn_id=0,
+        correlation_id="episode-1",
+    )
+    ledger.close()
+    with pytest.raises(LedgerIntegrityError, match="conflicting references"):
+        verify_ledger_v2(tmp_path, require_terminal=False)
 
 
 def test_non_scored_resume_is_a_child_bound_to_parent_terminal_hash(

@@ -69,6 +69,7 @@ from civ_arena.v2.graph import (
     GraphSelectionError,
     canonical_action_order,
 )
+from civ_arena.v2.replay import ExactFakeReplayV2, ExactReplayError, replay_fake_episode_v2
 from civ_arena.v2.schemas import ContractError
 
 __all__ = [
@@ -104,6 +105,8 @@ __all__ = [
     "EventTypeV2",
     "EventV2",
     "ExecutionModeV2",
+    "ExactFakeReplayV2",
+    "ExactReplayError",
     "FactSourceV2",
     "FactSubjectScopeV2",
     "IdentityKindV2",
@@ -137,4 +140,5 @@ __all__ = [
     "firetuner_facets_v2",
     "simulator_facets_v2",
     "split_adapter_v2",
+    "replay_fake_episode_v2",
 ]
