@@ -277,6 +277,29 @@ async def _open_fixture(recipe: FixtureRecipeV2) -> _FixtureRuntime:
     return _FixtureRuntime(adapter, environment, monitor, observation, legal, graph)
 
 
+async def observed_fixture_v2(
+    fixture_entry: Mapping[str, Any],
+) -> tuple[Any, LegalActionSetV2]:
+    """Reconstruct and identity-check one policy-safe provider fixture."""
+
+    recipe = FixtureRecipeV2.from_doc(
+        {
+            key: fixture_entry[key]
+            for key in ("fixture_id", "fixture_class", "seed", "variant", "fault")
+        }
+    )
+    if sha256_hex(canonical(_fixture_state(recipe))) != fixture_entry["state_sha256"]:
+        raise ContractError("fixture state digest mismatch")
+    runtime = await _open_fixture(recipe)
+    if runtime.observation.observation_id != fixture_entry["observation_id"]:
+        raise ContractError("provider fixture observation drifted")
+    if runtime.legal.legal_action_set_id != fixture_entry["legal_action_set_id"]:
+        raise ContractError("provider fixture legal-action set drifted")
+    if runtime.graph.graph_id != fixture_entry["graph_id"]:
+        raise ContractError("provider fixture graph drifted")
+    return runtime.observation, runtime.legal
+
+
 def experiment_policy_v2() -> PolicyDescriptorV2:
     return PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.REPLAY,
@@ -795,6 +818,8 @@ def validate_fixture_manifest_v2(
 async def run_fixture_v2(
     fixture_entry: Mapping[str, Any],
     policy: PolicyDescriptorV2,
+    *,
+    proposal_doc: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     recipe = FixtureRecipeV2.from_doc(
         {
@@ -804,18 +829,26 @@ async def run_fixture_v2(
     )
     if sha256_hex(canonical(_fixture_state(recipe))) != fixture_entry["state_sha256"]:
         raise ContractError("fixture state digest mismatch")
-    proposal_doc = fixture_entry["proposal"]
+    selected_proposal = (
+        proposal_doc if proposal_doc is not None else fixture_entry["proposal"]
+    )
+    parsed = TurnProposalV2.from_doc(dict(selected_proposal))
+    if parsed.policy_id != policy.descriptor_id:
+        raise ContractError("experiment proposal policy identity mismatch")
+    if parsed.observation_id != fixture_entry["observation_id"]:
+        raise ContractError("experiment proposal observation identity mismatch")
+    expected_proposal_digest = sha256_hex(canonical(parsed.to_doc()))
     rows = [
-        await _run_control(recipe, proposal_doc, treatment)
+        await _run_control(recipe, selected_proposal, treatment)
         for treatment in (
             TreatmentV2.SEQUENTIAL,
             TreatmentV2.LEGAL_LIST,
             TreatmentV2.DAG,
         )
     ]
-    rows.append(await _run_dag_tx(recipe, proposal_doc, policy))
+    rows.append(await _run_dag_tx(recipe, selected_proposal, policy))
     proposal_digests = {row["proposal_sha256"] for row in rows}
-    if proposal_digests != {fixture_entry["proposal_sha256"]}:
+    if proposal_digests != {expected_proposal_digest}:
         raise ContractError("treatments did not consume identical proposal bytes")
     for row in rows:
         if row["initial_observation_id"] != fixture_entry["observation_id"]:
@@ -830,6 +863,10 @@ async def run_experiment_v2(
     *,
     source_commit: str,
     source_tree: str,
+    proposal_source: str = "deterministic_observation_only",
+    proposal_policy: PolicyDescriptorV2 | None = None,
+    proposal_docs: Mapping[str, Mapping[str, Any]] | None = None,
+    proposal_corpus_sha256: str | None = None,
     limit: int | None = None,
     require_full_corpus: bool = True,
 ) -> dict[str, Any]:
@@ -849,10 +886,39 @@ async def run_experiment_v2(
         if type(limit) is not int or not 1 <= limit <= len(fixtures):
             raise ContractError("experiment limit is outside the fixture corpus")
         fixtures = fixtures[:limit]
-    policy = PolicyDescriptorV2.from_doc(body["policy"])
+    if (
+        not isinstance(proposal_source, str)
+        or not proposal_source
+        or len(proposal_source) > 120
+    ):
+        raise ContractError("proposal_source must be a bounded non-empty string")
+    policy = proposal_policy or PolicyDescriptorV2.from_doc(body["policy"])
+    if proposal_docs is not None:
+        expected_ids = {fixture["fixture_id"] for fixture in fixtures}
+        if set(proposal_docs) != expected_ids:
+            raise ContractError("proposal corpus does not exactly cover selected fixtures")
+        if (
+            proposal_corpus_sha256 is None
+            or len(proposal_corpus_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in proposal_corpus_sha256
+            )
+        ):
+            raise ContractError("provider proposal corpus requires a SHA-256 identity")
     rows: list[dict[str, Any]] = []
     for fixture in fixtures:
-        rows.extend(await run_fixture_v2(fixture, policy))
+        rows.extend(
+            await run_fixture_v2(
+                fixture,
+                policy,
+                proposal_doc=(
+                    proposal_docs[fixture["fixture_id"]]
+                    if proposal_docs is not None
+                    else None
+                ),
+            )
+        )
     totals = {
         treatment.value: sum(
             row["control_failure_total"]
@@ -872,7 +938,9 @@ async def run_experiment_v2(
         "experiment_id": EXPERIMENT_ID,
         "source": {"commit": source_commit, "tree": source_tree},
         "fixture_manifest_sha256": manifest_doc["manifest_sha256"],
-        "proposal_source": "deterministic_observation_only",
+        "proposal_source": proposal_source,
+        "proposal_policy": policy.to_doc(),
+        "proposal_corpus_sha256": proposal_corpus_sha256,
         "fixtures_run": len(fixtures),
         "rows": rows,
         "control_failure_totals": totals,
