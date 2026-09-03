@@ -11,6 +11,16 @@ wait for GameCore_Tuner -> optionally run the live smoke.
     uv run python scripts/live_zero_touch.py --from-menu
                                                         # game already at menu
     uv run python scripts/live_zero_touch.py --smoke    # + firetuner smoke
+    uv run python scripts/live_zero_touch.py --fresh-x  # bounce X first
+                                                        # (the tuner only
+                                                        # binds on a young
+                                                        # X server, ~<35 min)
+    uv run python scripts/live_zero_touch.py --session arch1 \
+        --config configs/live-hotseat-001.yaml --rounds 3
+    # the full Architecture-1 session (A1-proven 2026-09-03): bounce X ->
+    # boot -> hotseat create (EMPTY passwords) -> enter -> UI quicksave ->
+    # exit -> file-swap -> LoadGame(NONE) -> census -> reflag -> census
+    # gate -> smoke -> dispatch-hotseat.
 """
 
 from __future__ import annotations
@@ -26,12 +36,39 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 DISPLAY = ":1"
 STEAM_URI = "steam://rungameid/289070"
+SAVES = Path("/home/alexk/.local/share/aspyr-media/"
+             "Sid Meier's Civilization VI/Saves")
 
 # Timing lessons from the 2026-08-31 runs, all live-learned:
 COLD_BOOT_S = 600        # first launch after Steam start: ~8-10 min
 WARM_BOOT_S = 420        # relaunch: states register in ~4-7 min
 INTRO_SETTLE_S = 300     # host -> BEGIN GAME clickable (varies 80-300s)
 MAP_LOAD_S = 300         # BEGIN GAME -> GameCore_Tuner
+
+
+def bounce_x() -> bool:
+    """M17e/A1: the tuner binds 4318 only on a YOUNG X server (the menu
+    bind is gone by ~35 min). Killing the gaming session's xinit tree
+    makes its supervisor respawn a fresh one in seconds."""
+    out = run(["pgrep", "-f", "xinit.*headless-gaming-session"]).stdout
+    pids = [int(x) for x in out.split()]
+    if not pids:
+        print("[fresh-x] no gaming xinit found — nothing to bounce")
+        return False
+    for pid in pids:
+        run(["kill", "-TERM", str(pid)])
+    for _ in range(24):            # respawn within ~2 min
+        time.sleep(5)
+        out = run(["pgrep", "-f",
+                   "xinit.*headless-gaming-session"]).stdout
+        new = [int(x) for x in out.split()]
+        if any(p not in pids for p in new):
+            fresh = next(p for p in new if p not in pids)
+            print(f"[fresh-x] respawned xinit {fresh}")
+            time.sleep(10)         # openbox/sunshine/steam settle
+            return True
+    print("[fresh-x] session never respawned")
+    return False
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -161,7 +198,156 @@ async def wait_for(check, budget_s: int, label: str,
     return False
 
 
+def key(k: str) -> None:
+    run([sys.executable, str(REPO / "scripts" / "x_click.py"), "--key", k])
+
+
+def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
+    """Run a live-lane phase script with the single-client cooldown
+    discipline baked in (the tuner refuses rapid reconnects)."""
+    time.sleep(8)
+    r = run([sys.executable, str(REPO / "scripts") / args[0], *args[1:]])
+    out = (r.stdout.strip() or r.stderr.strip())
+    print(f"[phase {args[0]} {' '.join(args[1:])}] rc={r.returncode}")
+    for ln in out.splitlines():
+        print("   ", ln)
+    if settle:
+        time.sleep(settle)
+    return r
+
+
+def swap_save_into_load_slot() -> bool:
+    """A1: the LoadGame params only reliably resolve
+    Saves/Single/auto/AutoSave_0001 — copy the hotseat quicksave there
+    (backing up whatever occupied the slot)."""
+    src = SAVES / "Hotseat" / "quick" / "quicksave.Civ6Save"
+    dst = SAVES / "Single" / "auto" / "AutoSave_0001.Civ6Save"
+    if not src.exists():
+        print(f"[swap] missing {src}")
+        return False
+    if dst.exists():
+        dst.rename(dst.with_suffix(".Civ6Save.prev.bak"))
+    dst.write_bytes(src.read_bytes())
+    print(f"[swap] {src.name} -> {dst}")
+    return True
+
+
+async def run_arch1_session(opts) -> int:
+    """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
+    failed gate. Exit codes continue the ladder's scheme from 20."""
+    if opts.fresh_x and not bounce_x():
+        return 20
+    kill_game()
+    launch()
+    if not await wait_for(port_up, 240, "tuner-bind", 10.0):
+        return 21
+
+    async def menu_up() -> bool:
+        return "StagingRoom" in await tuner_states()
+
+    if not await wait_for(menu_up, COLD_BOOT_S, "menu"):
+        return 22
+    key("Escape")               # skip the intro movie if it is still up
+    await asyncio.sleep(8)
+
+    # 1. hotseat create, EMPTY passwords (the launch's transition poll is
+    #    expected to fail — rc 11 — the config+host have applied by then)
+    r = phase(["live_hotseat_launch.py", "--full", "--empty",
+               "--port", str(tuner_port())])
+    if "InSession|true" not in r.stdout or "P1PW|" not in r.stdout:
+        return 23
+    # 2. enter: ReadyButton ORB, then banner/Return alternation to the map
+    click(0.50, 0.888)
+
+    async def ingame_up() -> bool:
+        return "GameCore_Tuner" in await tuner_states()
+
+    for _ in range(20):         # ~5 min of banner/panel alternation
+        await asyncio.sleep(15)
+        if await ingame_up():
+            break
+        try:
+            banner = find_teal_banner(capture_window())
+        except Exception:
+            banner = None
+        if banner:
+            click(*banner)
+        else:
+            key("Return")
+    if not await wait_for(ingame_up, MAP_LOAD_S, "ingame", 15.0):
+        return 24
+    # 3. UI quicksave at turn 1 (the tuner is dead inside the hotseat
+    #    session's game by design — the save must go through the menu)
+    key("Escape")
+    await asyncio.sleep(4)
+    click(0.50, 0.383)
+    await asyncio.sleep(6)
+    if not (SAVES / "Hotseat" / "quick" / "quicksave.Civ6Save").exists():
+        return 25
+    if not swap_save_into_load_slot():
+        return 26
+    # 4. fresh process, then the load with the load-menu screen OPEN
+    kill_game()
+    launch()
+    if not await wait_for(port_up, 240, "tuner-bind-2", 10.0):
+        return 27
+    if not await wait_for(menu_up, COLD_BOOT_S, "menu-2"):
+        return 28
+    key("Escape")
+    await asyncio.sleep(8)
+    click(0.459, 0.404)         # Single Player
+    await asyncio.sleep(5)
+    click(0.57, 0.55)           # Load Game
+    await asyncio.sleep(5)
+    r = phase(["live_hotseat_launch.py", "--load",
+               "--port", str(tuner_port())], settle=25)
+    if "loadgame-returned|true" not in r.stdout:
+        return 29
+    if not await wait_for(ingame_up, MAP_LOAD_S, "ingame-2", 15.0):
+        return 30
+    # 5. census the demote, re-flag, gate the flip
+    r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
+             "--port", str(tuner_port())])
+    print("[census-1]", r.stdout.strip())
+    r = phase(["live_hotseat_launch.py", "--reflag",
+               "--port", str(tuner_port())])
+    time.sleep(5)
+    r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
+             "--port", str(tuner_port())])
+    print("[census-2]", r.stdout.strip())
+    if "P1|human=true" not in r.stdout:
+        print("[gate] re-flag did not flip P1 human — refusing to dispatch")
+        return 31
+    if not opts.no_smoke:
+        smoke = run([sys.executable,
+                     str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
+                     "--port", str(tuner_port())])
+        last = (smoke.stdout.strip().splitlines() or ["<none>"])[-1]
+        print("[smoke]", last)
+        if smoke.returncode != 0:
+            return 32
+    if not opts.config:
+        print(json.dumps({"ok": True,
+                          "note": "arch1 session up: both seats human, "
+                                  "mod attached, ready to dispatch"},
+                         sort_keys=True))
+        return 0
+    # 6. dispatch both seats
+    args = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
+            str(REPO / opts.config), "--phase", "dispatch-hotseat",
+            "--turns", str(opts.rounds), "--port", str(tuner_port())]
+    if opts.run_id:
+        args += ["--run-id", opts.run_id]
+    print("[dispatch]", " ".join(args[2:]), flush=True)
+    proc = subprocess.run(args, cwd=REPO)
+    return proc.returncode
+
+
 async def main(opts) -> int:
+    if getattr(opts, "session", None) == "arch1":
+        return await run_arch1_session(opts)
+    if opts.fresh_x and not bounce_x():
+        return 20
     if opts.kill_first:
         kill_game()
         launch()
@@ -238,5 +424,20 @@ if __name__ == "__main__":
                     help="the game is already at the main menu")
     ap.add_argument("--smoke", action="store_true",
                     help="run the live FireTuner smoke at the end")
+    ap.add_argument("--fresh-x", action="store_true",
+                    help="bounce the gaming X session first (the tuner "
+                         "binds only on a young X server)")
+    ap.add_argument("--session", choices=["arch1"], default=None,
+                    help="arch1: the full A1-proven both-seats-human "
+                         "session, optionally dispatching at the end")
+    ap.add_argument("--config", default=None,
+                    help="with --session arch1: dispatch this config "
+                         "(skip dispatch when omitted)")
+    ap.add_argument("--rounds", type=int, default=3,
+                    help="dispatch-hotseat --turns for --session arch1")
+    ap.add_argument("--run-id", default=None,
+                    help="explicit run id for the dispatch")
+    ap.add_argument("--no-smoke", action="store_true",
+                    help="skip the smoke stage in --session arch1")
     ap.set_defaults(kill_first=True)
     sys.exit(asyncio.run(main(ap.parse_args())))

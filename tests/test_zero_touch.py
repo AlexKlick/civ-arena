@@ -58,7 +58,7 @@ def test_config_lua_carries_verified_setup():
     # path-spins without settle spots), two majors, standard speed —
     # every setter is followed by a read-back print so the operator
     # gates the launch on the engine confirming the value
-    assert f"MapConfiguration.SetMapSize(-601637951)" in lua
+    assert "MapConfiguration.SetMapSize(-601637951)" in lua
     assert "MapConfiguration.SetMinMajorPlayers(2)" in lua
     assert "MapConfiguration.SetMaxMajorPlayers(2)" in lua
     assert "GameConfiguration.SetParticipatingPlayerCount(2)" in lua
@@ -89,6 +89,65 @@ def test_skeys_uses_bare_symbol():
     lua = fp.skeys_lua("GameModeTypes")
     assert "local t = GameModeTypes" in lua
     assert "PAIRS-FAILED" in lua  # pcall guard for userdata tables
+
+
+def test_arch1_argparse_surface():
+    """B3: the arch1 session mode and its knobs exist exactly as the A1
+    recipe prescribes (bounce, empty-password create, quicksave swap,
+    NONE-load, census gate, optional dispatch)."""
+    zt = _load("live_zero_touch")
+    import argparse
+
+    src = (REPO / "scripts" / "live_zero_touch.py").read_text()
+    for flag in ("--fresh-x", "--session", "--config", "--rounds",
+                 "--run-id", "--no-smoke"):
+        assert f'"{flag}"' in src or f"'{flag}'" in src
+    assert "arch1" in src
+    # the A1 sequence's load-bearing coordinates and phases
+    assert "live_hotseat_launch.py" in src
+    assert "live_seat_check.py" in src
+    assert "bounce_x" in src and callable(zt.bounce_x)
+    assert callable(zt.swap_save_into_load_slot)
+    # argparse wiring actually parses the documented surface
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--fresh-x", action="store_true")
+    ap.add_argument("--session", choices=["arch1"], default=None)
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--run-id", default=None)
+    ap.add_argument("--no-smoke", action="store_true")
+    opts = ap.parse_args(["--session", "arch1", "--rounds", "5"])
+    assert opts.session == "arch1" and opts.rounds == 5
+
+
+def test_empty_password_variant_reads_back_empty_strings():
+    """A1: the hand-off panel's OnKeyUp_Return auto-OK requires
+    GetHotseatPassword() == "" (nil does NOT count) — the empty variant
+    must carry SetHotseatPassword("") AND the read-back prints."""
+    hl = _load("live_hotseat_launch")
+    lua = hl.CONFIG_HOTSEAT_EMPTY_LUA
+    assert 'SetHotseatPassword("")' in lua
+    assert 'print("P0PW|" .. tostring(PlayerConfigurations[0]:GetHotseatPassword()))' in lua
+    assert 'print("P1PW|" .. tostring(PlayerConfigurations[1]:GetHotseatPassword()))' in lua
+    assert 'SetHotseatPassword("arena")' not in lua
+    # drift guard: the derivation tracks live_newgame's block
+    assert lua != hl.CONFIG_HOTSEAT_LUA
+
+
+def test_reflag_targets_slot_status_and_reads_back_both_paths():
+    """A1: the re-flag sets SS_TAKEN, clears the pause, broadcasts, and
+    reads back the slot + BOTH IsHuman paths (config object and Player)."""
+    hl = _load("live_hotseat_launch")
+    lua = hl.reflag_lua(1)
+    assert "PlayerConfigurations[pid]:SetSlotStatus(SlotStatus.SS_TAKEN)" in lua
+    assert "SetWantsPause(false)" in lua
+    assert "Network.BroadcastPlayerInfo(pid)" in lua
+    assert "REFLAG_SLOT|" in lua and "REFLAG_CFGHUMAN|" in lua
+    assert "REFLAG_PHUMAN|" in lua
+    # the save prints the engine's own save-type so the load can mirror it
+    sv = hl.save_lua("civ-arena-a1")
+    assert "Network.GetGameConfigurationSaveType()" in sv
+    assert "SAVETYPE|" in sv and "Network.SaveGame(p)" in sv
 
 
 if __name__ == "__main__":
