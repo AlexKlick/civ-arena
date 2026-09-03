@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 from civ_arena.experiments.turn_core import (
@@ -47,7 +48,31 @@ async def _main(argv: list[str] | None = None) -> int:
         validate_fixture_manifest_v2(manifest)
 
     if opts.run:
-        result = await run_experiment_v2(manifest, limit=opts.limit)
+        source_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        source_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if subprocess.run(
+            ["git", "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout:
+            raise SystemExit("refusing experiment evidence from a dirty source tree")
+        result = await run_experiment_v2(
+            manifest,
+            source_commit=source_commit,
+            source_tree=source_tree,
+            limit=opts.limit,
+        )
         write_immutable_json(opts.result, result)
         totals = result["body"]["control_failure_totals"]
         print(f"result: {result['result_sha256']}")
@@ -63,4 +88,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

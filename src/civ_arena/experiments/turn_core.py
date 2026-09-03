@@ -828,9 +828,18 @@ async def run_fixture_v2(
 async def run_experiment_v2(
     manifest_doc: Mapping[str, Any],
     *,
+    source_commit: str,
+    source_tree: str,
     limit: int | None = None,
     require_full_corpus: bool = True,
 ) -> dict[str, Any]:
+    for label, value in (("source_commit", source_commit), ("source_tree", source_tree)):
+        if (
+            not isinstance(value, str)
+            or len(value) != 40
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ContractError(f"{label} must be a full lowercase Git SHA")
     body = validate_fixture_manifest_v2(
         manifest_doc,
         require_full_corpus=require_full_corpus,
@@ -861,6 +870,7 @@ async def run_experiment_v2(
     result_body = {
         "schema": MANIFEST_SCHEMA,
         "experiment_id": EXPERIMENT_ID,
+        "source": {"commit": source_commit, "tree": source_tree},
         "fixture_manifest_sha256": manifest_doc["manifest_sha256"],
         "proposal_source": "deterministic_observation_only",
         "fixtures_run": len(fixtures),

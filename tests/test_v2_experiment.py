@@ -82,7 +82,12 @@ async def test_all_edge_and_failure_classes_have_curated_manifest_coverage() -> 
 @pytest.mark.asyncio
 async def test_identical_proposal_normal_fixture_establishes_expected_ordering() -> None:
     manifest = await build_fixture_manifest_v2((fixture_recipes_v2()[0],))
-    result = await run_experiment_v2(manifest, require_full_corpus=False)
+    result = await run_experiment_v2(
+        manifest,
+        source_commit="a" * 40,
+        source_tree="b" * 40,
+        require_full_corpus=False,
+    )
     rows = result["body"]["rows"]
     assert {row["proposal_sha256"] for row in rows} == {
         manifest["body"]["fixtures"][0]["proposal_sha256"]
@@ -104,7 +109,12 @@ async def test_dag_tx_handles_declared_divergence_without_counting_it_as_failure
     recipe = fixture_recipes_v2()[80]
     assert recipe.fault is FixtureFaultV2.DROP_RESEARCH_EFFECT
     manifest = await build_fixture_manifest_v2((recipe,))
-    result = await run_experiment_v2(manifest, require_full_corpus=False)
+    result = await run_experiment_v2(
+        manifest,
+        source_commit="a" * 40,
+        source_tree="b" * 40,
+        require_full_corpus=False,
+    )
     by_treatment = {
         row["treatment"]: row for row in result["body"]["rows"]
     }
@@ -133,3 +143,13 @@ def test_unsafe_controls_are_not_reachable_from_production_match_module() -> Non
             direct_calls.append(path.relative_to(root).as_posix())
     assert direct_calls == ["src/civ_arena/experiments/turn_core.py"]
 
+
+@pytest.mark.asyncio
+async def test_experiment_result_requires_exact_source_identity() -> None:
+    with pytest.raises(ContractError, match="source_commit"):
+        await run_experiment_v2(
+            {},
+            source_commit="short",
+            source_tree="b" * 40,
+            require_full_corpus=False,
+        )
