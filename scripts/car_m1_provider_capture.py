@@ -114,7 +114,12 @@ async def _main(argv: list[str] | None = None) -> int:
     for spec in PROVIDERS:
         path = opts.evidence_root / spec.provider_id / "proposals.json"
         corpus = json.loads(path.read_text(encoding="utf-8"))
-        policy, proposals, corpus_sha = proposal_docs_from_corpus_v2(corpus)
+        policy, proposals, corpus_sha = proposal_docs_from_corpus_v2(
+            corpus,
+            expected_manifest_sha256=manifest["manifest_sha256"],
+            expected_source=source,
+            expected_spec=spec,
+        )
         result = await run_experiment_v2(
             manifest,
             source_commit=commit,

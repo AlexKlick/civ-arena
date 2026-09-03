@@ -61,6 +61,14 @@ FORBIDDEN_DURABLE_KEYS = frozenset(
         "secret",
     }
 )
+ATTEMPT_FAILURE_CODES = frozenset(
+    {
+        "invalid_provider_proposal",
+        "model_identity_mismatch",
+        "model_unavailable",
+        "provider_post_accounting_invalid",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -325,6 +333,14 @@ def _model_attributed(spec: ProviderCaptureSpecV2, returned_model: str) -> bool:
     return returned_model.casefold() == spec.model_id.casefold()
 
 
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 async def capture_attempt_v2(
     *,
     spec: ProviderCaptureSpecV2,
@@ -360,7 +376,13 @@ async def capture_attempt_v2(
             messages=request_doc["messages"],
             tools=tools,
         )
-        returned_model = reply.model
+        if (
+            type(reply.input_tokens) is not int
+            or reply.input_tokens < 0
+            or type(reply.output_tokens) is not int
+            or reply.output_tokens < 0
+        ):
+            raise ContractError("provider response usage is invalid")
         input_tokens = reply.input_tokens
         output_tokens = reply.output_tokens
         response_sha256 = sha256_hex(
@@ -376,7 +398,11 @@ async def capture_attempt_v2(
         )
         attributed = _model_attributed(spec, reply.model)
         if not attributed:
+            # The provider-controlled model field is not persisted when it does
+            # not equal the requested identity.  Its bytes remain committed by
+            # response_sha256 without becoming a secret-reflection channel.
             raise ContractError("provider response model identity mismatch")
+        returned_model = spec.model_id
         proposal = normalize_reply_v2(
             reply,
             observation,
@@ -385,14 +411,22 @@ async def capture_attempt_v2(
         )
     except ModelUnavailable:
         failure_code = "model_unavailable"
-    except (ContractError, TypeError, ValueError):
-        failure_code = "invalid_provider_proposal"
+    except (ContractError, TypeError, ValueError) as exc:
+        failure_code = (
+            "model_identity_mismatch"
+            if str(exc) == "provider response model identity mismatch"
+            else "invalid_provider_proposal"
+        )
     post_delta = client.posts_sent - before_posts
     if post_delta != 1:
-        failure_code = "provider_post_accounting_invalid"
+        # A pre-POST availability failure (for example, a missing credential)
+        # remains attributable to availability.  Any other accounting anomaly
+        # gets the dedicated failure code.
+        if not (post_delta == 0 and failure_code == "model_unavailable"):
+            failure_code = "provider_post_accounting_invalid"
         proposal = None
     proposal_doc = proposal.to_doc() if proposal is not None else None
-    attempt = {
+    attempt_body = {
         "schema": CAPTURE_SCHEMA,
         "experiment_id": EXPERIMENT_ID,
         "fixture_manifest_sha256": fixture_manifest_sha256,
@@ -414,6 +448,10 @@ async def capture_attempt_v2(
             sha256_hex(canonical(proposal_doc)) if proposal_doc is not None else None
         ),
         "proposal": proposal_doc,
+    }
+    attempt = {
+        **attempt_body,
+        "attempt_sha256": sha256_hex(canonical(attempt_body)),
     }
     _assert_redacted_shape(attempt)
     canonical(attempt)
@@ -460,8 +498,16 @@ def load_attempts_v2(
             "failure_code",
             "proposal_sha256",
             "proposal",
+            "attempt_sha256",
         }:
             raise ContractError("provider attempt has unknown or missing fields")
+        attempt_body = {
+            key: value for key, value in row.items() if key != "attempt_sha256"
+        }
+        if row["attempt_sha256"] != sha256_hex(canonical(attempt_body)):
+            raise ContractError("provider attempt digest mismatch")
+        if row.get("schema") != CAPTURE_SCHEMA:
+            raise ContractError("provider attempt schema mismatch")
         if row.get("attempt") != expected or row.get("provider") != spec.public_doc():
             raise ContractError("provider attempt identity mismatch")
         if row.get("experiment_id") != EXPERIMENT_ID:
@@ -470,11 +516,54 @@ def load_attempts_v2(
             raise ContractError("provider attempt fixture manifest mismatch")
         if row.get("source") != source_doc:
             raise ContractError("provider attempt source identity mismatch")
-        if row.get("post_delta") not in {0, 1}:
+        if type(row.get("post_delta")) is not int or row["post_delta"] < 0:
             raise ContractError("provider attempt POST accounting is invalid")
         for field in ("input_tokens", "output_tokens"):
             if type(row.get(field)) is not int or row[field] < 0:
                 raise ContractError("provider attempt usage is invalid")
+        for field in ("request_sha256", "prompt_sha256"):
+            if not _is_sha256(row.get(field)):
+                raise ContractError("provider attempt request identity is invalid")
+        if row.get("response_sha256") is not None and not _is_sha256(
+            row["response_sha256"]
+        ):
+            raise ContractError("provider attempt response identity is invalid")
+        if type(row.get("success")) is not bool or type(
+            row.get("model_attributed")
+        ) is not bool:
+            raise ContractError("provider attempt status is invalid")
+        if row["success"]:
+            if (
+                row["failure_code"] is not None
+                or row["post_delta"] != 1
+                or row["model_attributed"] is not True
+                or row["returned_model"] != spec.model_id
+                or not _is_sha256(row["response_sha256"])
+                or not isinstance(row["proposal"], dict)
+                or not _is_sha256(row["proposal_sha256"])
+            ):
+                raise ContractError("successful provider attempt is incoherent")
+            proposal = TurnProposalV2.from_doc(row["proposal"])
+            if (
+                proposal.policy_id != provider_policy_v2(spec).descriptor_id
+                or sha256_hex(canonical(proposal.to_doc()))
+                != row["proposal_sha256"]
+            ):
+                raise ContractError("provider attempt proposal identity mismatch")
+        elif (
+            row["failure_code"] not in ATTEMPT_FAILURE_CODES
+            or row["proposal"] is not None
+            or row["proposal_sha256"] is not None
+            or (
+                row["model_attributed"] is True
+                and row["returned_model"] != spec.model_id
+            )
+            or (
+                row["model_attributed"] is False
+                and row["returned_model"] is not None
+            )
+        ):
+            raise ContractError("failed provider attempt is incoherent")
         rows.append(row)
     if sum(row["post_delta"] for row in rows) > POST_CEILING:
         raise ContractError("provider attempts exceed the POST ceiling")
@@ -574,23 +663,51 @@ def build_global_pilot_gate_v2(
     if len(summaries) != len(PROVIDERS):
         raise ContractError("global pilot requires every provider stratum")
     bodies = [_validated_summary(summary, "provider pilot") for summary in summaries]
-    if {body.get("provider", {}).get("provider_id") for body in bodies} != {
-        spec.provider_id for spec in PROVIDERS
-    }:
+    expected_pilot_fields = {
+        "schema",
+        "stage",
+        "experiment_id",
+        "fixture_manifest_sha256",
+        "source",
+        "provider",
+        "attempts",
+        "posts",
+        "successes",
+        "input_tokens",
+        "output_tokens",
+        "passed",
+        "status",
+    }
+    if any(set(body) != expected_pilot_fields for body in bodies):
+        raise ContractError("provider pilot has unknown or missing fields")
+    expected_providers = {spec.provider_id: spec.public_doc() for spec in PROVIDERS}
+    actual_providers = {
+        body.get("provider", {}).get("provider_id"): body.get("provider")
+        for body in bodies
+    }
+    if actual_providers != expected_providers:
         raise ContractError("global pilot provider identities are incomplete")
     if any(
         body.get("fixture_manifest_sha256") != manifest_sha256
         or body.get("stage") != "pilot"
+        or body.get("schema") != CAPTURE_SCHEMA
+        or body.get("experiment_id") != EXPERIMENT_ID
         for body in bodies
     ):
         raise ContractError("global pilot summaries do not bind the fixture manifest")
     sources = {canonical(body.get("source")) for body in bodies}
-    passed = (
-        all(body["passed"] for body in bodies)
-        and sum(body["attempts"] for body in bodies) == 20
-        and sum(body["posts"] for body in bodies) == 20
-        and len(sources) == 1
-    )
+    passed = all(
+        body["passed"] is True
+        and body["status"] == "PASS"
+        and body["attempts"] == PILOT_FIXTURES
+        and body["posts"] == PILOT_FIXTURES
+        and body["successes"] == PILOT_FIXTURES
+        and type(body["input_tokens"]) is int
+        and body["input_tokens"] >= 0
+        and type(body["output_tokens"]) is int
+        and body["output_tokens"] >= 0
+        for body in bodies
+    ) and len(sources) == 1
     return _summary_envelope(
         {
             "schema": CAPTURE_SCHEMA,
@@ -622,18 +739,73 @@ async def capture_full_provider_v2(
     body = validate_fixture_manifest_v2(manifest_doc)
     pilot_gate = json.loads((root / "pilot-gate.json").read_text(encoding="utf-8"))
     pilot_body = _validated_summary(pilot_gate, "global pilot")
+    expected_global_fields = {
+        "schema",
+        "stage",
+        "experiment_id",
+        "fixture_manifest_sha256",
+        "source",
+        "provider_capture_sha256s",
+        "attempts",
+        "posts",
+        "successes",
+        "passed",
+        "status",
+    }
     if (
-        pilot_body.get("fixture_manifest_sha256") != manifest_doc["manifest_sha256"]
+        set(pilot_body) != expected_global_fields
+        or pilot_body.get("schema") != CAPTURE_SCHEMA
+        or pilot_body.get("stage") != "global_pilot_gate"
+        or pilot_body.get("experiment_id") != EXPERIMENT_ID
+        or pilot_body.get("fixture_manifest_sha256")
+        != manifest_doc["manifest_sha256"]
         or pilot_body.get("passed") is not True
+        or pilot_body.get("status") != "PASS"
+        or pilot_body.get("attempts") != 20
+        or pilot_body.get("posts") != 20
+        or pilot_body.get("successes") != 20
         or pilot_body.get("source") != source_doc
     ):
         raise ContractError("full capture requires the passing 20-attempt pilot gate")
+    own_pilot = json.loads(
+        (root / spec.provider_id / "pilot.json").read_text(encoding="utf-8")
+    )
+    own_pilot_body = _validated_summary(own_pilot, "provider pilot")
+    if (
+        own_pilot["capture_sha256"]
+        not in pilot_body.get("provider_capture_sha256s", [])
+        or own_pilot_body.get("provider") != spec.public_doc()
+        or own_pilot_body.get("source") != source_doc
+        or own_pilot_body.get("passed") is not True
+    ):
+        raise ContractError("provider pilot is not bound into the global gate")
     attempts = load_attempts_v2(
         root,
         spec,
         manifest_doc["manifest_sha256"],
         source_doc,
     )
+    fixture_by_id = {row["fixture_id"]: row for row in body["fixtures"]}
+    successful_fixture_ids: set[str] = set()
+    policy = provider_policy_v2(spec)
+    for index, row in enumerate(attempts):
+        fixture = fixture_by_id.get(row["fixture_id"])
+        if fixture is None:
+            raise ContractError("provider attempt names a fixture outside the manifest")
+        if index < PILOT_FIXTURES and row["fixture_id"] != body["fixtures"][index][
+            "fixture_id"
+        ]:
+            raise ContractError("provider pilot attempts do not match pilot fixtures")
+        if row["success"]:
+            if row["fixture_id"] in successful_fixture_ids:
+                raise ContractError("provider capture repeats a successful fixture")
+            proposal = TurnProposalV2.from_doc(row["proposal"])
+            if (
+                proposal.policy_id != policy.descriptor_id
+                or proposal.observation_id != fixture["observation_id"]
+            ):
+                raise ContractError("provider proposal is not bound to its fixture")
+            successful_fixture_ids.add(row["fixture_id"])
     if len(attempts) < PILOT_FIXTURES or not all(
         row["success"] for row in attempts[:PILOT_FIXTURES]
     ):
@@ -644,7 +816,6 @@ async def capture_full_provider_v2(
         if row["success"]
     }
     client.posts_sent = sum(row["post_delta"] for row in attempts)
-    fixture_by_id = {row["fixture_id"]: row for row in body["fixtures"]}
     for fixture in body["fixtures"]:
         fixture_id = fixture["fixture_id"]
         while fixture_id not in captured:
@@ -700,11 +871,63 @@ async def capture_full_provider_v2(
 
 def proposal_docs_from_corpus_v2(
     corpus: Mapping[str, Any],
+    *,
+    expected_manifest_sha256: str | None = None,
+    expected_source: Mapping[str, str] | None = None,
+    expected_spec: ProviderCaptureSpecV2 | None = None,
 ) -> tuple[PolicyDescriptorV2, dict[str, Mapping[str, Any]], str]:
     body = _validated_summary(corpus, "provider proposal corpus")
-    if body.get("complete") is not True:
+    if set(body) != {
+        "schema",
+        "stage",
+        "experiment_id",
+        "fixture_manifest_sha256",
+        "source",
+        "provider",
+        "policy",
+        "attempts",
+        "posts",
+        "successes",
+        "input_tokens",
+        "output_tokens",
+        "complete",
+        "status",
+        "proposals",
+    }:
+        raise ContractError("provider proposal corpus has unknown or missing fields")
+    if (
+        body.get("schema") != CAPTURE_SCHEMA
+        or body.get("stage") != "full_capture"
+        or body.get("experiment_id") != EXPERIMENT_ID
+        or body.get("complete") is not True
+        or body.get("status") != "PASS"
+        or body.get("successes") != 100
+        or not isinstance(body.get("proposals"), list)
+        or len(body["proposals"]) != 100
+    ):
         raise ContractError("provider proposal corpus is not complete")
+    for field in ("attempts", "posts", "input_tokens", "output_tokens"):
+        if type(body.get(field)) is not int or body[field] < 0:
+            raise ContractError("provider proposal corpus accounting is invalid")
+    if (
+        not 100 <= body["attempts"] <= POST_CEILING
+        or not 100 <= body["posts"] <= POST_CEILING
+    ):
+        raise ContractError("provider proposal corpus exceeds its capture ceiling")
+    if expected_manifest_sha256 is not None and (
+        not _is_sha256(expected_manifest_sha256)
+        or body["fixture_manifest_sha256"] != expected_manifest_sha256
+    ):
+        raise ContractError("provider proposal corpus fixture manifest mismatch")
+    if expected_source is not None and body["source"] != source_identity_v2(
+        expected_source.get("commit", ""), expected_source.get("tree", "")
+    ):
+        raise ContractError("provider proposal corpus source identity mismatch")
+    if expected_spec is not None and body["provider"] != expected_spec.public_doc():
+        raise ContractError("provider proposal corpus provider identity mismatch")
     policy = PolicyDescriptorV2.from_doc(body["policy"])
+    if expected_spec is not None and policy != provider_policy_v2(expected_spec):
+        raise ContractError("provider proposal corpus policy identity mismatch")
     proposals: dict[str, Mapping[str, Any]] = {}
     for row in body["proposals"]:
         proposal = TurnProposalV2.from_doc(row["proposal"])

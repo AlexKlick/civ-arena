@@ -19,6 +19,8 @@ from civ_arena.experiments.provider_capture import (
     candidate_catalog_v2,
     capture_attempt_v2,
     capture_prompt_v2,
+    load_attempts_v2,
+    proposal_docs_from_corpus_v2,
     provider_policy_v2,
     source_identity_v2,
     write_attempt_v2,
@@ -92,6 +94,15 @@ async def test_capture_persists_only_digests_usage_and_normalized_proposal(
     )
 
     assert attempt["success"] is True
+    assert attempt["attempt_sha256"] == sha256_hex(
+        canonical(
+            {
+                key: value
+                for key, value in attempt.items()
+                if key != "attempt_sha256"
+            }
+        )
+    )
     assert attempt["model_attributed"] is True
     assert attempt["post_delta"] == 1
     assert attempt["provider"]["max_tokens"] == MAX_TOKENS
@@ -109,6 +120,16 @@ async def test_capture_persists_only_digests_usage_and_normalized_proposal(
         (tmp_path / spec.provider_id / "attempts/001.json").read_text(encoding="utf-8")
     )
     assert stored == attempt
+    assert load_attempts_v2(
+        tmp_path, spec, manifest["manifest_sha256"], SOURCE
+    ) == [attempt]
+
+    stored["success"] = False
+    (tmp_path / spec.provider_id / "attempts/001.json").write_text(
+        canonical(stored) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ContractError, match="attempt digest mismatch"):
+        load_attempts_v2(tmp_path, spec, manifest["manifest_sha256"], SOURCE)
 
 
 @pytest.mark.asyncio
@@ -126,10 +147,10 @@ async def test_capture_blocks_model_misattribution_without_persisting_reply_text
         source=SOURCE,
     )
     assert attempt["success"] is False
-    assert attempt["failure_code"] == "invalid_provider_proposal"
     assert attempt["model_attributed"] is False
     assert attempt["proposal"] is None
-    assert attempt["returned_model"] == "different-model"
+    assert attempt["returned_model"] is None
+    assert attempt["failure_code"] == "model_identity_mismatch"
 
 
 @pytest.mark.asyncio
@@ -149,6 +170,8 @@ def test_global_pilot_requires_exactly_twenty_attributable_posts() -> None:
     summaries = []
     for spec in PROVIDERS:
         body = {
+            "schema": 2,
+            "experiment_id": "car-m1-v2-turn-core-abcd",
             "source": SOURCE,
             "stage": "pilot",
             "fixture_manifest_sha256": manifest_sha,
@@ -156,7 +179,10 @@ def test_global_pilot_requires_exactly_twenty_attributable_posts() -> None:
             "attempts": 10,
             "posts": 10,
             "successes": 10,
+            "input_tokens": 100,
+            "output_tokens": 50,
             "provider": spec.public_doc(),
+            "status": "PASS",
         }
         summaries.append(
             {
@@ -181,3 +207,76 @@ def test_provider_source_identity_requires_full_git_shas() -> None:
     assert source_identity_v2("a" * 40, "b" * 40) == SOURCE
     with pytest.raises(ContractError, match="full Git SHA"):
         source_identity_v2("short", "b" * 40)
+
+
+@pytest.mark.asyncio
+async def test_proposal_corpus_binds_manifest_source_provider_and_rows() -> None:
+    spec = PROVIDERS[0]
+    manifest = await build_fixture_manifest_v2((fixture_recipes_v2()[0],))
+    fixture = manifest["body"]["fixtures"][0]
+    observation, legal = await observed_fixture_v2(fixture)
+    catalog = candidate_catalog_v2(observation, legal)
+    mandatory = [
+        row["choice"]
+        for row in catalog
+        if row["action_kind"]
+        in {kind.value for kind in observation.mandatory_action_kinds}
+    ]
+    end_turn = next(
+        row["choice"] for row in catalog if row["action_kind"] == "end_turn"
+    )
+    attempt = await capture_attempt_v2(
+        spec=spec,
+        client=_FakeClient(_reply(spec.model_id, [*mandatory, end_turn])),
+        fixture=fixture,
+        attempt_number=1,
+        fixture_manifest_sha256=manifest["manifest_sha256"],
+        source=SOURCE,
+    )
+    rows = [
+        {
+            "fixture_id": f"fixture-{index:03d}",
+            "proposal_sha256": attempt["proposal_sha256"],
+            "proposal": attempt["proposal"],
+        }
+        for index in range(100)
+    ]
+    body = {
+        "schema": 2,
+        "stage": "full_capture",
+        "experiment_id": "car-m1-v2-turn-core-abcd",
+        "fixture_manifest_sha256": manifest["manifest_sha256"],
+        "source": SOURCE,
+        "provider": spec.public_doc(),
+        "policy": provider_policy_v2(spec).to_doc(),
+        "attempts": 100,
+        "posts": 100,
+        "successes": 100,
+        "input_tokens": 100,
+        "output_tokens": 100,
+        "complete": True,
+        "status": "PASS",
+        "proposals": rows,
+    }
+    corpus = {
+        "schema": 2,
+        "capture_sha256": sha256_hex(canonical(body)),
+        "body": body,
+    }
+    policy, proposals, digest = proposal_docs_from_corpus_v2(
+        corpus,
+        expected_manifest_sha256=manifest["manifest_sha256"],
+        expected_source=SOURCE,
+        expected_spec=spec,
+    )
+    assert policy == provider_policy_v2(spec)
+    assert len(proposals) == 100
+    assert digest == corpus["capture_sha256"]
+
+    with pytest.raises(ContractError, match="source identity mismatch"):
+        proposal_docs_from_corpus_v2(
+            corpus,
+            expected_manifest_sha256=manifest["manifest_sha256"],
+            expected_source={"commit": "c" * 40, "tree": "d" * 40},
+            expected_spec=spec,
+        )
