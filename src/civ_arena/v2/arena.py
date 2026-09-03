@@ -23,13 +23,19 @@ from civ_arena.game.sim.chaos import ChaosDirector, ChaosEvent, MutationSpec
 from civ_arena.recall import RecallCorpus
 from civ_arena.strategy.store import StrategyStore
 from civ_arena.v2.contracts import (
+    ChaosEventConfigV2,
+    ChaosHookV2,
+    ChaosSpecV2,
     ComputeConfigV2,
+    EpisodeConfigV2,
     EpisodeReceiptV2,
     EpisodeTerminationV2,
+    EventTypeV2,
     ExecutionModeV2,
     TurnContextV2,
     TurnReceiptV2,
     TurnTerminationV2,
+    WatchdogModeV2,
 )
 from civ_arena.v2.enumeration import ActionEnumeratorV2
 from civ_arena.v2.environment import (
@@ -44,7 +50,11 @@ from civ_arena.v2.policy import (
     AgentRuntimeV2,
     PolicyServicesV2,
     build_policy_runtime_v2,
+    restore_policy_history_v2,
+    snapshot_policy_state_v2,
 )
+from civ_arena.v2.replay import replay_fake_episode_v2
+from civ_arena.v2.resume import ResumePlanV2, inspect_resume_parent_v2
 from civ_arena.v2.schemas import ContractError
 
 
@@ -73,15 +83,18 @@ class ArenaV2:
         episode_id: str | None = None,
         parent_episode_id: str | None = None,
         parent_terminal_event_hash: str | None = None,
+        parent_episode_dir: Path | str | None = None,
     ) -> None:
         if spec.schema != 2:
             raise ContractError("ArenaV2 requires a schema-2 MatchSpec")
         if spec.execution_mode != ExecutionModeV2.DAG_TX.value:
             raise ContractError("normal V2 matches require execution_mode dag_tx")
-        if spec.scored and parent_episode_id is not None:
+        if spec.scored and (parent_episode_id is not None or parent_episode_dir is not None):
             raise ContractError("scored V2 matches cannot resume")
         if (parent_episode_id is None) != (parent_terminal_event_hash is None):
             raise ContractError("resume parent id and terminal hash must appear together")
+        if parent_episode_dir is not None and parent_episode_id is not None:
+            raise ContractError("resume parent directory replaces explicit parent metadata")
 
         self.run_dir = Path(run_dir)
         self.spec = spec
@@ -105,10 +118,26 @@ class ArenaV2:
             environment, private_monitor = simulator_facets_v2()
         self.environment = environment
         self.private_monitor = private_monitor
+        self.episode_config = EpisodeConfigV2.create(
+            watchdog_mode=WatchdogModeV2(spec.watchdog_mode),
+            violation_limit=spec.violation_limit,
+            chaos=[
+                ChaosEventConfigV2(
+                    ChaosSpecV2(item.spec),
+                    ChaosHookV2(item.hook),
+                    item.offset,
+                )
+                for item in spec.chaos
+            ],
+        )
         self.chaos = ChaosDirector(
             [
-                ChaosEvent(MutationSpec(item.spec), hook=item.hook, offset=item.offset)
-                for item in spec.chaos
+                ChaosEvent(
+                    MutationSpec(item.spec.value),
+                    hook=item.hook.value,
+                    offset=item.offset,
+                )
+                for item in self.episode_config.chaos
             ]
         )
 
@@ -156,6 +185,32 @@ class ArenaV2:
         )
         self._receipts: list[TurnReceiptV2] = []
         self._violations_total = 0
+        self.resume_plan: ResumePlanV2 | None = None
+        if parent_episode_dir is not None:
+            if spec.adapter != "simulator":
+                raise ContractError(
+                    "live V2 child resume requires a handshake-bound save-load implementation"
+                )
+            self.resume_plan = inspect_resume_parent_v2(
+                parent_episode_dir,
+                environment_id=self.environment.descriptor.descriptor_id,
+                policies_by_player={
+                    player_id: runtime.descriptor
+                    for player_id, runtime in self.runtimes.items()
+                },
+                seed=spec.seed,
+                compute=self.compute,
+                episode_config=self.episode_config,
+            )
+            self.parent_episode_id = self.resume_plan.parent_episode_id
+            self.parent_terminal_event_hash = (
+                self.resume_plan.parent_terminal_event_hash
+            )
+            if episode_id is None:
+                self.episode_id = (
+                    f"{spec.match_id}-child-"
+                    f"{self.resume_plan.parent_terminal_event_hash[:12]}"
+                )
 
     async def _close_runtimes(self) -> None:
         for runtime in self.runtimes.values():
@@ -171,10 +226,10 @@ class ArenaV2:
         if not violations:
             return True
         self._violations_total += len(violations)
-        if self.spec.watchdog_mode == "rollback":
+        if self.episode_config.watchdog_mode is WatchdogModeV2.ROLLBACK:
             self.private_monitor.restore(snapshot)
             return False
-        return self._violations_total <= self.spec.violation_limit
+        return self._violations_total <= self.episode_config.violation_limit
 
     async def _run_phase(
         self,
@@ -200,11 +255,40 @@ class ArenaV2:
             graph = ActionGraphCompilerV2(self.spec.max_graph_actions).compile(
                 observation, legal
             )
-            proposal = await runtime.propose_turn(
-                TurnContextV2(observation, legal, graph, runtime.descriptor)
-            )
+            try:
+                proposal = await runtime.propose_turn(
+                    TurnContextV2(observation, legal, graph, runtime.descriptor)
+                )
+            except BaseException:
+                state = snapshot_policy_state_v2(
+                    runtime,
+                    self.services[player_id],
+                    turn=turn,
+                    proposal_id=None,
+                )
+                recorder.record_reference(
+                    EventTypeV2.POLICY_STATE_RECORDED,
+                    state,
+                    turn_id=turn,
+                    correlation_id=f"turn-{turn}-p{player_id}",
+                )
+                self.services[player_id].mark_operations_durable()
+                raise
             receipt = await executor.execute(proposal, observation, graph)
             self._receipts.append(receipt)
+            state = snapshot_policy_state_v2(
+                runtime,
+                self.services[player_id],
+                turn=turn,
+                proposal_id=proposal.proposal_id,
+            )
+            recorder.record_reference(
+                EventTypeV2.POLICY_STATE_RECORDED,
+                state,
+                turn_id=turn,
+                correlation_id=f"turn-{turn}-p{player_id}",
+            )
+            self.services[player_id].mark_operations_durable()
             if receipt.termination is TurnTerminationV2.COMPLETED:
                 clean = self._watchdog_sweep(snapshot)
                 if not clean:
@@ -227,6 +311,31 @@ class ArenaV2:
     async def run(self) -> dict[str, Any]:
         """Run and terminally receipt every outcome, including cancellation."""
 
+        if self.parent_episode_id is not None and self.resume_plan is None:
+            raise ContractError(
+                "running a V2 child requires the read-only parent episode directory"
+            )
+
+        if self.resume_plan is not None:
+            await replay_fake_episode_v2(
+                self.resume_plan.parent_episode_dir,
+                expected_environment_id=self.environment.descriptor.descriptor_id,
+                environment=self.environment,
+                private_monitor=self.private_monitor,
+                through_sequence=self.resume_plan.checkpoint_sequence,
+            )
+            for player_id, runtime in self.runtimes.items():
+                restore_policy_history_v2(
+                    runtime,
+                    self.services[player_id],
+                    self.resume_plan.states_for(player_id),
+                    spend_attempts=self.resume_plan.spends_for(player_id),
+                )
+            # Parent replay is an internal reconstruction step. Its mutation
+            # journals must not contaminate the first child watchdog sweep.
+            self.private_monitor.drain_mutations()
+            self.private_monitor.drain_authorized_mutations()
+
         policies = [runtime.descriptor for runtime in self.runtimes.values()]
         recorder = EpisodeRecorderV2(
             self.run_dir,
@@ -239,31 +348,47 @@ class ArenaV2:
             parent_episode_id=self.parent_episode_id,
             parent_terminal_event_hash=self.parent_terminal_event_hash,
         )
+        recorder.record_reference(
+            EventTypeV2.EPISODE_CONFIG_RECORDED,
+            self.episode_config,
+            turn_id=None,
+            correlation_id=self.episode_id,
+        )
         termination = EpisodeTerminationV2.FAILURE
         aborted: str | None = None
         phases_completed = 0
         final_turn = 0
         terminal_receipt: EpisodeReceiptV2 | None = None
         try:
-            await self.environment.reset(
-                {"seed": self.spec.seed, "chaos_director": self.chaos}
-            )
+            for player_id, service in self.services.items():
+                service.bind_custody(
+                    self.runtimes[player_id].descriptor.descriptor_id,
+                    recorder,
+                )
+            if self.resume_plan is None:
+                await self.environment.reset(
+                    {"seed": self.spec.seed, "chaos_director": self.chaos}
+                )
             stopped = False
-            for turn in range(1, self.spec.max_turns + 1):
+            agents = self.spec.agents
+            phase_start = (
+                self.resume_plan.completed_phases if self.resume_plan is not None else 0
+            )
+            phase_stop = self.spec.max_turns * len(agents)
+            for phase_index in range(phase_start, phase_stop):
+                turn = phase_index // len(agents) + 1
                 final_turn = turn
-                for agent in self.spec.agents:
-                    completed, reason = await self._run_phase(
-                        recorder,
-                        turn=turn,
-                        player_id=agent.player_id,
-                    )
-                    if not completed:
-                        aborted = reason
-                        stopped = True
-                        break
-                    phases_completed += 1
-                if stopped:
+                agent = agents[phase_index % len(agents)]
+                completed, reason = await self._run_phase(
+                    recorder,
+                    turn=turn,
+                    player_id=agent.player_id,
+                )
+                if not completed:
+                    aborted = reason
+                    stopped = True
                     break
+                phases_completed += 1
             if not stopped:
                 termination = EpisodeTerminationV2.SUCCESS
         except asyncio.CancelledError:
@@ -281,6 +406,8 @@ class ArenaV2:
             termination = EpisodeTerminationV2.FAILURE
             aborted = _safe_error(exc)
         finally:
+            for service in self.services.values():
+                service.unbind_custody()
             await self._close_runtimes()
             if terminal_receipt is None:
                 terminal_receipt = recorder.terminate(
@@ -300,6 +427,13 @@ class ArenaV2:
             "aborted": aborted,
             "violations_total": self._violations_total,
             "terminal_event_hash": terminal_receipt.terminal_event_hash,
+            "parent_episode_id": terminal_receipt.parent_episode_id,
+            "parent_terminal_event_hash": terminal_receipt.parent_terminal_event_hash,
+            "parent_checkpoint_event_hash": (
+                self.resume_plan.checkpoint_event_hash
+                if self.resume_plan is not None
+                else None
+            ),
             "environment_id": self.environment.descriptor.descriptor_id,
             "turn_receipts": [item.receipt_id for item in self._receipts],
             "telemetry": self.telemetry.snapshot(),

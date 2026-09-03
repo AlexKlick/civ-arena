@@ -1,28 +1,31 @@
-"""Crash-resume: SIGKILL mid-match, resume from checkpoint, identical outcome."""
+"""V2 CLI custody: fresh episodes and immutable terminal-parent children."""
 
 from __future__ import annotations
 
-import json
-import os
-import signal
+import hashlib
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import pytest
+from civ_arena.v2.contracts import EpisodeReceiptV2
+from civ_arena.v2.ledger import load_events_v2, verify_ledger_v2
 
 REPO = Path(__file__).resolve().parents[1]
 
-CONFIG_TEMPLATE = """
+CONFIG_TEMPLATE = """\
+schema: 2
 match:
   match_id: {match_id}
   seed: 313131
   max_turns: {max_turns}
-  checkpoint_every: 5
+  checkpoint_every: 1
   adapter: simulator
   watchdog_mode: flag_and_continue
   violation_limit: 5
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
 
 agents:
   - agent_id: roman
@@ -38,159 +41,85 @@ chaos: []
 """
 
 
-def write_config(tmp_path: Path, match_id: str, max_turns: int) -> Path:
+def _write_config(tmp_path: Path, match_id: str, max_turns: int) -> Path:
     path = tmp_path / f"{match_id}.yaml"
-    path.write_text(CONFIG_TEMPLATE.format(match_id=match_id, max_turns=max_turns))
+    path.write_text(
+        CONFIG_TEMPLATE.format(match_id=match_id, max_turns=max_turns),
+        encoding="utf-8",
+    )
     return path
 
 
-def run_match(config: Path, run_root: Path, *extra: str,
-              timeout: float = 180.0) -> subprocess.CompletedProcess:
+def _run(config: Path, run_root: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-m", "civ_arena.match", str(config),
-         "--run-dir", str(run_root), *extra],
-        cwd=REPO, capture_output=True, text=True, timeout=timeout,
-    )
-
-
-def summary_of(run_root: Path, match_id: str) -> dict:
-    return json.loads((run_root / match_id / "summary.json").read_text())
-
-
-def test_kill9_resume_identical_state(tmp_path):
-    config = write_config(tmp_path, "resume-duel", 30)
-    run_root = tmp_path / "runs"
-
-    # 1. crashing child: deterministic self-SIGKILL just after the turn-11 lease
-    crashed = run_match(config, run_root, "--crash-after-turn", "10")
-    assert crashed.returncode == -signal.SIGKILL, (
-        f"expected SIGKILL, got {crashed.returncode}: {crashed.stderr[-500:]}"
-    )
-    ckpt = run_root / "resume-duel" / "checkpoints" / "ckpt-turn-0010.json"
-    assert ckpt.exists(), "turn-10 checkpoint must exist before the crash point"
-    events = run_root / "resume-duel" / "events.jsonl"
-    n_events_after_crash = len(events.read_text().splitlines())
-    assert n_events_after_crash > 200, "post-checkpoint events were written before dying"
-
-    # 2. resume on the same run dir
-    resumed = run_match(config, run_root, "--resume")
-    assert resumed.returncode == 0, resumed.stderr[-800:]
-    resumed_summary = summary_of(run_root, "resume-duel")
-
-    # 3. clean uninterrupted run, same seed, separate dir
-    clean = run_match(config, tmp_path / "clean")
-    assert clean.returncode == 0, clean.stderr[-800:]
-    clean_summary = summary_of(tmp_path / "clean", "resume-duel")
-
-    assert resumed_summary["final_state_hash"] == clean_summary["final_state_hash"], (
-        "resumed match must end in the identical state as a clean run"
-    )
-    assert resumed_summary["violations_total"] == 0
-    assert clean_summary["violations_total"] == 0
-    assert resumed_summary["final_turn"] == clean_summary["final_turn"] == 30
-
-    # 4. log-prefix identity: the resumed log's checkpointed prefix equals the
-    #    clean run's prefix (already enforced by verify_log_prefix, proven here)
-    ckpt_doc = json.loads(ckpt.read_text())
-    from civ_arena.canonical import log_prefix_hash
-
-    resumed_records = [
-        json.loads(line)
-        for line in (run_root / "resume-duel" / "events.jsonl").read_text().splitlines()
-    ]
-    clean_records = [
-        json.loads(line)
-        for line in (tmp_path / "clean" / "resume-duel" / "events.jsonl").read_text().splitlines()
-    ]
-    assert log_prefix_hash(resumed_records[: ckpt_doc["seq"]]) == ckpt_doc["log_prefix_sha256"]
-    assert log_prefix_hash(clean_records[: ckpt_doc["seq"]]) == ckpt_doc["log_prefix_sha256"]
-
-
-def test_external_sigkill_resume(tmp_path):
-    """Kill from OUTSIDE at an arbitrary point (heartbeat-polled), then resume."""
-    config = write_config(tmp_path, "external-kill", 30)
-    run_root = tmp_path / "runs"
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "civ_arena.match", str(config),
-         "--run-dir", str(run_root)],
-        cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    heartbeat = run_root / "external-kill" / "heartbeat.json"
-    deadline = time.monotonic() + 90
-    killed_at_turn = None
-    while time.monotonic() < deadline:
-        if heartbeat.exists():
-            try:
-                doc = json.loads(heartbeat.read_text())
-            except json.JSONDecodeError:
-                doc = {}
-            if doc.get("turn", 0) >= 12:
-                proc.send_signal(signal.SIGKILL)
-                killed_at_turn = doc["turn"]
-                break
-        if proc.poll() is not None:
-            raise AssertionError("child finished before we could kill it")
-        time.sleep(0.05)
-    assert killed_at_turn is not None, "never reached turn 12"
-    proc.wait(timeout=30)
-    assert proc.returncode == -signal.SIGKILL
-
-    resumed = run_match(config, run_root, "--resume")
-    assert resumed.returncode == 0, resumed.stderr[-800:]
-    clean = run_match(config, tmp_path / "clean")
-    assert clean.returncode == 0, clean.stderr[-800:]
-    assert (summary_of(run_root, "external-kill")["final_state_hash"]
-            == summary_of(tmp_path / "clean", "external-kill")["final_state_hash"])
-
-
-def test_corrupt_tail_recovered(tmp_path):
-    """A torn trailing line (kill -9 mid-write) survives resume."""
-    config = write_config(tmp_path, "torn-tail", 30)
-    run_root = tmp_path / "runs"
-    crashed = run_match(config, run_root, "--crash-after-turn", "10")
-    assert crashed.returncode == -signal.SIGKILL
-
-    events = run_root / "torn-tail" / "events.jsonl"
-    with open(events, "a", encoding="utf-8") as fh:
-        fh.write('{"schema":1,"seq":999,"kind":"TOOL_RESU')
-    with open(events, "rb") as fh:
-        assert fh.seek(0, os.SEEK_END) > 0
-
-    resumed = run_match(config, run_root, "--resume")
-    assert resumed.returncode == 0, resumed.stderr[-800:]
-    assert run_match(config, tmp_path / "clean").returncode == 0
-    assert (summary_of(run_root, "torn-tail")["final_state_hash"]
-            == summary_of(tmp_path / "clean", "torn-tail")["final_state_hash"])
-
-
-@pytest.mark.parametrize("seed", [5, 6])
-def test_two_subprocesses_same_seed_same_hash(tmp_path, seed):
-    """Determinism across processes: identical checkpoint hashes at the end."""
-    config_a = write_config(tmp_path, f"det-a-{seed}", 20)
-    config_b = write_config(tmp_path, f"det-b-{seed}", 20)
-    doc_a = {
-        "match": {"match_id": f"det-a-{seed}", "seed": seed, "max_turns": 20,
-                  "checkpoint_every": 10},
-        "agents": [
-            {"agent_id": "roman", "player_id": 0, "policy": "expansionist", "seed": 11},
-            {"agent_id": "korea", "player_id": 1, "policy": "turtler", "seed": 22},
+        [
+            sys.executable,
+            "-m",
+            "civ_arena.match",
+            str(config),
+            "--run-dir",
+            str(run_root),
+            *extra,
         ],
-    }
-    import yaml
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
 
-    for cid, name in ((config_a, f"det-a-{seed}"), (config_b, f"det-b-{seed}")):
-        doc = dict(doc_a)
-        doc["match"] = dict(doc_a["match"], match_id=name)
-        cid.write_text(yaml.safe_dump(doc))
-    r1 = run_match(config_a, tmp_path / "ra")
-    r2 = run_match(config_b, tmp_path / "rb")
-    assert r1.returncode == 0 and r2.returncode == 0
 
-    ck1 = json.loads((tmp_path / "ra" / f"det-a-{seed}" / "checkpoints"
-                      / "ckpt-turn-0020.json").read_text())
-    ck2 = json.loads((tmp_path / "rb" / f"det-b-{seed}" / "checkpoints"
-                      / "ckpt-turn-0020.json").read_text())
-    # sim + rng + coordinator must match; only instance ids may differ
-    assert ck1["sim_doc"] == ck2["sim_doc"]
-    assert ck1["rng_states"] == ck2["rng_states"]
-    assert ck1["coordinator_state"] == ck2["coordinator_state"]
+def test_cli_resume_creates_child_and_never_rewrites_parent(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, "resume-duel", 1)
+    run_root = tmp_path / "runs"
+
+    first = _run(config, run_root)
+    assert first.returncode == 0, first.stderr[-800:]
+    parent = run_root / "resume-duel"
+    parent_bytes = (parent / "events.jsonl").read_bytes()
+    parent_sha = hashlib.sha256(parent_bytes).hexdigest()
+    verified = verify_ledger_v2(parent)
+    assert not (parent / "summary.json").exists()
+    assert not (parent / "checkpoints").exists()
+
+    # Increasing the configured horizon resumes from the last completed
+    # phase, but V2 writes the continuation to a new hash-bound episode.
+    _write_config(tmp_path, "resume-duel", 2)
+    resumed = _run(config, run_root, "--resume")
+    assert resumed.returncode == 0, resumed.stderr[-800:]
+    child_id = f"resume-duel-child-{verified.terminal_event_hash[:12]}"
+    child = run_root / child_id
+    assert child.is_dir()
+    assert child_id in resumed.stdout
+    assert hashlib.sha256((parent / "events.jsonl").read_bytes()).hexdigest() == parent_sha
+
+    terminal = load_events_v2(child / "events.jsonl")[-1].payload_value
+    assert isinstance(terminal, EpisodeReceiptV2)
+    assert terminal.episode_id == child_id
+    assert terminal.parent_episode_id == "resume-duel"
+    assert terminal.parent_terminal_event_hash == verified.terminal_event_hash
+    assert terminal.turns_completed == 2
+    assert verify_ledger_v2(child).termination_reason == "success"
+
+    duplicate = _run(config, run_root, "--resume")
+    assert duplicate.returncode != 0
+    assert (child / "events.jsonl").exists()
+
+
+def test_cli_refuses_v1_config_and_retired_in_place_crash_flag(tmp_path: Path) -> None:
+    run_root = tmp_path / "runs"
+    legacy = tmp_path / "legacy.yaml"
+    legacy.write_text(
+        "match:\n  match_id: old\n  seed: 1\nagents:\n"
+        "  - {agent_id: a, player_id: 0, policy: turtler}\n",
+        encoding="utf-8",
+    )
+    old = _run(legacy, run_root)
+    assert old.returncode != 0
+    assert "top-level schema: 2" in old.stderr
+
+    v2 = _write_config(tmp_path, "no-in-place-crash", 1)
+    crash = _run(v2, run_root, "--crash-after-turn", "1")
+    assert crash.returncode != 0
+    assert "in-place V1 checkpoint path" in crash.stderr
+    assert not (run_root / "no-in-place-crash" / "events.jsonl").exists()

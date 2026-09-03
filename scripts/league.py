@@ -105,6 +105,10 @@ def spec_for(match_id: str, seed: int, turns: int) -> MatchSpec:
             AgentSpec(agent_id="planner-p1", player_id=1, policy="planner",
                       seed=SEAT_SEEDS[1]),
         ],
+        # Frozen M20 research harness: it intentionally remains on the V1
+        # compatibility coordinator. Authoritative file-backed matches use
+        # ArenaV2; this emitted config is consumed only by the V1 replay reader.
+        schema=1,
     )
 
 

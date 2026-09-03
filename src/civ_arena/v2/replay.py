@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from civ_arena.game.sim.chaos import ChaosDirector, ChaosEvent, MutationSpec
 from civ_arena.v2.contracts import (
     ActionGraphV2,
     ActionKindV2,
@@ -25,6 +28,7 @@ from civ_arena.v2.contracts import (
     AuthorizationReasonV2,
     AuthorizationV2,
     EnvironmentCapabilityV2,
+    EpisodeConfigV2,
     EpisodeReceiptV2,
     EventTypeV2,
     LegalActionSetV2,
@@ -38,7 +42,12 @@ from civ_arena.v2.contracts import (
     VerificationStatusV2,
 )
 from civ_arena.v2.enumeration import ActionEnumeratorV2
-from civ_arena.v2.environment import EnvironmentExecutionV2, simulator_facets_v2
+from civ_arena.v2.environment import (
+    EnvironmentExecutionV2,
+    ObservableExecutionFacetV2,
+    PrivateRefereeMonitorV2,
+    simulator_facets_v2,
+)
 from civ_arena.v2.executor import (
     TransactionalExecutorV2,
     verify_observable_postconditions,
@@ -50,6 +59,7 @@ from civ_arena.v2.ledger import (
     load_events_v2,
     verify_ledger_v2,
 )
+from civ_arena.v2.resume import resume_checkpoint_sequence_v2
 
 
 class ExactReplayError(LedgerIntegrityError):
@@ -65,6 +75,51 @@ class ExactFakeReplayV2:
     observation_count: int
     final_observation_id: str | None
     final_private_state_hash: str
+
+
+def _episode_config_from_events(
+    root: Path,
+    events: list[Any],
+) -> EpisodeConfigV2 | None:
+    """Load the single early config artifact when the producer emits one.
+
+    CAR-106's low-level replay fixtures predate this custody event and remain
+    readable as the no-chaos default. ArenaV2-produced episodes always emit it;
+    resume separately requires it.
+    """
+
+    config_events = [
+        event
+        for event in events[1:-1]
+        if event.event_type is EventTypeV2.EPISODE_CONFIG_RECORDED
+    ]
+    if not config_events:
+        return None
+    if len(config_events) != 1 or config_events[0].sequence_number != 1:
+        raise ExactReplayError(
+            "episode config must be the unique event after EpisodeStarted"
+        )
+    event = config_events[0]
+    if event.turn_id is not None or not isinstance(event.payload_value, ArtifactRefV2):
+        raise ExactReplayError("episode config event has an invalid envelope")
+    return _artifact_model(
+        ObjectStoreV2(root),
+        event.payload_value,
+        EpisodeConfigV2,
+    )
+
+
+def _chaos_director(config: EpisodeConfigV2) -> ChaosDirector:
+    return ChaosDirector(
+        [
+            ChaosEvent(
+                MutationSpec(item.spec.value),
+                hook=item.hook.value,
+                offset=item.offset,
+            )
+            for item in config.chaos
+        ]
+    )
 
 
 def _artifact_model[ModelT](
@@ -208,8 +263,19 @@ async def replay_fake_episode_v2(
     episode_dir: Path | str,
     *,
     expected_environment_id: str | None = None,
+    environment: ObservableExecutionFacetV2 | None = None,
+    private_monitor: PrivateRefereeMonitorV2 | None = None,
+    through_sequence: int | None = None,
+    reset_config: Mapping[str, Any] | None = None,
+    parent_episode_dir: Path | str | None = None,
 ) -> ExactFakeReplayV2:
-    """Verify and deterministically re-execute one terminal fake V2 episode."""
+    """Verify and deterministically re-execute one terminal fake V2 episode.
+
+    ``through_sequence`` is the child-resume seam: the full parent ledger is
+    still verified first, but execution stops at a completed phase checkpoint.
+    Callers may supply their own split facets so the reconstructed private state
+    remains in process and can seed a child episode without ever being stored.
+    """
 
     root = Path(episode_dir)
     structural = verify_ledger_v2(
@@ -230,11 +296,68 @@ async def replay_fake_episode_v2(
         raise ExactReplayError("exact replay requires a deterministic fake environment")
     if terminal.seed is None:
         raise ExactReplayError("exact fake replay requires the recorded seed")
+    episode_config = _episode_config_from_events(root, events)
 
-    environment, private_monitor = simulator_facets_v2()
+    if (environment is None) != (private_monitor is None):
+        raise ExactReplayError("replay environment facets must be supplied together")
+    if environment is None or private_monitor is None:
+        environment, private_monitor = simulator_facets_v2()
     if environment.descriptor != terminal.environment:
         raise ExactReplayError("runtime fake environment identity does not match episode")
-    await environment.reset({"seed": terminal.seed})
+    if terminal.parent_episode_id is not None:
+        parent_root = (
+            Path(parent_episode_dir)
+            if parent_episode_dir is not None
+            else root.parent / terminal.parent_episode_id
+        )
+        if parent_root.resolve() == root.resolve():
+            raise ExactReplayError("child episode cannot name itself as its parent")
+        parent_events = load_events_v2(parent_root / "events.jsonl")
+        if not parent_events or parent_events[-1].event_hash != (
+            terminal.parent_terminal_event_hash
+        ):
+            raise ExactReplayError("child episode parent terminal hash mismatch")
+        parent_terminal = parent_events[-1].payload_value
+        if not isinstance(parent_terminal, EpisodeReceiptV2):
+            raise ExactReplayError("child episode parent has no terminal receipt")
+        if (
+            parent_terminal.environment != terminal.environment
+            or parent_terminal.seed != terminal.seed
+            or parent_terminal.compute != terminal.compute
+            or parent_terminal.policies != terminal.policies
+        ):
+            raise ExactReplayError("child episode changed its parent runtime identity")
+        if _episode_config_from_events(parent_root, parent_events) != episode_config:
+            raise ExactReplayError("child episode changed its parent episode config")
+        await replay_fake_episode_v2(
+            parent_root,
+            expected_environment_id=terminal.environment.descriptor_id,
+            environment=environment,
+            private_monitor=private_monitor,
+            through_sequence=resume_checkpoint_sequence_v2(parent_root),
+            reset_config=reset_config,
+        )
+    else:
+        supplied = dict(reset_config or {})
+        if set(supplied) - {"seed"}:
+            raise ExactReplayError("exact replay reset accepts only the recorded seed")
+        if supplied.get("seed", terminal.seed) != terminal.seed:
+            raise ExactReplayError("replay reset seed does not match episode receipt")
+        config: dict[str, Any] = {"seed": terminal.seed}
+        if episode_config is not None:
+            config["chaos_director"] = _chaos_director(episode_config)
+        await environment.reset(config)
+
+    if through_sequence is not None:
+        if not 0 <= through_sequence < events[-1].sequence_number:
+            raise ExactReplayError("replay checkpoint sequence is outside the parent body")
+        replay_events = [
+            event
+            for event in events[1:-1]
+            if event.sequence_number <= through_sequence
+        ]
+    else:
+        replay_events = events[1:-1]
 
     store = ObjectStoreV2(root)
     enumerator = ActionEnumeratorV2(terminal.compute.max_graph_actions)
@@ -272,9 +395,14 @@ async def replay_fake_episode_v2(
     observation_count = 0
     final_observation_id: str | None = None
 
-    for event in events[1:-1]:
+    for event in replay_events:
         event_type = event.event_type
-        if event_type is EventTypeV2.VALIDATION_RECORDED:
+        if event_type in {
+            EventTypeV2.EPISODE_CONFIG_RECORDED,
+            EventTypeV2.POLICY_SPEND_RECORDED,
+            EventTypeV2.POLICY_STATE_RECORDED,
+            EventTypeV2.VALIDATION_RECORDED,
+        }:
             continue
         if event.turn_id is None:
             raise ExactReplayError(f"{event_type.value} is missing its turn id")
@@ -567,17 +695,29 @@ async def replay_fake_episode_v2(
 
     if pending_authorization is not None:
         raise ExactReplayError("episode terminates with an incomplete turn")
-    if terminal.termination_reason.value == "success" and not awaiting_turn_start:
+    if (
+        through_sequence is None
+        and terminal.termination_reason.value == "success"
+        and not awaiting_turn_start
+    ):
         raise ExactReplayError("successful episode terminates with an incomplete turn")
     if not awaiting_turn_start and not continuation_expected:
         raise ExactReplayError("episode terminates within an incomplete proposal")
-    if terminal.turns_completed != completed_turn_count:
+    if through_sequence is not None and (
+        not awaiting_turn_start or continuation_expected
+    ):
+        raise ExactReplayError("resume checkpoint is not a completed phase boundary")
+    if through_sequence is None and terminal.turns_completed != completed_turn_count:
         raise ExactReplayError(
             "episode receipt turn count does not match completed turn receipts"
         )
     return ExactFakeReplayV2(
         episode_id=structural.episode_id,
-        event_count=structural.event_count,
+        event_count=(
+            structural.event_count
+            if through_sequence is None
+            else through_sequence + 1
+        ),
         turn_receipt_count=turn_receipt_count,
         action_count=action_count,
         observation_count=observation_count,

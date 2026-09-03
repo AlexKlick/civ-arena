@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from civ_arena.config import load_config
 from civ_arena.replay import replay_run
+from civ_arena.v1_compat import load_v1_config_read_only
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -219,7 +219,7 @@ async def test_league_results_schema(tmp_path):
         assert (run_dir / "planner" / "p0-trace.json").exists()
         assert (run_dir / "planner" / "p1-trace.json").exists()
         # the emitted config re-loads into the EXACT spec the match ran
-        assert load_config(run_dir / "config.yaml") == league.spec_for(
+        assert load_v1_config_read_only(run_dir / "config.yaml") == league.spec_for(
             r["match_id"], r["seed"], 8)
         t0 = json.loads((run_dir / "planner" / "p0-trace.json").read_text())
         t1 = json.loads((run_dir / "planner" / "p1-trace.json").read_text())
@@ -251,7 +251,9 @@ async def test_selfplay_zero_rejections_and_replay_ok(tmp_path):
             league.SEED_BASE, 8)
 
     run_dir = tmp_path / row["match_id"]
-    spec = load_config(run_dir / "config.yaml")  # the emitted config drives it
+    spec = load_v1_config_read_only(
+        run_dir / "config.yaml"
+    )  # the emitted V1 compatibility config drives it
     result = await replay_run(run_dir, spec, tmp_path / "replay")
     assert result["identical"], (
         f"self-play replay diverged at comparable-event "

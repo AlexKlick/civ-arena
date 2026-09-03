@@ -26,10 +26,13 @@
     "event_type": {
       "enum": [
         "EpisodeStarted",
+        "EpisodeConfigRecorded",
         "ObservationRecorded",
         "LegalActionsRecorded",
         "ActionGraphCompiled",
         "PolicyProposalRecorded",
+        "PolicyStateRecorded",
+        "PolicySpendRecorded",
         "ActionAuthorized",
         "ActionExecutionStarted",
         "ActionExecutionCompleted",

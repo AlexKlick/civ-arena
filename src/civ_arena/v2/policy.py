@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import json
+import random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -33,10 +34,16 @@ from civ_arena.v2.contracts import (
     ActionKindV2,
     EntityRefV2,
     EntityTypeV2,
+    EventTypeV2,
     FactSubjectScopeV2,
     LegalActionV2,
     PolicyDescriptorV2,
     PolicyKindV2,
+    PolicyOperationV2,
+    PolicyRuntimeKindV2,
+    PolicySpendV2,
+    PolicyStateV2,
+    RandomStateV2,
     TurnContextV2,
     TurnProposalV2,
 )
@@ -75,6 +82,36 @@ def _thaw(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+def _policy_json_value(value: Any, path: str = "$policy") -> Any:
+    """Normalize mature policy state into canonical JSON without ambiguity."""
+
+    if value is None or isinstance(value, str | int | bool):
+        return value
+    if isinstance(value, float):
+        raise ContractError(f"policy state contains a float at {path}")
+    if isinstance(value, list | tuple):
+        return [
+            _policy_json_value(child, f"{path}[{index}]")
+            for index, child in enumerate(value)
+        ]
+    if isinstance(value, Mapping):
+        normalized: dict[str, Any] = {}
+        for raw_key, child in value.items():
+            if isinstance(raw_key, str):
+                key = raw_key
+            elif isinstance(raw_key, int) and not isinstance(raw_key, bool):
+                key = str(raw_key)
+            else:
+                raise ContractError(f"policy state has an invalid key at {path}")
+            if key in normalized:
+                raise ContractError(
+                    f"policy state key normalization collides at {path}.{key}"
+                )
+            normalized[key] = _policy_json_value(child, f"{path}.{key}")
+        return normalized
+    raise ContractError(f"policy state contains a non-JSON value at {path}")
+
+
 @dataclass
 class PolicyServicesV2:
     """Policy-only memory, telemetry, and spend accounting.
@@ -94,9 +131,40 @@ class PolicyServicesV2:
     claim_sequence: int = 0
     model_posts: int = 0
     operations: list[dict[str, Any]] = field(default_factory=list)
+    _durable_cursor: int = field(default=0, init=False, repr=False)
+    _policy_id: str | None = field(default=None, init=False, repr=False)
+    _recorder: Any = field(default=None, init=False, repr=False)
+    _current_turn: int = field(default=0, init=False, repr=False)
+
+    def bind_custody(self, policy_id: str, recorder: Any) -> None:
+        """Bind the append-only V2 recorder after it acquires the writer lock."""
+
+        self._policy_id = policy_id
+        self._recorder = recorder
+
+    def unbind_custody(self) -> None:
+        self._recorder = None
+
+    def begin_policy_turn(self, turn: int) -> None:
+        self._current_turn = turn
 
     def note_model_post(self) -> None:
         self.model_posts += 1
+        if self._recorder is None or self._policy_id is None:
+            return
+        spend = PolicySpendV2.create(
+            policy_id=self._policy_id,
+            agent_id=self.agent_id,
+            player_id=self.player_id,
+            turn=self._current_turn,
+            attempt=self.model_posts,
+        )
+        self._recorder.record_reference(
+            EventTypeV2.POLICY_SPEND_RECORDED,
+            spend,
+            turn_id=self._current_turn,
+            correlation_id=f"turn-{self._current_turn}-p{self.player_id}",
+        )
 
     def _record(
         self,
@@ -118,6 +186,64 @@ class PolicyServicesV2:
         # Refuse policy records that cannot enter a canonical V2 artifact.
         canonical(record)
         self.operations.append(record)
+
+    def operation_delta(self) -> tuple[PolicyOperationV2, ...]:
+        return tuple(
+            PolicyOperationV2.create(
+                agent_id=record["agent_id"],
+                player_id=record["player_id"],
+                turn=record["turn"],
+                sequence=record["sequence"],
+                tool=record["tool"],
+                args=record["args"],
+                result=record["result"],
+            )
+            for record in self.operations[self._durable_cursor :]
+        )
+
+    def mark_operations_durable(self) -> None:
+        self._durable_cursor = len(self.operations)
+
+    def restore_operations(self, operations: tuple[PolicyOperationV2, ...]) -> None:
+        """Rebuild policy stores from trusted operation deltas, idempotently."""
+
+        claim_tools = {"set_goal", "record_prediction", "record_lesson"}
+        for operation in operations:
+            if operation.agent_id != self.agent_id or operation.player_id != self.player_id:
+                raise ContractError("policy operation does not belong to this service")
+            record = {
+                "agent_id": operation.agent_id,
+                "player_id": operation.player_id,
+                "turn": operation.turn,
+                "sequence": operation.sequence,
+                "tool": operation.tool,
+                "args": operation.args,
+                "result": operation.result,
+            }
+            if operation.sequence < len(self.operations):
+                if self.operations[operation.sequence] != record:
+                    raise ContractError("policy operation sequence has conflicting bytes")
+                continue
+            if operation.sequence != len(self.operations):
+                raise ContractError("policy operation sequence is not contiguous")
+            if operation.tool == "write_diary" and operation.result.get("status") == "accepted":
+                text = operation.args.get("text")
+                if not isinstance(text, str):
+                    raise ContractError("accepted diary operation has no text")
+                self.diary.write(self.player_id, text)
+            elif operation.tool in claim_tools:
+                replayed = self.strategy.apply_claim(
+                    operation.tool,
+                    self.player_id,
+                    operation.args,
+                    operation.turn,
+                    self.claim_sequence,
+                )
+                if replayed != operation.result:
+                    raise ContractError("policy claim operation does not replay exactly")
+                self.claim_sequence += 1
+            self.operations.append(record)
+        self._durable_cursor = len(self.operations)
 
     def _note_call(self, tool: str, ok: bool) -> None:
         if self.telemetry is not None:
@@ -688,6 +814,45 @@ def _proposal_facade(collector: _ProposalCollector) -> Any:
     return _Facade(bound)
 
 
+class InMemoryPlannerJournalV2:
+    """Planner journal with V2 custody instead of a mutable side file."""
+
+    def __init__(self) -> None:
+        self._docs: list[dict[str, Any]] = []
+
+    def append(self, turn: int, payload: Mapping[str, Any]) -> None:
+        doc = _policy_json_value(dict(payload))
+        assert isinstance(doc, dict)
+        if doc.get("turn") != turn:
+            raise ContractError("planner journal payload turn mismatch")
+        # A same-turn re-proposal replaces the earlier policy snapshot just as
+        # the frozen file journal does after a rewind.
+        self._docs = [item for item in self._docs if item["turn"] < turn]
+        self._docs.append(json.loads(canonical(doc)))
+
+    def replay_upto(self, turn: int) -> list[dict[str, Any]]:
+        return [copy.deepcopy(item) for item in self._docs if item["turn"] < turn]
+
+    def to_doc(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self._docs)
+
+    def restore(self, docs: Any) -> None:
+        if not isinstance(docs, list):
+            raise ContractError("planner runtime state journal must be a list")
+        restored: list[dict[str, Any]] = []
+        prior = -1
+        for raw in docs:
+            if not isinstance(raw, dict):
+                raise ContractError("planner runtime state journal entry must be an object")
+            doc = json.loads(canonical(raw))
+            turn = doc.get("turn")
+            if not isinstance(turn, int) or isinstance(turn, bool) or turn <= prior:
+                raise ContractError("planner runtime state journal turns must increase")
+            prior = turn
+            restored.append(doc)
+        self._docs = restored
+
+
 @dataclass
 class LegacyPolicyRuntimeV2:
     """Run one mature V1 policy as an observation-only V2 proposer."""
@@ -695,6 +860,7 @@ class LegacyPolicyRuntimeV2:
     runtime: Any
     descriptor: PolicyDescriptorV2
     services: PolicyServicesV2
+    journal: InMemoryPlannerJournalV2 | None = None
 
     async def propose_turn(self, context: TurnContextV2) -> TurnProposalV2:
         if context.policy != self.descriptor:
@@ -702,6 +868,7 @@ class LegacyPolicyRuntimeV2:
         entity_id = context.observation.observing_player.entity_id
         if entity_id != f"p{self.services.player_id}":
             raise ContractError("policy service identity does not match observation")
+        self.services.begin_policy_turn(context.observation.turn)
         begin = getattr(self.runtime, "begin_turn", None)
         if callable(begin):
             begin(context.observation.turn)
@@ -713,6 +880,99 @@ class LegacyPolicyRuntimeV2:
             observation_id=context.observation.observation_id,
             intents=collector.intents,
         )
+
+    def snapshot_state(self, *, turn: int, proposal_id: str | None) -> PolicyStateV2:
+        runtime_kind = PolicyRuntimeKindV2(self.descriptor.policy_kind.value)
+        runtime_state: dict[str, Any] = {}
+        if runtime_kind is PolicyRuntimeKindV2.PLANNER:
+            runtime_state = {
+                "journal": self.journal.to_doc() if self.journal is not None else [],
+                "trace": _policy_json_value(getattr(self.runtime, "trace", [])),
+                "proposer_client_posts": int(
+                    getattr(getattr(self.runtime, "proposer", None), "posts_sent", 0)
+                ),
+            }
+        elif runtime_kind is PolicyRuntimeKindV2.LLM:
+            runtime_state = {
+                "client_posts": int(
+                    getattr(getattr(self.runtime, "client", None), "posts_sent", 0)
+                )
+            }
+        rng = getattr(self.runtime, "rng", None)
+        telemetry = {}
+        if self.services.telemetry is not None:
+            snapshot = self.services.telemetry.snapshot()
+            if self.services.agent_id in snapshot:
+                telemetry[self.services.agent_id] = {
+                    key: value
+                    for key, value in snapshot[self.services.agent_id].items()
+                    if key != "total_ms"
+                }
+        return PolicyStateV2.create(
+            policy_id=self.descriptor.descriptor_id,
+            agent_id=self.services.agent_id,
+            player_id=self.services.player_id,
+            turn=turn,
+            proposal_id=proposal_id,
+            runtime_kind=runtime_kind,
+            rng_state=(RandomStateV2.from_random(rng) if isinstance(rng, random.Random) else None),
+            runtime_state=runtime_state,
+            operations=self.services.operation_delta(),
+            telemetry=telemetry,
+            model_posts=self.services.model_posts,
+        )
+
+    def restore_state(self, state: PolicyStateV2, *, spend_attempts: int) -> None:
+        if (
+            state.policy_id != self.descriptor.descriptor_id
+            or state.agent_id != self.services.agent_id
+            or state.player_id != self.services.player_id
+        ):
+            raise ContractError("policy state identity does not match configured runtime")
+        expected_kind = PolicyRuntimeKindV2(self.descriptor.policy_kind.value)
+        if state.runtime_kind is not expected_kind:
+            raise ContractError("policy runtime state kind does not match descriptor")
+        if state.rng_state is not None:
+            self.runtime.rng = state.rng_state.to_random()
+        runtime_state = state.runtime_state
+        if expected_kind is PolicyRuntimeKindV2.PLANNER:
+            if set(runtime_state) != {"journal", "trace", "proposer_client_posts"}:
+                raise ContractError("planner runtime state has unknown or missing fields")
+            if self.journal is None:
+                raise ContractError("planner runtime has no V2 journal")
+            self.journal.restore(runtime_state["journal"])
+            trace = runtime_state["trace"]
+            if not isinstance(trace, list):
+                raise ContractError("planner runtime trace must be a list")
+            self.runtime.trace = copy.deepcopy(trace)
+            proposer = getattr(self.runtime, "proposer", None)
+            if proposer is not None and hasattr(proposer, "posts_sent"):
+                proposer.posts_sent = max(
+                    int(runtime_state["proposer_client_posts"]), spend_attempts
+                )
+        elif expected_kind is PolicyRuntimeKindV2.LLM:
+            if set(runtime_state) != {"client_posts"}:
+                raise ContractError("LLM runtime state has unknown or missing fields")
+            client = getattr(self.runtime, "client", None)
+            if client is None or not hasattr(client, "posts_sent"):
+                raise ContractError("LLM runtime has no restorable request counter")
+            client.posts_sent = max(int(runtime_state["client_posts"]), spend_attempts)
+        elif runtime_state:
+            raise ContractError("scripted runtime state must be empty")
+        self.services.model_posts = max(state.model_posts, spend_attempts)
+
+    def restore_spend_attempts(self, attempts: int) -> None:
+        """Restore the crash-window counter even when no state checkpoint exists."""
+
+        self.services.model_posts = max(self.services.model_posts, attempts)
+        if self.descriptor.policy_kind is PolicyKindV2.LLM:
+            client = getattr(self.runtime, "client", None)
+        elif self.descriptor.policy_kind is PolicyKindV2.PLANNER:
+            client = getattr(self.runtime, "proposer", None)
+        else:
+            client = None
+        if client is not None and hasattr(client, "posts_sent"):
+            client.posts_sent = max(int(getattr(client, "posts_sent", 0)), attempts)
 
     async def aclose(self) -> None:
         close = getattr(self.runtime, "aclose", None)
@@ -737,7 +997,117 @@ class ReplayPolicyRuntimeV2:
         return self.proposal
 
 
-def policy_descriptor_v2(profile: AgentProfile) -> PolicyDescriptorV2:
+def snapshot_policy_state_v2(
+    runtime: AgentRuntimeV2,
+    services: PolicyServicesV2,
+    *,
+    turn: int,
+    proposal_id: str | None,
+) -> PolicyStateV2:
+    """Snapshot known runtimes; external proposal sources remain non-resumable."""
+
+    if isinstance(runtime, LegacyPolicyRuntimeV2):
+        return runtime.snapshot_state(turn=turn, proposal_id=proposal_id)
+    runtime_kind = (
+        PolicyRuntimeKindV2.REPLAY
+        if isinstance(runtime, ReplayPolicyRuntimeV2)
+        else PolicyRuntimeKindV2.EXTERNAL
+    )
+    telemetry: dict[str, Any] = {}
+    if services.telemetry is not None:
+        snapshot = services.telemetry.snapshot()
+        if services.agent_id in snapshot:
+            telemetry[services.agent_id] = {
+                key: value
+                for key, value in snapshot[services.agent_id].items()
+                if key != "total_ms"
+            }
+    return PolicyStateV2.create(
+        policy_id=runtime.descriptor.descriptor_id,
+        agent_id=services.agent_id,
+        player_id=services.player_id,
+        turn=turn,
+        proposal_id=proposal_id,
+        runtime_kind=runtime_kind,
+        rng_state=None,
+        runtime_state={},
+        operations=services.operation_delta(),
+        telemetry=telemetry,
+        model_posts=services.model_posts,
+    )
+
+
+def restore_policy_history_v2(
+    runtime: AgentRuntimeV2,
+    services: PolicyServicesV2,
+    states: tuple[PolicyStateV2, ...],
+    *,
+    spend_attempts: int,
+) -> None:
+    """Restore one seat from ordered trust-root deltas plus durable spend."""
+
+    for state in states:
+        services.restore_operations(state.operations)
+    if states:
+        latest = states[-1]
+        if latest.model_posts > spend_attempts:
+            raise ContractError("policy state claims provider attempts absent from the ledger")
+        if services.telemetry is not None:
+            services.telemetry.merge_snapshot(latest.telemetry)
+        if not isinstance(runtime, LegacyPolicyRuntimeV2):
+            raise ContractError("external and replay policy runtimes cannot resume")
+        runtime.restore_state(latest, spend_attempts=spend_attempts)
+    elif isinstance(runtime, LegacyPolicyRuntimeV2):
+        runtime.restore_spend_attempts(spend_attempts)
+    elif spend_attempts:
+        raise ContractError("external policy spend cannot resume without state")
+
+
+def _qualified_type(value: Any) -> str | None:
+    if value is None:
+        return None
+    kind = type(value)
+    return f"{kind.__module__}.{kind.__qualname__}"
+
+
+def _runtime_identity_v2(profile: AgentProfile, runtime: Any | None) -> dict[str, Any]:
+    """Return only behavior-defining, secret-free construction controls."""
+
+    identity: dict[str, Any] = {"runtime_class": _qualified_type(runtime)}
+    rng = getattr(runtime, "rng", None)
+    identity["initial_rng_state_sha256"] = (
+        sha256_hex(canonical(RandomStateV2.from_random(rng).to_doc()))
+        if isinstance(rng, random.Random)
+        else None
+    )
+    if profile.policy == "planner":
+        bandit = getattr(runtime, "bandit", None)
+        bandit_doc = None
+        if bandit is not None:
+            to_doc = getattr(bandit, "to_doc", None)
+            if not callable(to_doc):
+                raise ContractError("planner bandit has no canonical identity document")
+            bandit_doc = _policy_json_value(to_doc(), "$policy.bandit")
+        weights = _policy_json_value(
+            getattr(runtime, "weights", None),
+            "$policy.weights",
+        )
+        identity["planner"] = {
+            "method": getattr(runtime, "method", None),
+            "budget": getattr(runtime, "budget", None),
+            "weights": weights,
+            "bandit_sha256": (
+                sha256_hex(canonical(bandit_doc)) if bandit_doc is not None else None
+            ),
+        }
+    return identity
+
+
+def policy_descriptor_v2(
+    profile: AgentProfile,
+    *,
+    runtime: Any | None = None,
+) -> PolicyDescriptorV2:
     """Build a stable, secret-free descriptor for one configured policy seat."""
 
     kind = (
@@ -750,18 +1120,40 @@ def policy_descriptor_v2(profile: AgentProfile) -> PolicyDescriptorV2:
     llm = profile.llm if profile.policy == "llm" else profile.proposer
     provider: str | None = None
     model: str | None = None
-    if kind is PolicyKindV2.LLM:
-        host = urlparse(llm.base_url).hostname if llm is not None else None
+    llm_identity: dict[str, Any] | None = None
+    if llm is not None:
+        try:
+            endpoint = urlparse(llm.base_url)
+            port = endpoint.port
+        except ValueError:
+            raise ContractError("policy provider endpoint is malformed") from None
+        host = endpoint.hostname
         provider = host or "configured-http"
         model = llm.model_id
+        llm_identity = {
+            "scheme": endpoint.scheme.casefold(),
+            "host": endpoint.hostname,
+            "port": port,
+            "path": endpoint.path,
+            "model_id": llm.model_id,
+            "max_tokens": llm.max_tokens,
+            "max_tool_rounds": llm.max_tool_rounds,
+            "max_result_chars": llm.max_result_chars,
+            "request_timeout_hex": float(llm.request_timeout_s).hex(),
+            "max_retries": llm.max_retries,
+            "max_requests_per_match": llm.max_requests_per_match,
+        }
+    loaded_case_base = getattr(runtime, "case_base", None)
+    case_base_digest = getattr(loaded_case_base, "artifact_sha256", None)
     safe_identity = {
         "agent_id": profile.agent_id,
         "player_id": profile.player_id,
         "policy": profile.policy,
         "seed": profile.seed,
-        "model": model,
-        "case_base": getattr(profile.case_base, "path", None),
-        "proposer_model": getattr(profile.proposer, "model_id", None),
+        "llm": llm_identity,
+        "case_base_path": getattr(profile.case_base, "path", None),
+        "case_base_sha256": case_base_digest,
+        "runtime": _runtime_identity_v2(profile, runtime),
     }
     return PolicyDescriptorV2.create(
         policy_kind=kind,
@@ -790,14 +1182,30 @@ def build_policy_runtime_v2(
             strategy=services.strategy,
             on_post=services.note_model_post,
         )
+    # Programmatically injected mature runtimes are still subject to the V2
+    # spend trust root. Rebind their provider-attempt hook before any turn can
+    # issue a POST; the callback carries counts only, never request bytes.
+    for client_name in ("client", "proposer"):
+        client = getattr(legacy, client_name, None)
+        if client is not None and hasattr(client, "on_post"):
+            client.on_post = services.note_model_post
+    journal = (
+        InMemoryPlannerJournalV2()
+        if profile.policy == "planner"
+        else None
+    )
     bind = getattr(legacy, "bind_services", None)
     if callable(bind):
+        bind_kwargs = {"diary": services.diary, "strategy": services.strategy}
+        if journal is not None:
+            bind_kwargs["journal"] = journal
         with contextlib.suppress(TypeError):
-            bind(diary=services.diary, strategy=services.strategy)
+            bind(**bind_kwargs)
     return LegacyPolicyRuntimeV2(
         runtime=legacy,
-        descriptor=policy_descriptor_v2(profile),
+        descriptor=policy_descriptor_v2(profile, runtime=legacy),
         services=services,
+        journal=journal,
     )
 
 

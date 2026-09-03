@@ -473,7 +473,7 @@ class EpisodeRecorderV2:
         event_type: EventTypeV2,
         model: Any,
         *,
-        turn_id: int,
+        turn_id: int | None,
         correlation_id: str,
         causation_id: str | None = None,
     ) -> ArtifactRefV2:

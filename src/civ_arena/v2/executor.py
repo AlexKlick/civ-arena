@@ -654,7 +654,11 @@ class TransactionalExecutorV2:
             self._record_reference(
                 EventTypeV2.OBSERVATION_RECORDED,
                 post_observation,
-                turn=observation.turn,
+                # The final seat's end_turn advances the simulator's public
+                # turn counter. Observation event envelopes follow the
+                # observation they carry; the receipt remains bound to the
+                # proposal's pre-observation turn below.
+                turn=post_observation.turn,
                 correlation_id=correlation_id,
             )
             verification = verify_observable_postconditions(action, post_observation)

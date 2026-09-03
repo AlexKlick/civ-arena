@@ -28,6 +28,7 @@ SCHEMA_FILES = (
     "graph.json",
     "descriptor.json",
     "artifact.json",
+    "policy-state.json",
     "receipt.json",
     "event.json",
 )

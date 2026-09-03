@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from civ_arena.canonical import canonical
-from civ_arena.v1_compat import V1CompatibilityError, load_v1_events_read_only
+from civ_arena.v1_compat import (
+    V1CompatibilityError,
+    load_v1_config_read_only,
+    load_v1_events_read_only,
+)
 from civ_arena.v2 import (
     ActionGraphCompilerV2,
     ActionIntentV2,
@@ -455,3 +459,21 @@ def test_v1_reader_does_not_accept_v2_as_historical_input(tmp_path: Path) -> Non
     )
     with pytest.raises(V1CompatibilityError, match="unsupported schema"):
         load_v1_events_read_only(path)
+
+
+def test_frozen_v1_config_reader_never_enters_authoritative_v2(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.yaml"
+    path.write_text(
+        "schema: 1\nmatch:\n  match_id: legacy\n  seed: 9\nagents:\n"
+        "  - {agent_id: old, player_id: 0, policy: turtler}\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    spec = load_v1_config_read_only(path)
+    assert spec.schema == 1
+    assert path.read_bytes() == before
+
+    v2 = tmp_path / "v2.yaml"
+    v2.write_text("schema: 2\nmatch: {}\nagents: []\n", encoding="utf-8")
+    with pytest.raises(V1CompatibilityError, match="not schema 1"):
+        load_v1_config_read_only(v2)

@@ -10,6 +10,9 @@ merely a frozen reference to a mutable ``dict``.
 from __future__ import annotations
 
 import enum
+import json
+import math
+import random
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -1821,6 +1824,419 @@ class ArtifactRefV2:
         return cls(**raw)
 
 
+def _canonical_object_json(text: str, field: str) -> dict[str, Any]:
+    """Parse one embedded canonical object without admitting float state."""
+
+    try:
+        value = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        raise ContractError(f"{field} must be canonical JSON") from None
+    if not isinstance(value, dict):
+        raise ContractError(f"{field} must encode a JSON object")
+    try:
+        encoded = canonical(value)
+    except TypeError:
+        raise ContractError(f"{field} must contain canonical integer state") from None
+    if encoded != text:
+        raise ContractError(f"{field} must use canonical JSON bytes")
+    return value
+
+
+_FORBIDDEN_POLICY_STATE_KEYS = frozenset(
+    {
+        "adapter",
+        "api_key",
+        "api_key_env",
+        "authorization",
+        "cookie",
+        "environment",
+        "headers",
+        "opponent_rng",
+        "password",
+        "private_state",
+        "raw_http_body",
+        "referee",
+        "secret",
+    }
+)
+_FORBIDDEN_POLICY_STATE_KEY_TOKENS = frozenset(
+    key.replace("_", "") for key in _FORBIDDEN_POLICY_STATE_KEYS
+)
+_POLICY_OPERATION_TOOLS = frozenset(
+    {
+        "get_strategy",
+        "recall_lessons",
+        "record_lesson",
+        "record_prediction",
+        "set_goal",
+        "write_diary",
+    }
+)
+
+
+def _assert_policy_state_is_redacted(value: Any, field: str) -> None:
+    """Reject private-engine and provider-secret fields at any nesting depth."""
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).casefold().replace("-", "_")
+            if normalized.replace("_", "") in _FORBIDDEN_POLICY_STATE_KEY_TOKENS:
+                raise ContractError(f"{field} contains prohibited field {key!r}")
+            _assert_policy_state_is_redacted(child, field)
+    elif isinstance(value, list):
+        for child in value:
+            _assert_policy_state_is_redacted(child, field)
+
+
+@dataclass(frozen=True)
+class RandomStateV2:
+    """Portable, float-free mirror of ``random.Random.getstate()``."""
+
+    version: int
+    state: tuple[int, ...]
+    gauss_next: str | None
+
+    SCHEMA_REF: ClassVar[str] = "urn:civ-arena:policy-state:2#/$defs/RandomStateV2"
+
+    def __post_init__(self) -> None:
+        if self.gauss_next is not None:
+            try:
+                value = float.fromhex(self.gauss_next)
+            except ValueError:
+                raise ContractError("rng gaussian cache is not a hexadecimal float") from None
+            if not math.isfinite(value) or value.hex() != self.gauss_next:
+                raise ContractError("rng gaussian cache is not finite and canonical")
+        validate_doc(self.SCHEMA_REF, self.to_doc())
+        try:
+            self.to_random()
+        except (TypeError, ValueError):
+            raise ContractError("rng state is not accepted by the runtime") from None
+
+    @classmethod
+    def from_random(cls, source: random.Random) -> RandomStateV2:
+        version, state, gauss_next = source.getstate()
+        return cls(
+            version=version,
+            state=tuple(state),
+            gauss_next=gauss_next.hex() if gauss_next is not None else None,
+        )
+
+    def to_random(self) -> random.Random:
+        target = random.Random()
+        gauss_next = (
+            float.fromhex(self.gauss_next) if self.gauss_next is not None else None
+        )
+        target.setstate((self.version, self.state, gauss_next))
+        return target
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "state": list(self.state),
+            "gauss_next": self.gauss_next,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> RandomStateV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(raw["version"], tuple(raw["state"]), raw["gauss_next"])
+
+
+@dataclass(frozen=True)
+class PolicyOperationV2:
+    """One canonical policy-only service operation.
+
+    Tool arguments/results are embedded as canonical JSON strings so the
+    schema remains closed while retaining the mature tools' distinct record
+    shapes. The Python mirror parses and validates those strings eagerly.
+    """
+
+    agent_id: str
+    player_id: int
+    turn: int
+    sequence: int
+    tool: str
+    args_json: str
+    result_json: str
+
+    SCHEMA_REF: ClassVar[str] = (
+        "urn:civ-arena:policy-state:2#/$defs/PolicyOperationV2"
+    )
+
+    def __post_init__(self) -> None:
+        if self.tool not in _POLICY_OPERATION_TOOLS:
+            raise ContractError("policy operation tool is not registered")
+        args = _canonical_object_json(self.args_json, "policy operation args_json")
+        result = _canonical_object_json(self.result_json, "policy operation result_json")
+        _assert_policy_state_is_redacted(args, "policy operation args_json")
+        _assert_policy_state_is_redacted(result, "policy operation result_json")
+        validate_doc(self.SCHEMA_REF, self.to_doc())
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        agent_id: str,
+        player_id: int,
+        turn: int,
+        sequence: int,
+        tool: str,
+        args: Mapping[str, Any],
+        result: Mapping[str, Any],
+    ) -> PolicyOperationV2:
+        return cls(
+            agent_id=agent_id,
+            player_id=player_id,
+            turn=turn,
+            sequence=sequence,
+            tool=tool,
+            args_json=canonical(dict(args)),
+            result_json=canonical(dict(result)),
+        )
+
+    @property
+    def args(self) -> dict[str, Any]:
+        return _canonical_object_json(self.args_json, "policy operation args_json")
+
+    @property
+    def result(self) -> dict[str, Any]:
+        return _canonical_object_json(self.result_json, "policy operation result_json")
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "player_id": self.player_id,
+            "turn": self.turn,
+            "sequence": self.sequence,
+            "tool": self.tool,
+            "args_json": self.args_json,
+            "result_json": self.result_json,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> PolicyOperationV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(**raw)
+
+
+class PolicyRuntimeKindV2(enum.StrEnum):
+    SCRIPTED = "scripted"
+    PLANNER = "planner"
+    LLM = "llm"
+    REPLAY = "replay"
+    EXTERNAL = "external"
+
+
+@dataclass(frozen=True)
+class PolicyStateV2:
+    """Observable-only policy checkpoint carried by the episode trust root."""
+
+    state_id: str
+    policy_id: str
+    agent_id: str
+    player_id: int
+    turn: int
+    proposal_id: str | None
+    runtime_kind: PolicyRuntimeKindV2
+    rng_state: RandomStateV2 | None
+    runtime_state_json: str
+    operations: tuple[PolicyOperationV2, ...]
+    telemetry_json: str
+    model_posts: int
+    schema: int = SCHEMA_V2
+
+    SCHEMA_REF: ClassVar[str] = "urn:civ-arena:policy-state:2#/$defs/PolicyStateV2"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.runtime_kind, PolicyRuntimeKindV2):
+            raise ContractError("policy runtime kind must be PolicyRuntimeKindV2")
+        if tuple(sorted(self.operations, key=lambda item: item.sequence)) != self.operations:
+            raise ContractError("policy operations must be sorted by sequence")
+        if len({item.sequence for item in self.operations}) != len(self.operations):
+            raise ContractError("policy operation sequences must be unique within a state")
+        for operation in self.operations:
+            if (
+                operation.agent_id != self.agent_id
+                or operation.player_id != self.player_id
+                or operation.turn > self.turn
+            ):
+                raise ContractError("policy operation identity exceeds its state boundary")
+        runtime_state = _canonical_object_json(
+            self.runtime_state_json, "runtime_state_json"
+        )
+        telemetry = _canonical_object_json(self.telemetry_json, "telemetry_json")
+        _assert_policy_state_is_redacted(runtime_state, "runtime_state_json")
+        _assert_policy_state_is_redacted(telemetry, "telemetry_json")
+        doc = self.to_doc()
+        validate_doc(self.SCHEMA_REF, doc)
+        _assert_identity(doc, "state_id")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_id: str,
+        agent_id: str,
+        player_id: int,
+        turn: int,
+        proposal_id: str | None,
+        runtime_kind: PolicyRuntimeKindV2,
+        rng_state: RandomStateV2 | None,
+        runtime_state: Mapping[str, Any],
+        operations: tuple[PolicyOperationV2, ...] | list[PolicyOperationV2],
+        telemetry: Mapping[str, Any],
+        model_posts: int,
+    ) -> PolicyStateV2:
+        ordered = tuple(sorted(operations, key=lambda item: item.sequence))
+        body = {
+            "schema": SCHEMA_V2,
+            "state_id": ZERO_DIGEST,
+            "policy_id": policy_id,
+            "agent_id": agent_id,
+            "player_id": player_id,
+            "turn": turn,
+            "proposal_id": proposal_id,
+            "runtime_kind": runtime_kind.value,
+            "rng_state": rng_state.to_doc() if rng_state is not None else None,
+            "runtime_state_json": canonical(dict(runtime_state)),
+            "operations": [item.to_doc() for item in ordered],
+            "telemetry_json": canonical(dict(telemetry)),
+            "model_posts": model_posts,
+        }
+        return cls(
+            state_id=_semantic_id(body, "state_id"),
+            policy_id=policy_id,
+            agent_id=agent_id,
+            player_id=player_id,
+            turn=turn,
+            proposal_id=proposal_id,
+            runtime_kind=runtime_kind,
+            rng_state=rng_state,
+            runtime_state_json=body["runtime_state_json"],
+            operations=ordered,
+            telemetry_json=body["telemetry_json"],
+            model_posts=model_posts,
+        )
+
+    @property
+    def runtime_state(self) -> dict[str, Any]:
+        return _canonical_object_json(self.runtime_state_json, "runtime_state_json")
+
+    @property
+    def telemetry(self) -> dict[str, Any]:
+        return _canonical_object_json(self.telemetry_json, "telemetry_json")
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "state_id": self.state_id,
+            "policy_id": self.policy_id,
+            "agent_id": self.agent_id,
+            "player_id": self.player_id,
+            "turn": self.turn,
+            "proposal_id": self.proposal_id,
+            "runtime_kind": self.runtime_kind.value,
+            "rng_state": self.rng_state.to_doc() if self.rng_state is not None else None,
+            "runtime_state_json": self.runtime_state_json,
+            "operations": [item.to_doc() for item in self.operations],
+            "telemetry_json": self.telemetry_json,
+            "model_posts": self.model_posts,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> PolicyStateV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(
+            state_id=raw["state_id"],
+            policy_id=raw["policy_id"],
+            agent_id=raw["agent_id"],
+            player_id=raw["player_id"],
+            turn=raw["turn"],
+            proposal_id=raw["proposal_id"],
+            runtime_kind=PolicyRuntimeKindV2(raw["runtime_kind"]),
+            rng_state=(
+                RandomStateV2.from_doc(raw["rng_state"])
+                if raw["rng_state"] is not None
+                else None
+            ),
+            runtime_state_json=raw["runtime_state_json"],
+            operations=tuple(
+                PolicyOperationV2.from_doc(item) for item in raw["operations"]
+            ),
+            telemetry_json=raw["telemetry_json"],
+            model_posts=raw["model_posts"],
+            schema=raw["schema"],
+        )
+
+
+@dataclass(frozen=True)
+class PolicySpendV2:
+    """One durably counted provider POST attempt, with no transport secret."""
+
+    spend_id: str
+    policy_id: str
+    agent_id: str
+    player_id: int
+    turn: int
+    attempt: int
+    schema: int = SCHEMA_V2
+
+    SCHEMA_REF: ClassVar[str] = "urn:civ-arena:policy-state:2#/$defs/PolicySpendV2"
+
+    def __post_init__(self) -> None:
+        doc = self.to_doc()
+        validate_doc(self.SCHEMA_REF, doc)
+        _assert_identity(doc, "spend_id")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_id: str,
+        agent_id: str,
+        player_id: int,
+        turn: int,
+        attempt: int,
+    ) -> PolicySpendV2:
+        body = {
+            "schema": SCHEMA_V2,
+            "spend_id": ZERO_DIGEST,
+            "policy_id": policy_id,
+            "agent_id": agent_id,
+            "player_id": player_id,
+            "turn": turn,
+            "attempt": attempt,
+        }
+        return cls(
+            spend_id=_semantic_id(body, "spend_id"),
+            policy_id=policy_id,
+            agent_id=agent_id,
+            player_id=player_id,
+            turn=turn,
+            attempt=attempt,
+        )
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "spend_id": self.spend_id,
+            "policy_id": self.policy_id,
+            "agent_id": self.agent_id,
+            "player_id": self.player_id,
+            "turn": self.turn,
+            "attempt": self.attempt,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> PolicySpendV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(**raw)
+
+
 @dataclass(frozen=True)
 class ValidationCommandV2:
     command: str
@@ -2067,6 +2483,129 @@ class ExecutionModeV2(enum.StrEnum):
     DAG = "dag"
 
 
+class ChaosSpecV2(enum.StrEnum):
+    AMBIENT_LIKE_TRAP = "ambient_like_trap"
+    CHANGE_RESEARCH = "change_research"
+    FLIP_PRODUCTION = "flip_production"
+    MOVE_UNCOMMANDED_UNIT = "move_uncommanded_unit"
+    SPAWN_FREE_UNIT = "spawn_free_unit"
+    STEAL_GOLD = "steal_gold"
+
+
+class ChaosHookV2(enum.StrEnum):
+    BEGIN_PHASE = "begin_phase"
+    ACT = "act"
+    END_PHASE = "end_phase"
+
+
+class WatchdogModeV2(enum.StrEnum):
+    FLAG_AND_CONTINUE = "flag_and_continue"
+    ROLLBACK = "rollback"
+
+
+@dataclass(frozen=True)
+class ChaosEventConfigV2:
+    """One deterministic fake-engine mutation scheduled by the episode."""
+
+    spec: ChaosSpecV2
+    hook: ChaosHookV2
+    offset: int
+
+    SCHEMA_REF: ClassVar[str] = (
+        "urn:civ-arena:receipt:2#/$defs/ChaosEventConfigV2"
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.spec, ChaosSpecV2):
+            raise ContractError("chaos spec must be ChaosSpecV2")
+        if not isinstance(self.hook, ChaosHookV2):
+            raise ContractError("chaos hook must be ChaosHookV2")
+        validate_doc(self.SCHEMA_REF, self.to_doc())
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "spec": self.spec.value,
+            "hook": self.hook.value,
+            "offset": self.offset,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> ChaosEventConfigV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(
+            spec=ChaosSpecV2(raw["spec"]),
+            hook=ChaosHookV2(raw["hook"]),
+            offset=raw["offset"],
+        )
+
+
+@dataclass(frozen=True)
+class EpisodeConfigV2:
+    """Replay-relevant controls custodied in the episode trust root.
+
+    ``max_turns`` is deliberately absent: a non-scored child may extend the
+    parent's horizon. Environment, policies, seed, compute and scored status
+    are already bound by ``EpisodeReceiptV2``.
+    """
+
+    config_id: str
+    watchdog_mode: WatchdogModeV2
+    violation_limit: int
+    chaos: tuple[ChaosEventConfigV2, ...]
+    schema: int = SCHEMA_V2
+
+    SCHEMA_REF: ClassVar[str] = "urn:civ-arena:receipt:2#/$defs/EpisodeConfigV2"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.watchdog_mode, WatchdogModeV2):
+            raise ContractError("watchdog mode must be WatchdogModeV2")
+        if not all(isinstance(item, ChaosEventConfigV2) for item in self.chaos):
+            raise ContractError("episode chaos must contain ChaosEventConfigV2")
+        doc = self.to_doc()
+        validate_doc(self.SCHEMA_REF, doc)
+        _assert_identity(doc, "config_id")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        watchdog_mode: WatchdogModeV2,
+        violation_limit: int,
+        chaos: tuple[ChaosEventConfigV2, ...] | list[ChaosEventConfigV2] = (),
+    ) -> EpisodeConfigV2:
+        body = {
+            "schema": SCHEMA_V2,
+            "config_id": ZERO_DIGEST,
+            "watchdog_mode": watchdog_mode.value,
+            "violation_limit": violation_limit,
+            "chaos": [item.to_doc() for item in chaos],
+        }
+        body["config_id"] = _semantic_id(body, "config_id")
+        return cls.from_doc(body)
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "config_id": self.config_id,
+            "watchdog_mode": self.watchdog_mode.value,
+            "violation_limit": self.violation_limit,
+            "chaos": [item.to_doc() for item in self.chaos],
+        }
+
+    @classmethod
+    def from_doc(cls, doc: Mapping[str, Any]) -> EpisodeConfigV2:
+        raw = dict(doc)
+        validate_doc(cls.SCHEMA_REF, raw)
+        return cls(
+            config_id=raw["config_id"],
+            watchdog_mode=WatchdogModeV2(raw["watchdog_mode"]),
+            violation_limit=raw["violation_limit"],
+            chaos=tuple(ChaosEventConfigV2.from_doc(item) for item in raw["chaos"]),
+            schema=raw["schema"],
+        )
+
+
 @dataclass(frozen=True)
 class ComputeConfigV2:
     execution_mode: ExecutionModeV2
@@ -2271,10 +2810,13 @@ class EpisodeReceiptV2:
 
 class EventTypeV2(enum.StrEnum):
     EPISODE_STARTED = "EpisodeStarted"
+    EPISODE_CONFIG_RECORDED = "EpisodeConfigRecorded"
     OBSERVATION_RECORDED = "ObservationRecorded"
     LEGAL_ACTIONS_RECORDED = "LegalActionsRecorded"
     ACTION_GRAPH_COMPILED = "ActionGraphCompiled"
     POLICY_PROPOSAL_RECORDED = "PolicyProposalRecorded"
+    POLICY_STATE_RECORDED = "PolicyStateRecorded"
+    POLICY_SPEND_RECORDED = "PolicySpendRecorded"
     ACTION_AUTHORIZED = "ActionAuthorized"
     ACTION_EXECUTION_STARTED = "ActionExecutionStarted"
     ACTION_EXECUTION_COMPLETED = "ActionExecutionCompleted"
@@ -2291,10 +2833,13 @@ type EventPayloadValue = (
 
 EVENT_PAYLOAD_NAME: dict[EventTypeV2, str] = {
     EventTypeV2.EPISODE_STARTED: "artifact",
+    EventTypeV2.EPISODE_CONFIG_RECORDED: "artifact",
     EventTypeV2.OBSERVATION_RECORDED: "artifact",
     EventTypeV2.LEGAL_ACTIONS_RECORDED: "artifact",
     EventTypeV2.ACTION_GRAPH_COMPILED: "artifact",
     EventTypeV2.POLICY_PROPOSAL_RECORDED: "artifact",
+    EventTypeV2.POLICY_STATE_RECORDED: "artifact",
+    EventTypeV2.POLICY_SPEND_RECORDED: "artifact",
     EventTypeV2.ACTION_AUTHORIZED: "authorization",
     EventTypeV2.ACTION_EXECUTION_STARTED: "message_code",
     EventTypeV2.ACTION_EXECUTION_COMPLETED: "result",

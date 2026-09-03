@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -47,13 +48,35 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
             f"{where}: llm.api_key must not appear in config — "
             "use llm.api_key_env (name of the env var holding the key)"
         )
-    base_url = str(_require(block, "base_url", f"{where}.llm"))
-    api_key_env = str(_require(block, "api_key_env", f"{where}.llm"))
-    model_id = str(_require(block, "model_id", f"{where}.llm"))
-    if not base_url.startswith(("http://", "https://")):
+    base_url = _require(block, "base_url", f"{where}.llm")
+    api_key_env = _require(block, "api_key_env", f"{where}.llm")
+    model_id = _require(block, "model_id", f"{where}.llm")
+    if not isinstance(base_url, str):
         raise ConfigError(f"{where}.llm: base_url must be an http(s) URL")
-    if not api_key_env:
-        raise ConfigError(f"{where}.llm: api_key_env must be a non-empty name")
+    try:
+        endpoint = urlsplit(base_url)
+        port = endpoint.port
+    except ValueError:
+        raise ConfigError(f"{where}.llm: base_url is malformed") from None
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or endpoint.hostname is None
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or endpoint.query
+        or endpoint.fragment
+        or port is not None
+        and not 1 <= port <= 65_535
+    ):
+        raise ConfigError(
+            f"{where}.llm: base_url must be a credential-free http(s) origin/path"
+        )
+    if not isinstance(api_key_env, str) or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*", api_key_env
+    ):
+        raise ConfigError(f"{where}.llm: api_key_env must be an environment name")
+    if not isinstance(model_id, str) or not model_id:
+        raise ConfigError(f"{where}.llm: model_id must be a non-empty string")
     ints = {
         "max_tokens": block.get("max_tokens", 4096),
         "max_tool_rounds": block.get("max_tool_rounds", 16),
@@ -162,6 +185,61 @@ VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner"})
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
 VALID_EXECUTION_MODES = frozenset({"dag_tx", "sequential", "legal_list", "dag"})
+VALID_CHAOS_SPECS = frozenset(
+    {
+        "ambient_like_trap",
+        "change_research",
+        "flip_production",
+        "move_uncommanded_unit",
+        "spawn_free_unit",
+        "steal_gold",
+    }
+)
+VALID_CHAOS_HOOKS = frozenset({"begin_phase", "act", "end_phase"})
+
+V2_TOP_KEYS = frozenset({"schema", "match", "agents", "chaos"})
+V2_MATCH_KEYS = frozenset(
+    {
+        "adapter",
+        "checkpoint_every",
+        "execution_mode",
+        "match_id",
+        "max_graph_actions",
+        "max_replans_per_turn",
+        "max_turns",
+        "recall_runs",
+        "scored",
+        "seed",
+        "violation_limit",
+        "watchdog_mode",
+    }
+)
+V2_AGENT_KEYS = frozenset(
+    {
+        "agent_id",
+        "case_base",
+        "llm",
+        "model",
+        "player_id",
+        "policy",
+        "proposer",
+        "seed",
+    }
+)
+V2_LLM_KEYS = frozenset(
+    {
+        "api_key_env",
+        "base_url",
+        "max_requests_per_match",
+        "max_result_chars",
+        "max_retries",
+        "max_tokens",
+        "max_tool_rounds",
+        "model_id",
+        "request_timeout_s",
+    }
+)
+V2_CHAOS_KEYS = frozenset({"hook", "offset", "spec"})
 
 
 def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
@@ -177,19 +255,45 @@ def parse_config(doc: dict[str, Any], *, require_v2: bool = False) -> MatchSpec:
     if require_v2 and schema != 2:
         raise ConfigError("file-backed match configs require top-level schema: 2")
     if schema == 2:
-        unknown_top = set(doc) - {"schema", "match", "agents", "chaos"}
+        unknown_top = set(doc) - V2_TOP_KEYS
         if unknown_top:
             raise ConfigError(f"config: unknown V2 keys {sorted(unknown_top)}")
     match = _require(doc, "match", "config")
     if not isinstance(match, dict):
         raise ConfigError("config.match must be a mapping")
-    match_id = str(_require(match, "match_id", "match"))
-    seed = int(_require(match, "seed", "match"))
-    max_turns = int(match.get("max_turns", 100))
-    adapter = str(match.get("adapter", "simulator"))
-    watchdog_mode = str(match.get("watchdog_mode", "flag_and_continue"))
-    violation_limit = int(match.get("violation_limit", 5))
-    checkpoint_every = int(match.get("checkpoint_every", 5))
+    if schema == 2 and (unknown_match := set(match) - V2_MATCH_KEYS):
+        raise ConfigError(f"match: unknown V2 keys {sorted(unknown_match)}")
+    raw_match_id = _require(match, "match_id", "match")
+    raw_seed = _require(match, "seed", "match")
+    raw_max_turns = match.get("max_turns", 100)
+    raw_adapter = match.get("adapter", "simulator")
+    raw_watchdog_mode = match.get("watchdog_mode", "flag_and_continue")
+    raw_violation_limit = match.get("violation_limit", 5)
+    raw_checkpoint_every = match.get("checkpoint_every", 5)
+    if schema == 2:
+        if not isinstance(raw_match_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", raw_match_id
+        ):
+            raise ConfigError("match.match_id must be a bare V2 episode id")
+        for name, value in (
+            ("seed", raw_seed),
+            ("max_turns", raw_max_turns),
+            ("violation_limit", raw_violation_limit),
+            ("checkpoint_every", raw_checkpoint_every),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ConfigError(f"match.{name} must be an integer")
+        if not isinstance(raw_adapter, str):
+            raise ConfigError("match.adapter must be a string")
+        if not isinstance(raw_watchdog_mode, str):
+            raise ConfigError("match.watchdog_mode must be a string")
+    match_id = str(raw_match_id)
+    seed = int(raw_seed)
+    max_turns = int(raw_max_turns)
+    adapter = str(raw_adapter)
+    watchdog_mode = str(raw_watchdog_mode)
+    violation_limit = int(raw_violation_limit)
+    checkpoint_every = int(raw_checkpoint_every)
     if schema == 2:
         for key in (
             "execution_mode",
@@ -198,7 +302,10 @@ def parse_config(doc: dict[str, Any], *, require_v2: bool = False) -> MatchSpec:
             "max_replans_per_turn",
         ):
             _require(match, key, "match")
-    execution_mode = str(match.get("execution_mode", "dag_tx"))
+    raw_execution_mode = match.get("execution_mode", "dag_tx")
+    if schema == 2 and not isinstance(raw_execution_mode, str):
+        raise ConfigError("match.execution_mode must be a string")
+    execution_mode = str(raw_execution_mode)
     scored = match.get("scored", False)
     max_graph_actions = match.get("max_graph_actions", 1024)
     max_replans_per_turn = match.get("max_replans_per_turn", 2)
@@ -207,8 +314,10 @@ def parse_config(doc: dict[str, Any], *, require_v2: bool = False) -> MatchSpec:
         raise ConfigError(f"unknown adapter {adapter!r}")
     if watchdog_mode not in VALID_WATCHDOG_MODES:
         raise ConfigError(f"unknown watchdog_mode {watchdog_mode!r}")
-    if max_turns < 1 or checkpoint_every < 1:
-        raise ConfigError("max_turns and checkpoint_every must be >= 1")
+    if max_turns < 1 or checkpoint_every < 1 or violation_limit < 0:
+        raise ConfigError(
+            "max_turns and checkpoint_every must be >= 1; violation_limit must be >= 0"
+        )
     if execution_mode not in VALID_EXECUTION_MODES:
         raise ConfigError(f"unknown execution_mode {execution_mode!r}")
     if schema == 2 and execution_mode != "dag_tx":
@@ -226,17 +335,60 @@ def parse_config(doc: dict[str, Any], *, require_v2: bool = False) -> MatchSpec:
             or not 0 <= max_replans_per_turn <= 100:
         raise ConfigError("match.max_replans_per_turn must be an integer in [0, 100]")
 
+    agents_raw = doc.get("agents", [])
+    if schema == 2 and not isinstance(agents_raw, list):
+        raise ConfigError("config.agents must be a list")
     agents: list[AgentSpec] = []
     seen_players: set[int] = set()
     seen_agent_ids: set[str] = set()
-    for i, entry in enumerate(doc.get("agents", [])):
+    for i, entry in enumerate(agents_raw):
         where = f"agents[{i}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where}: agent entry must be a mapping")
+        if schema == 2 and (unknown_agent := set(entry) - V2_AGENT_KEYS):
+            raise ConfigError(f"{where}: unknown V2 keys {sorted(unknown_agent)}")
+        if schema == 2:
+            for block_name in ("llm", "proposer"):
+                block = entry.get(block_name)
+                if isinstance(block, dict) and (
+                    unknown_llm := set(block) - V2_LLM_KEYS
+                ):
+                    raise ConfigError(
+                        f"{where}.{block_name}: unknown V2 keys {sorted(unknown_llm)}"
+                    )
+            case_base = entry.get("case_base")
+            if isinstance(case_base, dict) and (unknown_case := set(case_base) - {"path"}):
+                raise ConfigError(
+                    f"{where}.case_base: unknown V2 keys {sorted(unknown_case)}"
+                )
+        raw_agent_id = _require(entry, "agent_id", where)
+        raw_player_id = _require(entry, "player_id", where)
+        raw_policy = _require(entry, "policy", where)
+        raw_agent_seed = entry.get("seed", seed * 10 + i)
+        raw_model = entry.get("model")
+        if schema == 2:
+            if not isinstance(raw_agent_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:@+,-]{0,159}", raw_agent_id
+            ):
+                raise ConfigError(f"{where}.agent_id is not a V2 identifier")
+            if (
+                not isinstance(raw_player_id, int)
+                or isinstance(raw_player_id, bool)
+                or raw_player_id < 0
+            ):
+                raise ConfigError(f"{where}.player_id must be a non-negative integer")
+            if not isinstance(raw_policy, str):
+                raise ConfigError(f"{where}.policy must be a string")
+            if not isinstance(raw_agent_seed, int) or isinstance(raw_agent_seed, bool):
+                raise ConfigError(f"{where}.seed must be an integer")
+            if raw_model is not None and not isinstance(raw_model, str):
+                raise ConfigError(f"{where}.model must be a string or null")
         agent = AgentSpec(
-            agent_id=str(_require(entry, "agent_id", where)),
-            player_id=int(_require(entry, "player_id", where)),
-            policy=str(_require(entry, "policy", where)),
-            seed=int(entry.get("seed", seed * 10 + i)),
-            model=entry.get("model"),  # display hint; parsed and ignored
+            agent_id=str(raw_agent_id),
+            player_id=int(raw_player_id),
+            policy=str(raw_policy),
+            seed=int(raw_agent_seed),
+            model=raw_model,  # display hint; parsed and ignored
             llm=_parse_llm(entry["llm"], where) if "llm" in entry else None,
             proposer=_parse_llm(entry["proposer"], f"{where}.proposer")
             if "proposer" in entry else None,
@@ -277,13 +429,38 @@ def parse_config(doc: dict[str, Any], *, require_v2: bool = False) -> MatchSpec:
     if not agents:
         raise ConfigError("at least one agent is required")
 
+    chaos_raw = doc.get("chaos", [])
+    if schema == 2 and not isinstance(chaos_raw, list):
+        raise ConfigError("config.chaos must be a list")
+    if schema == 2 and len(chaos_raw) > 1024:
+        raise ConfigError("config.chaos must contain at most 1024 events")
     chaos: list[ChaosSpec] = []
-    for i, entry in enumerate(doc.get("chaos", [])):
-        chaos.append(ChaosSpec(
-            spec=str(_require(entry, "spec", f"chaos[{i}]")),
-            hook=str(entry.get("hook", "act")),
-            offset=int(entry.get("offset", 0)),
-        ))
+    for i, entry in enumerate(chaos_raw):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"chaos[{i}]: entry must be a mapping")
+        if schema == 2 and (unknown_chaos := set(entry) - V2_CHAOS_KEYS):
+            raise ConfigError(f"chaos[{i}]: unknown V2 keys {sorted(unknown_chaos)}")
+        raw_spec = _require(entry, "spec", f"chaos[{i}]")
+        raw_hook = entry.get("hook", "act")
+        raw_offset = entry.get("offset", 0)
+        if schema == 2:
+            if not isinstance(raw_spec, str) or raw_spec not in VALID_CHAOS_SPECS:
+                raise ConfigError(f"chaos[{i}].spec is not a registered mutation")
+            if not isinstance(raw_hook, str) or raw_hook not in VALID_CHAOS_HOOKS:
+                raise ConfigError(f"chaos[{i}].hook is not a registered hook")
+            if (
+                not isinstance(raw_offset, int)
+                or isinstance(raw_offset, bool)
+                or raw_offset < 0
+            ):
+                raise ConfigError(f"chaos[{i}].offset must be a non-negative integer")
+        chaos.append(
+            ChaosSpec(
+                spec=str(raw_spec),
+                hook=str(raw_hook),
+                offset=int(raw_offset),
+            )
+        )
 
     recall_runs_raw = match.get("recall_runs", [])
     if not isinstance(recall_runs_raw, list) or any(

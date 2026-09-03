@@ -21,7 +21,7 @@ from typing import Any
 
 from civ_arena.arena.coordinator import Arena
 from civ_arena.config import MatchSpec
-from civ_arena.v1_compat import load_v1_events_read_only
+from civ_arena.v1_compat import load_v1_config_read_only, load_v1_events_read_only
 
 # positional argument order per tool (mirrors session.tools signatures)
 ARG_ORDER: dict[str, list[str]] = {
@@ -185,16 +185,45 @@ def _load_records(path: Path) -> list[dict[str, Any]]:
     return list(load_v1_events_read_only(path).records)
 
 
+def _source_schema(run_dir: Path) -> int:
+    path = run_dir / "events.jsonl"
+    if path.is_symlink():
+        raise ValueError("replay event ledger path must not be a symlink")
+    try:
+        first = next(line for line in path.read_text(encoding="utf-8").splitlines() if line)
+        doc = json.loads(first)
+    except (OSError, StopIteration, UnicodeDecodeError, json.JSONDecodeError):
+        raise ValueError("replay event ledger has no readable first event") from None
+    if not isinstance(doc, dict) or type(doc.get("schema")) is not int:
+        raise ValueError("replay event ledger does not declare an integer schema")
+    return doc["schema"]
+
+
 async def _main_async(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="civ-arena-replay")
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--config", type=Path, required=True)
+    ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--replay-dir", type=Path, default=None)
     opts = ap.parse_args(argv)
 
-    from civ_arena.config import load_config
+    schema = _source_schema(opts.run_dir)
+    if schema == 2:
+        if opts.replay_dir is not None:
+            ap.error("V2 exact replay is read-only and does not accept --replay-dir")
+        from civ_arena.v2.replay import replay_fake_episode_v2
 
-    spec = load_config(opts.config)
+        result = await replay_fake_episode_v2(opts.run_dir)
+        print(
+            "REPLAY OK: "
+            f"{result.turn_receipt_count} receipts / {result.action_count} actions; "
+            f"final private hash {result.final_private_state_hash}"
+        )
+        return 0
+    if schema != 1:
+        ap.error(f"unsupported replay schema {schema}")
+    if opts.config is None:
+        ap.error("historical V1 replay requires --config")
+    spec = load_v1_config_read_only(opts.config)
     replay_dir = opts.replay_dir or (opts.run_dir.parent / f"{opts.run_dir.name}-replay")
     result = await replay_run(opts.run_dir, spec, replay_dir)
     if result["identical"]:

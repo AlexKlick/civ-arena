@@ -5,6 +5,47 @@
   "type": "object",
   "additionalProperties": false,
   "$defs": {
+    "ChaosEventConfigV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spec", "hook", "offset"],
+      "properties": {
+        "spec": {
+          "enum": [
+            "ambient_like_trap",
+            "change_research",
+            "flip_production",
+            "move_uncommanded_unit",
+            "spawn_free_unit",
+            "steal_gold"
+          ]
+        },
+        "hook": {"enum": ["begin_phase", "act", "end_phase"]},
+        "offset": {"type": "integer", "minimum": 0}
+      }
+    },
+    "EpisodeConfigV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "config_id",
+        "watchdog_mode",
+        "violation_limit",
+        "chaos"
+      ],
+      "properties": {
+        "schema": {"const": 2},
+        "config_id": {"$ref": "urn:civ-arena:common:2#/$defs/Digest"},
+        "watchdog_mode": {"enum": ["flag_and_continue", "rollback"]},
+        "violation_limit": {"type": "integer", "minimum": 0},
+        "chaos": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {"$ref": "#/$defs/ChaosEventConfigV2"}
+        }
+      }
+    },
     "ValidationCommandV2": {
       "type": "object",
       "additionalProperties": false,

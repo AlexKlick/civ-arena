@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,8 +14,16 @@ from civ_arena.config import LLMSpec
 from civ_arena.strategy.store import StrategyStore
 from civ_arena.v2.contracts import (
     ActionKindV2,
+    ArtifactRefV2,
+    ComputeConfigV2,
+    EpisodeTerminationV2,
+    EventTypeV2,
+    ExecutionModeV2,
     PolicyDescriptorV2,
     PolicyKindV2,
+    PolicyRuntimeKindV2,
+    PolicySpendV2,
+    PolicyStateV2,
     TurnContextV2,
     TurnProposalV2,
     TurnTerminationV2,
@@ -22,6 +32,7 @@ from civ_arena.v2.enumeration import ActionEnumeratorV2
 from civ_arena.v2.environment import simulator_facets_v2
 from civ_arena.v2.executor import TransactionalExecutorV2
 from civ_arena.v2.graph import ActionGraphCompilerV2
+from civ_arena.v2.ledger import EpisodeRecorderV2, ObjectStoreV2, load_events_v2
 from civ_arena.v2.policy import (
     ALL_ACTION_KINDS_V2,
     LegacyPolicyRuntimeV2,
@@ -29,6 +40,8 @@ from civ_arena.v2.policy import (
     ReplayPolicyRuntimeV2,
     build_policy_runtime_v2,
     policy_descriptor_v2,
+    restore_policy_history_v2,
+    snapshot_policy_state_v2,
 )
 from civ_arena.v2.schemas import ContractError
 from fakes import FakeModel, use
@@ -44,6 +57,109 @@ async def _turn_context(
     graph = ActionGraphCompilerV2().compile(observation, legal)
     descriptor = policy_descriptor_v2(profile)
     return environment, monitor, TurnContextV2(observation, legal, graph, descriptor), descriptor
+
+
+def _bind_context_policy(
+    context: TurnContextV2,
+    descriptor: PolicyDescriptorV2,
+) -> TurnContextV2:
+    return TurnContextV2(
+        context.observation,
+        context.legal_actions,
+        context.graph,
+        descriptor,
+    )
+
+
+def test_policy_descriptor_binds_loaded_case_base_bytes() -> None:
+    profile = AgentProfile(
+        "planner-with-cases",
+        0,
+        "planner",
+        13,
+        case_base=SimpleNamespace(path="cases.json"),
+    )
+    left = policy_descriptor_v2(
+        profile,
+        runtime=SimpleNamespace(
+            case_base=SimpleNamespace(artifact_sha256="a" * 64)
+        ),
+    )
+    right = policy_descriptor_v2(
+        profile,
+        runtime=SimpleNamespace(
+            case_base=SimpleNamespace(artifact_sha256="b" * 64)
+        ),
+    )
+    assert left.artifact_digest != right.artifact_digest
+    assert left.descriptor_id != right.descriptor_id
+
+
+def test_policy_descriptor_binds_planner_execution_controls() -> None:
+    profile = AgentProfile("planner-controls", 0, "planner", 13)
+    base = SimpleNamespace(
+        method="mcts",
+        budget=16,
+        weights=None,
+        bandit=None,
+        case_base=None,
+    )
+    weighted = SimpleNamespace(
+        method="mcts",
+        budget=16,
+        weights={"cities": 111, "units": -2},
+        bandit=None,
+        case_base=None,
+    )
+    smaller = SimpleNamespace(
+        method="mcts",
+        budget=4,
+        weights=None,
+        bandit=None,
+        case_base=None,
+    )
+
+    descriptors = {
+        policy_descriptor_v2(profile, runtime=runtime).descriptor_id
+        for runtime in (base, weighted, smaller)
+    }
+    assert len(descriptors) == 3
+
+
+def test_resume_restores_durable_provider_attempts_beyond_last_state() -> None:
+    llm = LLMSpec(
+        base_url="http://fake.local/anthropic/v1",
+        api_key_env="NEVER_READ",
+        model_id="fake-model",
+    )
+    profile = AgentProfile("llm-resume", 0, "llm", 19, llm=llm)
+    services = PolicyServicesV2(profile.agent_id, profile.player_id)
+    legacy = SimpleNamespace(client=SimpleNamespace(posts_sent=0))
+    runtime = LegacyPolicyRuntimeV2(
+        legacy,
+        policy_descriptor_v2(profile, runtime=legacy),
+        services,
+    )
+    state = PolicyStateV2.create(
+        policy_id=runtime.descriptor.descriptor_id,
+        agent_id=profile.agent_id,
+        player_id=profile.player_id,
+        turn=2,
+        proposal_id=None,
+        runtime_kind=PolicyRuntimeKindV2.LLM,
+        rng_state=None,
+        runtime_state={"client_posts": 1},
+        operations=[],
+        telemetry={},
+        model_posts=1,
+    )
+
+    restore_policy_history_v2(runtime, services, (state,), spend_attempts=3)
+
+    assert legacy.client.posts_sent == 3
+    assert services.model_posts == 3
+    with pytest.raises(ContractError, match="attempts absent from the ledger"):
+        restore_policy_history_v2(runtime, services, (state,), spend_attempts=0)
 
 
 class _InspectingRuntime:
@@ -149,6 +265,7 @@ async def test_real_scripted_runtime_produces_one_proposal_without_mutation() ->
     environment, monitor, context, _descriptor = await _turn_context(profile)
     services = PolicyServicesV2(profile.agent_id, profile.player_id)
     runtime = build_policy_runtime_v2(profile, services=services)
+    context = _bind_context_policy(context, runtime.descriptor)
     before = monitor.state_hash()
 
     proposal = await runtime.propose_turn(context)
@@ -171,6 +288,7 @@ async def test_real_planner_runtime_uses_the_same_proposal_boundary() -> None:
     environment, monitor, context, _descriptor = await _turn_context(profile)
     services = PolicyServicesV2(profile.agent_id, profile.player_id)
     runtime = build_policy_runtime_v2(profile, services=services)
+    context = _bind_context_policy(context, runtime.descriptor)
     before = monitor.state_hash()
 
     proposal = await runtime.propose_turn(context)
@@ -229,9 +347,9 @@ async def test_real_llm_runtime_uses_the_same_proposal_boundary() -> None:
         telemetry=services.telemetry,
         diary=services.diary,
         strategy=services.strategy,
-        on_post=services.note_model_post,
     )
     runtime = build_policy_runtime_v2(profile, services=services, runtime=legacy)
+    context = _bind_context_policy(context, runtime.descriptor)
     before = monitor.state_hash()
 
     proposal = await runtime.propose_turn(context)
@@ -248,6 +366,90 @@ async def test_real_llm_runtime_uses_the_same_proposal_boundary() -> None:
         episode_id="llm-v2",
     ).execute(proposal, context.observation, context.graph)
     assert receipt.termination is TurnTerminationV2.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_provider_attempts_and_policy_state_enter_the_v2_chain(
+    tmp_path: Path,
+) -> None:
+    llm = LLMSpec(
+        base_url="http://fake.local/anthropic/v1",
+        api_key_env="NEVER_READ",
+        model_id="fake-model",
+    )
+    profile = AgentProfile("llm-custody", 0, "llm", 31, llm=llm)
+    environment, _monitor, context, _descriptor = await _turn_context(profile)
+    services = PolicyServicesV2(
+        profile.agent_id,
+        profile.player_id,
+        telemetry=TelemetryRegistry(),
+    )
+    fake = FakeModel(
+        script=[
+            [use("set_research", {"tech_id": "MINING"})],
+            [use("end_turn")],
+        ]
+    )
+    legacy = LLMAgentRuntime.build(
+        profile,
+        client=fake,
+        telemetry=services.telemetry,
+        diary=services.diary,
+        strategy=services.strategy,
+    )
+    runtime = build_policy_runtime_v2(profile, services=services, runtime=legacy)
+    context = _bind_context_policy(context, runtime.descriptor)
+    recorder = EpisodeRecorderV2(
+        tmp_path,
+        episode_id="llm-custody",
+        environment=environment.descriptor,
+        policies=[runtime.descriptor],
+        seed=81,
+        compute=ComputeConfigV2(ExecutionModeV2.DAG_TX, 1024, 2),
+        scored=False,
+    )
+    services.bind_custody(runtime.descriptor.descriptor_id, recorder)
+    proposal = await runtime.propose_turn(context)
+    state = snapshot_policy_state_v2(
+        runtime,
+        services,
+        turn=1,
+        proposal_id=proposal.proposal_id,
+    )
+    recorder.record_reference(
+        EventTypeV2.POLICY_STATE_RECORDED,
+        state,
+        turn_id=1,
+        correlation_id="turn-1-p0",
+    )
+    services.mark_operations_durable()
+    services.unbind_custody()
+    recorder.terminate(EpisodeTerminationV2.FAILURE, turns_completed=0)
+    recorder.close()
+
+    events = load_events_v2(tmp_path / "events.jsonl")
+    spend_refs = [
+        event.payload_value
+        for event in events
+        if event.event_type is EventTypeV2.POLICY_SPEND_RECORDED
+    ]
+    assert len(spend_refs) == 2
+    store = ObjectStoreV2(tmp_path)
+    spends = [
+        PolicySpendV2.from_doc(store.read_doc(ref))
+        for ref in spend_refs
+        if isinstance(ref, ArtifactRefV2)
+    ]
+    assert [item.attempt for item in spends] == [1, 2]
+    state_ref = next(
+        event.payload_value
+        for event in events
+        if event.event_type is EventTypeV2.POLICY_STATE_RECORDED
+    )
+    assert isinstance(state_ref, ArtifactRefV2)
+    persisted = PolicyStateV2.from_doc(store.read_doc(state_ref))
+    assert persisted.model_posts == 2
+    assert persisted.runtime_state["client_posts"] == 2
 
 
 class _AbsentActionRuntime:

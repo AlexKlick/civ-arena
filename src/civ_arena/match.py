@@ -1,7 +1,11 @@
-"""Match CLI: run or resume a match from a config file.
+"""Authoritative V2 match CLI.
 
     uv run python -m civ_arena.match configs/duel.yaml [--run-dir runs]
-        [--crash-after-turn K] [--resume]
+        [--resume]
+
+New matches always write a fresh V2 episode. ``--resume`` verifies the
+terminal parent read-only and creates a hash-named child; it never truncates,
+appends to, or rewrites the parent ledger.
 """
 
 from __future__ import annotations
@@ -10,9 +14,9 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from civ_arena.arena.checkpoints import CheckpointManager
-from civ_arena.arena.coordinator import Arena
 from civ_arena.config import load_config
+from civ_arena.v2.arena import ArenaV2
+from civ_arena.v2.ledger import verify_ledger_v2
 
 
 async def _main_async(argv: list[str] | None = None) -> int:
@@ -21,41 +25,52 @@ async def _main_async(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-dir", type=Path, default=Path("runs"))
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--crash-after-turn", type=int, default=None,
-                    help="test-only: SIGKILL self just after the turn-K+1 lease")
+                    help=argparse.SUPPRESS)
     opts = ap.parse_args(argv)
 
     spec = load_config(opts.config)
-    run_dir = opts.run_dir / spec.match_id
-    arena = Arena(run_dir, spec)
+    if opts.crash_after_turn is not None:
+        raise SystemExit(
+            "--crash-after-turn belonged to the in-place V1 checkpoint path; "
+            "V2 never creates an unterminated episode as resume authority"
+        )
 
-    resume_state = None
+    parent_dir: Path | None = None
     if opts.resume:
-        ckpt = CheckpointManager(run_dir / "checkpoints",
-                                 spec.checkpoint_every).latest()
-        if ckpt is None:
-            raise SystemExit(f"no checkpoint found under {run_dir}/checkpoints")
-        if not CheckpointManager.verify_log_prefix(arena.log, ckpt):
-            raise SystemExit("log prefix does not match the latest checkpoint — "
-                             "refusing to resume")
-        resume_state = ckpt
-        print(f"resuming {spec.match_id} from turn {ckpt.turn} "
-              f"(seq {ckpt.seq}, instance {ckpt.game_instance_id_of_origin})")
+        parent_dir = opts.run_dir / spec.match_id
+        verified = verify_ledger_v2(parent_dir)
+        child_id = f"{spec.match_id}-child-{verified.terminal_event_hash[:12]}"
+        run_dir = opts.run_dir / child_id
+        print(
+            f"resuming {spec.match_id} as child {child_id} "
+            f"of terminal {verified.terminal_event_hash[:12]}"
+        )
+    else:
+        run_dir = opts.run_dir / spec.match_id
 
-    summary = await arena.run(resume_state=resume_state,
-                              crash_after_turn=opts.crash_after_turn)
+    summary = await ArenaV2(
+        run_dir,
+        spec,
+        parent_episode_dir=parent_dir,
+    ).run()
     _print_summary(summary)
-    return 0 if not summary.get("aborted") else 3
+    return 0 if summary["termination_reason"] == "success" else 3
 
 
 def _print_summary(summary: dict) -> None:
     print(f"\nmatch {summary['match_id']} finished at turn {summary['final_turn']}")
+    print(f"episode: {summary['episode_id']}")
+    print(f"termination: {summary['termination_reason']}")
     if summary.get("aborted"):
         print(f"ABORTED: {summary['aborted']}")
     print(f"violations: {summary['violations_total']}")
-    print(f"final state hash: {summary['final_state_hash']}")
-    print("scores:")
-    for civ, score in sorted(summary.get("scores", {}).items()):
-        print(f"  {civ}: {score}")
+    print(f"terminal event hash: {summary['terminal_event_hash']}")
+    if summary.get("parent_episode_id"):
+        print(
+            "parent: "
+            f"{summary['parent_episode_id']}@"
+            f"{summary['parent_terminal_event_hash']}"
+        )
     print("telemetry:")
     for agent, doc in sorted(summary.get("telemetry", {}).items()):
         line = (f"  {agent}: calls={doc['total_calls']} "

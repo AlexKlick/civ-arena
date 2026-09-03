@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 V1_SCHEMA = 1
 V1_EVENT_KINDS = frozenset(
     {
@@ -86,3 +88,36 @@ def load_v1_events_read_only(path: Path | str) -> V1EventLog:
             )
         records.append(record)
     return V1EventLog(tuple(records), torn_tail)
+
+
+def load_v1_config_read_only(path: Path | str) -> Any:
+    """Parse a historical V1 replay config without admitting it to V2 runs.
+
+    V1 configs predate the top-level schema field. An explicit ``schema: 1``
+    is also accepted by this compatibility-only function. The authoritative
+    ``load_config`` entry point remains V2-only.
+    """
+
+    source = Path(path)
+    if source.is_symlink():
+        raise V1CompatibilityError("V1 config path must not be a symlink")
+    try:
+        doc = yaml.safe_load(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise V1CompatibilityError("historical V1 config is not readable YAML") from exc
+    if not isinstance(doc, dict):
+        raise V1CompatibilityError("historical V1 config must be a mapping")
+    schema = doc.get("schema")
+    if schema not in {None, V1_SCHEMA}:
+        raise V1CompatibilityError("historical config is not schema 1")
+    legacy_doc = dict(doc)
+    legacy_doc.pop("schema", None)
+    from civ_arena.config import parse_config
+
+    try:
+        spec = parse_config(legacy_doc)
+    except (TypeError, ValueError) as exc:
+        raise V1CompatibilityError(f"invalid historical V1 config: {exc}") from None
+    if spec.schema != V1_SCHEMA:
+        raise V1CompatibilityError("historical config unexpectedly entered V2")
+    return spec

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import datetime
 import json
+import random
 
 import pytest
 from hypothesis import given, settings
@@ -22,6 +23,9 @@ from civ_arena.v2 import (
     AuthorizationDecisionV2,
     AuthorizationReasonV2,
     AuthorizationV2,
+    ChaosEventConfigV2,
+    ChaosHookV2,
+    ChaosSpecV2,
     ComputeConfigV2,
     ContractError,
     EdgeAuthorityV2,
@@ -33,6 +37,7 @@ from civ_arena.v2 import (
     EntityTypeV2,
     EnvironmentCapabilityV2,
     EnvironmentDescriptorV2,
+    EpisodeConfigV2,
     EpisodeReceiptV2,
     EpisodeTerminationV2,
     EventTypeV2,
@@ -48,14 +53,20 @@ from civ_arena.v2 import (
     ObservationV2,
     PolicyDescriptorV2,
     PolicyKindV2,
+    PolicyOperationV2,
+    PolicyRuntimeKindV2,
+    PolicySpendV2,
+    PolicyStateV2,
     PreconditionClaimV2,
     PreconditionOperatorV2,
+    RandomStateV2,
     ResourceClaimV2,
     ResourceKindV2,
     ResourceModeV2,
     TurnReceiptV2,
     TurnTerminationV2,
     VerificationStatusV2,
+    WatchdogModeV2,
 )
 from civ_arena.v2.contracts import EDGE_KINDS_IN_ORDER, ZERO_DIGEST
 from civ_arena.v2.schemas import schema_documents, validate_all_schemas
@@ -141,12 +152,154 @@ def _metrics(edges: list[ActionGraphEdgeV2], count: int) -> ActionGraphMetricsV2
 def test_all_v2_schemas_are_draft_2020_12_and_closed() -> None:
     ids = validate_all_schemas()
     assert ids == tuple(sorted(schema_documents()))
-    assert len(ids) == 8
+    assert len(ids) == 9
     for schema_id, doc in schema_documents().items():
         assert schema_id.startswith("urn:civ-arena:") and schema_id.endswith(":2")
         assert doc["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert doc["additionalProperties"] is False
 
+
+def test_policy_state_and_spend_are_strict_canonical_contracts() -> None:
+    operation = PolicyOperationV2.create(
+        agent_id="agent-0",
+        player_id=0,
+        turn=3,
+        sequence=4,
+        tool="write_diary",
+        args={"text": "hold the river"},
+        result={"status": "accepted", "tool": "write_diary", "chars": 14},
+    )
+    source_rng = random.Random(17)
+    source_rng.gauss(0, 1)
+    rng_state = RandomStateV2.from_random(source_rng)
+    state = PolicyStateV2.create(
+        policy_id="a" * 64,
+        agent_id="agent-0",
+        player_id=0,
+        turn=3,
+        proposal_id="b" * 64,
+        runtime_kind=PolicyRuntimeKindV2.SCRIPTED,
+        rng_state=rng_state,
+        runtime_state={"trace": []},
+        operations=[operation],
+        telemetry={"agent-0": {"total_calls": 1}},
+        model_posts=2,
+    )
+    assert PolicyStateV2.from_doc(state.to_doc()) == state
+    assert rng_state.to_random().getstate() == source_rng.getstate()
+    assert operation.args == {"text": "hold the river"}
+
+    spend = PolicySpendV2.create(
+        policy_id=state.policy_id,
+        agent_id=state.agent_id,
+        player_id=state.player_id,
+        turn=state.turn,
+        attempt=2,
+    )
+    assert PolicySpendV2.from_doc(spend.to_doc()) == spend
+
+    noncanonical = state.to_doc()
+    noncanonical["runtime_state_json"] = '{"z":0, "a":1}'
+    noncanonical["state_id"] = "0" * 64
+    with pytest.raises(ContractError, match="canonical JSON"):
+        PolicyStateV2.from_doc(noncanonical)
+
+    hidden = state.to_doc()
+    hidden["private_state"] = {"opponent_rng": 7}
+    with pytest.raises(ContractError, match=r"rejected at \$"):
+        PolicyStateV2.from_doc(hidden)
+
+    with pytest.raises(ContractError, match="prohibited field 'private_state'"):
+        PolicyStateV2.create(
+            policy_id="a" * 64,
+            agent_id="agent-0",
+            player_id=0,
+            turn=3,
+            proposal_id="b" * 64,
+            runtime_kind=PolicyRuntimeKindV2.SCRIPTED,
+            rng_state=None,
+            runtime_state={"nested": {"private_state": {"rival_rng": 7}}},
+            operations=[],
+            telemetry={},
+            model_posts=0,
+        )
+
+    with pytest.raises(ContractError, match="prohibited field 'headers'"):
+        PolicyOperationV2.create(
+            agent_id="agent-0",
+            player_id=0,
+            turn=3,
+            sequence=5,
+            tool="record_lesson",
+            args={"transport": {"headers": {"Authorization": "secret"}}},
+            result={"status": "accepted"},
+        )
+
+    with pytest.raises(ContractError, match="prohibited field 'apiKey'"):
+        PolicyStateV2.create(
+            policy_id="a" * 64,
+            agent_id="agent-0",
+            player_id=0,
+            turn=3,
+            proposal_id=None,
+            runtime_kind=PolicyRuntimeKindV2.SCRIPTED,
+            rng_state=None,
+            runtime_state={},
+            operations=[],
+            telemetry={"nested": {"apiKey": "secret"}},
+            model_posts=0,
+        )
+
+    with pytest.raises(ContractError, match="tool is not registered"):
+        PolicyOperationV2.create(
+            agent_id="agent-0",
+            player_id=0,
+            turn=3,
+            sequence=5,
+            tool="adapter",
+            args={},
+            result={"status": "accepted"},
+        )
+
+    with pytest.raises(ContractError, match="not accepted by the runtime"):
+        RandomStateV2(version=3, state=(1,), gauss_next=None)
+
+
+def test_episode_config_is_strict_hash_bound_and_ordered() -> None:
+    first = ChaosEventConfigV2(
+        ChaosSpecV2.STEAL_GOLD,
+        ChaosHookV2.ACT,
+        1,
+    )
+    second = ChaosEventConfigV2(
+        ChaosSpecV2.CHANGE_RESEARCH,
+        ChaosHookV2.BEGIN_PHASE,
+        0,
+    )
+    config = EpisodeConfigV2.create(
+        watchdog_mode=WatchdogModeV2.FLAG_AND_CONTINUE,
+        violation_limit=5,
+        chaos=[first, second],
+    )
+    assert EpisodeConfigV2.from_doc(config.to_doc()) == config
+    assert config.chaos == (first, second)
+
+    reordered = EpisodeConfigV2.create(
+        watchdog_mode=WatchdogModeV2.FLAG_AND_CONTINUE,
+        violation_limit=5,
+        chaos=[second, first],
+    )
+    assert reordered.config_id != config.config_id
+
+    tampered = config.to_doc()
+    tampered["violation_limit"] = 6
+    with pytest.raises(ContractError, match="config_id"):
+        EpisodeConfigV2.from_doc(tampered)
+
+    unknown = first.to_doc()
+    unknown["private_state"] = {"rival_rng": 7}
+    with pytest.raises(ContractError, match=r"rejected at \$"):
+        ChaosEventConfigV2.from_doc(unknown)
 
 @settings(derandomize=True, database=None)
 @given(st.integers(min_value=-10_000, max_value=10_000))
