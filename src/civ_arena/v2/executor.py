@@ -30,6 +30,7 @@ from civ_arena.v2.contracts import (
     ObservationPhaseV2,
     ObservationV2,
     PolicyDescriptorV2,
+    PolicyKindV2,
     RejectionCodeV2,
     TurnProposalV2,
     TurnReceiptV2,
@@ -476,6 +477,25 @@ class TransactionalExecutorV2:
             ]
 
             if not selected:
+                system_handoff = (
+                    self.policy.policy_kind is PolicyKindV2.SYSTEM
+                    and bool(results)
+                    and results[-1].status
+                    in {ActionStatusV2.ACCEPTED, ActionStatusV2.DUPLICATE}
+                )
+                if system_handoff:
+                    return self._turn_receipt(
+                        observation=observation,
+                        current_observation=current_observation,
+                        proposal=proposal,
+                        graph_ids=graph_ids,
+                        authorizations=authorizations,
+                        results=results,
+                        replan_count=replan_count,
+                        termination=TurnTerminationV2.SYSTEM_HANDOFF,
+                        safe_error=None,
+                        correlation_id=correlation_id,
+                    )
                 mandatory = bool(current_observation.mandatory_action_kinds)
                 for intent in absent:
                     reason = (

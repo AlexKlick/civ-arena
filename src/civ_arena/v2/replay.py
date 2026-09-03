@@ -35,6 +35,7 @@ from civ_arena.v2.contracts import (
     LegalActionV2,
     ObservationPhaseV2,
     ObservationV2,
+    PolicyKindV2,
     RejectionCodeV2,
     TurnProposalV2,
     TurnReceiptV2,
@@ -675,6 +676,30 @@ async def replay_fake_episode_v2(
                     )
                 completed_turn_count += 1
                 awaiting_turn_start = True
+            elif receipt.termination is TurnTerminationV2.SYSTEM_HANDOFF:
+                descriptor = next(
+                    (
+                        policy
+                        for policy in terminal.policies
+                        if policy.descriptor_id == current_proposal.policy_id
+                    ),
+                    None,
+                )
+                if (
+                    descriptor is None
+                    or descriptor.policy_kind is not PolicyKindV2.SYSTEM
+                    or not turn_executed_actions
+                    or turn_executed_actions[-1].action_kind
+                    not in {
+                        ActionKindV2.FILL_POLICY_SLOTS,
+                        ActionKindV2.RESOLVE_CIVIC,
+                    }
+                    or turn_results[-1].status
+                    not in {ActionStatusV2.ACCEPTED, ActionStatusV2.DUPLICATE}
+                    or current_observation.phase is not ObservationPhaseV2.TURN
+                ):
+                    raise ExactReplayError("system handoff lacks an accepted system action")
+                continuation_expected = True
             else:
                 if current_observation.phase is not ObservationPhaseV2.TURN:
                     raise ExactReplayError(

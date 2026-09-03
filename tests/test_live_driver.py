@@ -5,7 +5,9 @@ translator entry + one parser entry + one fake test)."""
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
 import subprocess
 import sys
@@ -22,11 +24,11 @@ from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.response_parser import (
-    _split_lines,
     parse_digest,
     parse_ledger_lines,
 )
 from civ_arena.session.tools import SessionCtx
+from civ_arena.v2.ledger import verify_ledger_v2
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIG = REPO / "configs" / "live-duel.yaml"
@@ -57,6 +59,36 @@ def _referee_for(adapter, tmp_path):
         RefereeConfig(watchdog_mode="flag_and_continue", violation_limit=5),
     )
     return referee, log
+
+
+def _verified_v2_episode(run_dir: Path) -> tuple[object, dict, list[dict], dict]:
+    """Verify custody first, then expose compact raw docs for assertions."""
+
+    validation = verify_ledger_v2(run_dir)
+    rows = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    terminal = rows[-1]["payload"]["episode_receipt"]
+    actions: dict[str, dict] = {}
+    for row in rows:
+        if row["event_type"] != "ActionGraphCompiled":
+            continue
+        ref = row["payload"]["artifact"]
+        digest = ref["digest"]
+        graph = json.loads(
+            (
+                run_dir
+                / "objects"
+                / "sha256"
+                / digest[:2]
+                / f"{digest}.json"
+            ).read_text(encoding="utf-8")
+        )
+        actions.update(
+            {node["action"]["action_id"]: node["action"] for node in graph["nodes"]}
+        )
+    return validation, terminal, rows, actions
 
 
 def test_parse_ledger_lines_shapes():
@@ -304,9 +336,9 @@ async def test_ambient_manifest_rehearsal(tmp_path):
 
 
 def test_live_driver_rehearsal_end_to_end(tmp_path):
-    """The driver's own entrypoint, rehearsed: probe then 2 clean idle turns."""
+    """The production entrypoint writes one complete V2 episode after probe."""
     runs_root = tmp_path / "runs"
-    for phase, turns in (("probe", None), ("exclusive-control", "2")):
+    for phase, turns in (("probe", None), ("dispatch", "1")):
         cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
                str(CONFIG), "--phase", phase, "--fake",
                "--runs-root", str(runs_root)]
@@ -316,25 +348,25 @@ def test_live_driver_rehearsal_end_to_end(tmp_path):
             cmd, cwd=REPO, capture_output=True, text=True, timeout=120.0)
         assert proc.returncode == 0, proc.stderr + proc.stdout
     run_dir = runs_root / "live-duel-001"
-    summary = json.loads((run_dir / "summary.json").read_text())
-    assert summary["phase"] == "exclusive-control"
-    assert summary["clean"] is True
-    assert summary["violations_total"] == 0
-    assert len(summary["per_turn"]) == 2
-    # Arena.run envelope parity (Codex P2-6): replay/_strip read these
-    assert summary["final_state_hash"] is not None
-    assert "aborted" in summary and "scores" in summary
-    assert "telemetry" in summary
-    kinds = [json.loads(line)["kind"] for line in
-             (run_dir / "events.jsonl").read_text().splitlines()]
-    assert kinds[0] == "MATCH_START" and kinds[-1] == "MATCH_END"
-    assert "TURN_END" in kinds
+    validation, terminal, rows, _actions = _verified_v2_episode(run_dir)
+    assert validation.termination_reason == "success"
+    assert terminal["schema"] == 2
+    assert terminal["turns_completed"] == 1
+    assert terminal["termination_reason"] == "success"
+    assert {item["policy_kind"] for item in terminal["policies"]} == {
+        "scripted",
+        "system",
+    }
+    assert rows[0]["event_type"] == "EpisodeStarted"
+    assert rows[-1]["event_type"] == "EpisodeTerminated"
+    assert any(row["event_type"] == "TurnCompleted" for row in rows)
+    assert not (run_dir / "summary.json").exists()
 
 
 def test_live_driver_refuses_finished_rerun(tmp_path):
     runs_root = tmp_path / "runs"
     cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
-           str(CONFIG), "--phase", "exclusive-control", "--fake", "--turns", "1",
+           str(CONFIG), "--phase", "dispatch", "--fake", "--turns", "1",
            "--runs-root", str(runs_root)]
     first = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
                            timeout=120.0)
@@ -352,7 +384,7 @@ def test_live_driver_refuses_partial_rerun(tmp_path):
     run_dir.mkdir(parents=True)
     (run_dir / "events.jsonl").write_text('{"kind": "MATCH_START"}\n')
     cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
-           str(CONFIG), "--phase", "exclusive-control", "--fake", "--turns", "1",
+           str(CONFIG), "--phase", "dispatch", "--fake", "--turns", "1",
            "--runs-root", str(tmp_path / "runs")]
     proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
                           timeout=120.0)
@@ -360,14 +392,30 @@ def test_live_driver_refuses_partial_rerun(tmp_path):
     assert "already exists" in proc.stderr
 
 
-def test_rollback_mode_refused(tmp_path):
+def test_rollback_mode_refused_before_live_connection(tmp_path):
     from civ_arena.game.civ6 import live_driver
 
     spec = load_config(CONFIG)
     spec.watchdog_mode = "rollback"
+
+    async def phases():
+        yield 1, 0
+
     with pytest.raises(ValueError, match="rollback"):
-        live_driver.LiveDriver(
-            spec, FireTunerAdapter("127.0.0.1", 1), tmp_path, "x-i1")
+        asyncio.run(
+            live_driver._run_live_v2(
+                spec,
+                FireTunerAdapter("127.0.0.1", 1),
+                tmp_path,
+                phases(),
+                expected_phases=1,
+                strategy="h1",
+                mod_lua="-- fixture",
+                game_version="civ6-fixture-1",
+                ruleset_digest="a" * 64,
+                driven_players={0},
+            )
+        )
 
 
 # -- M14d: action surface + dispatch -----------------------------------------
@@ -647,9 +695,7 @@ async def test_act_injection_guard_blocks_hostile_ids():
 
 
 def test_dispatch_rehearsal_end_to_end(tmp_path):
-    """The M14d milestone rehearsal: the turtler takes real turns through
-    the REAL referee over the fake wire — observes, acts, reconciliation,
-    end turns — and the watchdog stays clean."""
+    """The fake wire rehearses only proposal -> graph -> V2 executor."""
     runs_root = tmp_path / "runs"
     cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
            str(CONFIG), "--phase", "dispatch", "--fake", "--turns", "5",
@@ -658,32 +704,34 @@ def test_dispatch_rehearsal_end_to_end(tmp_path):
                           timeout=180.0)
     assert proc.returncode == 0, proc.stderr + proc.stdout
     run_dir = runs_root / "live-duel-001"
-    summary = json.loads((run_dir / "summary.json").read_text())
-    assert summary["phase"] == "dispatch"
-    assert summary["clean"] is True
-    assert summary["violations_total"] == 0
-    assert len(summary["per_turn"]) == 5
-    # turn 1 books real commanded effects (research + founding at least)
-    assert summary["per_turn"][0]["allowed_mutations"] > 0
-    assert summary["per_turn"][0]["digest_changed"] is True
-    records = [json.loads(line) for line in
-               (run_dir / "events.jsonl").read_text().splitlines()]
-    tools = [r["tool"] for r in records if r["kind"] == "TOOL_CALL"]
-    # Empty production queues are filled by live-driver housekeeping before
-    # the policy observes the city. That command intentionally is not a policy
-    # TOOL_CALL in the V1 log, so prove its accepted adapter path from the
-    # retained driver transcript instead of requiring a false event entry.
-    assert "housekeep[1]:" in proc.stdout
-    assert "-> BUILD" in proc.stdout and ": accepted" in proc.stdout
-    for expected in ("get_overview", "get_units", "get_cities",
-                     "get_available_research", "get_available_production",
-                     "set_research", "found_city", "fortify", "move_unit",
-                     "purchase", "end_turn"):
-        assert expected in tools, f"{expected} never rehearsed: {sorted(set(tools))}"
-    # every tool call has its result pair (the log's replay contract)
-    results = [r for r in records if r["kind"] == "TOOL_RESULT"]
-    assert len(results) == len([r for r in records
-                                if r["kind"] == "TOOL_CALL"])
+    validation, terminal, rows, actions = _verified_v2_episode(run_dir)
+    assert validation.termination_reason == "success"
+    assert terminal["turns_completed"] == 5
+    assert terminal["termination_reason"] == "success"
+    assert not (run_dir / "summary.json").exists()
+
+    receipts = [
+        row["payload"]["turn_receipt"]
+        for row in rows
+        if row["event_type"] == "TurnCompleted"
+    ]
+    completed = [receipt for receipt in receipts if receipt["termination"] == "completed"]
+    assert len(completed) == 5
+    results = [result for receipt in receipts for result in receipt["results"]]
+    executed = {actions[result["action_id"]]["action_kind"] for result in results}
+    for expected in (
+        "end_turn",
+        "fortify",
+        "found_city",
+        "move_unit",
+        "set_city_production",
+        "set_research",
+    ):
+        assert expected in executed, f"{expected} never executed: {sorted(executed)}"
+    assert all(result["status"] in {"accepted", "duplicate"} for result in results)
+    assert len([r for r in rows if r["event_type"] == "ActionExecutionStarted"]) == len(
+        [r for r in rows if r["event_type"] == "ActionExecutionCompleted"]
+    )
 
 
 def test_dispatch_target_turn_rules():
@@ -753,47 +801,75 @@ def test_dispatch_targeting_rules_and_blockers():
     assert live_driver._last_deact_turn([]) is None
 
 
-async def test_ensure_research_resolves_the_research_blocker():
-    """M17d: game four's turn-17 freeze — completed research with no
-    follow-up parks ENDTURN_BLOCKING_RESEARCH on the cycle. The
-    housekeeping sets the preference-first available tech, and the wire
-    clears the pending blocker with it (never leaves the slot empty
-    while techs remain)."""
+def test_live_driver_has_no_schema1_writer_or_direct_mutation_surface():
     from civ_arena.game.civ6 import live_driver
 
-    adapter, server = await _adapter_with()
-    try:
-        await adapter.setup({})
-        await adapter.begin_phase(0, 1)
-        mod = server.mod
-        assert mod is not None
-        mod.players[0]["researching"] = ""
-        mod.pending_blockers = ["BLOCKING|ENDTURN_BLOCKING_RESEARCH"]
+    for removed in (
+        "LiveDriver",
+        "phase_exclusive_control",
+        "phase_dispatch",
+        "phase_dispatch_hotseat",
+        "_resolve_blockers",
+        "_fill_empty_queues",
+        "_ensure_research",
+    ):
+        assert not hasattr(live_driver, removed)
 
-        rows = _split_lines(
-            await adapter.write_raw(lua_translator.blocker_query()))
-        blockers = [r for r in rows if r.startswith("BLOCKING|")]
-        assert blockers == ["BLOCKING|ENDTURN_BLOCKING_RESEARCH"]
+    tree = ast.parse(inspect.getsource(live_driver))
+    direct_adapter_mutations = [
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in {"act", "end_phase"}
+    ]
+    assert direct_adapter_mutations == []
+    dispatch_source = inspect.getsource(live_driver._dispatch)
+    assert "phase_dispatch_v2" in dispatch_source
+    assert "phase_dispatch_hotseat_v2" in dispatch_source
 
-        await live_driver._ensure_research(adapter, 0, turn=17)
-        # the preference order's first offerable tech landed
-        assert mod.players[0]["researching"] == "MINING"
-        assert mod.pending_blockers == [], "the blocker cleared with it"
+    v2_root = REPO / "src" / "civ_arena" / "v2"
+    mutation_callers = set()
+    for path in v2_root.glob("*.py"):
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"act", "end_phase"}
+            for node in ast.walk(module)
+        ):
+            mutation_callers.add(path.name)
+    assert mutation_callers == {"environment.py"}
 
-        # a filled slot is left alone (no redundant set_research)
-        again = await adapter.observe(ObserveRequest(
-            kind=ObserveKind.OVERVIEW, player_id=0))
-        assert again["players"]["0"]["researching"]
-        await live_driver._ensure_research(adapter, 0, turn=18)
-        assert mod.players[0]["researching"] == "MINING"
 
-        # exhausted preference falls back to sorted-first, never empty
-        mod.players[0]["researching"] = ""
-        mod.TECHS = {"ZEBRA_HUSBANDRY": 30}  # type: ignore[assignment]
-        await live_driver._ensure_research(adapter, 0, turn=19)
-        assert mod.players[0]["researching"] == "ZEBRA_HUSBANDRY"
-    finally:
-        await server.stop()
+def test_live_driver_refuses_frozen_v1_bootstrap_and_missing_live_identity(tmp_path):
+    base = [
+        sys.executable,
+        "-m",
+        "civ_arena.game.civ6.live_driver",
+        str(CONFIG),
+        "--runs-root",
+        str(tmp_path / "runs"),
+    ]
+    cases = [
+        (["--phase", "exclusive-control", "--fake"], "frozen V1"),
+        (
+            ["--phase", "dispatch", "--fake", "--bootstrap-end-turn"],
+            "refuses bootstrap mutation",
+        ),
+        (
+            ["--phase", "dispatch"],
+            "requires --game-version and --ruleset-digest",
+        ),
+    ]
+    for args, message in cases:
+        proc = subprocess.run(
+            [*base, *args],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        assert proc.returncode != 0
+        assert message in proc.stderr
 
 
 def test_llm_client_string_content_normalizes():

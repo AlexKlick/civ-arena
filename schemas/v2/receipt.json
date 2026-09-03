@@ -128,7 +128,7 @@
         },
         "replan_count": {"type": "integer", "minimum": 0},
         "termination": {
-          "enum": ["completed", "failed", "mandatory_unresolved", "replans_exhausted"]
+          "enum": ["completed", "failed", "mandatory_unresolved", "replans_exhausted", "system_handoff"]
         },
         "safe_error": {
           "oneOf": [

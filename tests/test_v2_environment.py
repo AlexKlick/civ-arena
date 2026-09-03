@@ -22,6 +22,7 @@ from civ_arena.v2.contracts import (
     EntityTypeV2,
     EnvironmentCapabilityV2,
     EnvironmentDescriptorV2,
+    KnowledgeStateV2,
     LegalActionV2,
 )
 from civ_arena.v2.enumeration import ActionEnumeratorV2, GraphOverflowError
@@ -115,6 +116,17 @@ async def test_fake_observation_and_legal_set_are_deterministic_and_sound() -> N
 
     assert left_observation == right_observation
     assert left_actions == right_actions
+    simulator_move = next(
+        action
+        for action in left_actions.actions
+        if action.action_kind is ActionKindV2.MOVE_UNIT
+    )
+    simulator_movement = next(
+        effect
+        for effect in simulator_move.expected_effects
+        if effect.attribute == "movement"
+    )
+    assert simulator_movement.expected.state is KnowledgeStateV2.KNOWN
     state = SimState.from_doc(left_monitor.snapshot())
     for action in left_actions.actions:
         if action.action_kind is ActionKindV2.END_TURN:
@@ -358,6 +370,115 @@ async def test_firetuner_rehearsal_projects_and_enumerates_through_v2() -> None:
         ]
         assert purchase_costs and all(isinstance(cost, int) for cost in purchase_costs)
         assert any(action.action_kind is ActionKindV2.PURCHASE for action in action_set.actions)
+        live_move = next(
+            action
+            for action in action_set.actions
+            if action.action_kind is ActionKindV2.MOVE_UNIT
+        )
+        live_movement = next(
+            effect
+            for effect in live_move.expected_effects
+            if effect.attribute == "movement"
+        )
+        assert live_movement.expected.state is KnowledgeStateV2.UNKNOWN
+    finally:
+        await adapter.teardown()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_firetuner_turn_blockers_become_typed_mandatory_system_actions() -> None:
+    mod = FakeMod()
+    mod.pending_blockers = [
+        "BLOCKING|ENDTURN_BLOCKING_FILL_CIVIC_SLOT",
+        "BLOCKING|ENDTURN_BLOCKING_CIVIC",
+    ]
+    server = FakeTunerServer(mod=mod)
+    port = await server.start()
+    adapter = FireTunerAdapter(
+        "127.0.0.1",
+        port,
+        simulate_hook=_fake_live_hook,
+        poll_timeout_s=2.0,
+    )
+    policy_facet, _ = firetuner_facets_v2(
+        adapter,
+        adapter_version="firetuner-blocker-fixture-1",
+        game_version="civ6-blocker-fixture-1",
+        ruleset_digest="c" * 64,
+        mod_digest="d" * 64,
+    )
+    try:
+        await policy_facet.reset({})
+        observation = await policy_facet.begin_turn(0, 1)
+        blocker_facts = [
+            fact
+            for fact in observation.facts
+            if fact.predicate == "turn_blockers"
+        ]
+        assert len(blocker_facts) == 1
+        assert blocker_facts[0].value.value == (
+            "civic_choice",
+            "policy_slots",
+        )
+        assert ActionKindV2.RESOLVE_CIVIC in observation.mandatory_action_kinds
+        assert ActionKindV2.FILL_POLICY_SLOTS in observation.mandatory_action_kinds
+
+        legal = ActionEnumeratorV2().enumerate(observation)
+        system_actions = {
+            action.action_kind: action
+            for action in legal.actions
+            if action.action_kind
+            in {ActionKindV2.RESOLVE_CIVIC, ActionKindV2.FILL_POLICY_SLOTS}
+        }
+        assert set(system_actions) == {
+            ActionKindV2.RESOLVE_CIVIC,
+            ActionKindV2.FILL_POLICY_SLOTS,
+        }
+        assert all(action.mandatory for action in system_actions.values())
+
+        civic = system_actions[ActionKindV2.RESOLVE_CIVIC]
+        authorization = _authorization(civic)
+        result = await policy_facet.execute_authorized(authorization, civic)
+        assert result.status is ActionStatusV2.ACCEPTED
+        assert not any("ENDTURN_BLOCKING_CIVIC" in item for item in mod.pending_blockers)
+        with pytest.raises(ContractError, match="stale observation authorization"):
+            await policy_facet.execute_authorized(authorization, civic)
+
+        refreshed = await policy_facet.observe(0)
+        assert ActionKindV2.RESOLVE_CIVIC not in refreshed.mandatory_action_kinds
+        assert ActionKindV2.FILL_POLICY_SLOTS in refreshed.mandatory_action_kinds
+    finally:
+        await adapter.teardown()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_unknown_live_blocker_fails_closed_without_reflecting_raw_text() -> None:
+    secret = "ENDTURN_BLOCKING_PRIVATE_99_99"
+    mod = FakeMod()
+    mod.pending_blockers = [f"BLOCKING|{secret}"]
+    server = FakeTunerServer(mod=mod)
+    port = await server.start()
+    adapter = FireTunerAdapter(
+        "127.0.0.1",
+        port,
+        simulate_hook=_fake_live_hook,
+        poll_timeout_s=2.0,
+    )
+    policy_facet, _ = firetuner_facets_v2(
+        adapter,
+        adapter_version="firetuner-unknown-blocker-1",
+        game_version="civ6-unknown-blocker-1",
+        ruleset_digest="c" * 64,
+        mod_digest="d" * 64,
+    )
+    try:
+        await policy_facet.reset({})
+        with pytest.raises(ContractError) as caught:
+            await policy_facet.begin_turn(0, 1)
+        assert "unregistered observable blocker" in str(caught.value)
+        assert secret not in str(caught.value)
     finally:
         await adapter.teardown()
         await server.stop()

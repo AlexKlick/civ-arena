@@ -203,6 +203,7 @@ class ActionEnumeratorV2:
             raise ContractError("legal actions require the observing player's active phase")
         index = ObservationIndexV2(observation)
         actions: list[LegalActionV2] = []
+        actions.extend(self._system_actions(observation, index))
         actions.extend(self._unit_actions(observation, index))
         actions.extend(self._research_actions(observation, index))
         actions.extend(self._city_actions(observation, index))
@@ -253,6 +254,63 @@ class ActionEnumeratorV2:
                 f"configured maximum is {self.max_graph_actions}"
             )
         return LegalActionSetV2.create(observation.observation_id, actions)
+
+    @staticmethod
+    def _system_actions(
+        observation: ObservationV2,
+        index: ObservationIndexV2,
+    ) -> list[LegalActionV2]:
+        """Enumerate player-visible live blockers as typed system actions.
+
+        These actions are absent from simulator observations.  A live
+        coordinator may propose them through its registered system policy, but
+        they remain ordinary observation-bound graph nodes and receive no
+        special mutation authority.
+        """
+
+        player = observation.observing_player
+        raw = index.get(player, "turn_blockers", ())
+        blockers = tuple(raw) if isinstance(raw, tuple | list) else ()
+        kinds = {
+            "civic_choice": ActionKindV2.RESOLVE_CIVIC,
+            "policy_slots": ActionKindV2.FILL_POLICY_SLOTS,
+        }
+        actions: list[LegalActionV2] = []
+        for blocker, action_kind in kinds.items():
+            if blocker not in blockers:
+                continue
+            region = f"player:{player.entity_id}:{blocker}"
+            actions.append(
+                LegalActionV2.create(
+                    action_kind,
+                    player,
+                    observation.observation_id,
+                    preconditions=[
+                        _precondition(
+                            player,
+                            "turn_blockers",
+                            blocker,
+                            observation.turn,
+                            PreconditionOperatorV2.CONTAINS,
+                        )
+                    ],
+                    expected_effects=[
+                        _effect(
+                            EffectKindV2.SET,
+                            player,
+                            "turn_blockers",
+                            KnowledgeValueV2.unknown(
+                                "live blocker set is environment-controlled",
+                                observed_turn=observation.turn,
+                            ),
+                            region,
+                        )
+                    ],
+                    affected_regions=[region],
+                    mandatory=True,
+                )
+            )
+        return actions
 
     def _unit_actions(
         self,
@@ -333,7 +391,15 @@ class ActionEnumeratorV2:
                                     EffectKindV2.SET,
                                     unit,
                                     "movement",
-                                    _known(movement - cost, observation.turn),
+                                    (
+                                        _known(movement - cost, observation.turn)
+                                        if observation.game_version
+                                        == "civ-arena-sim-v2"
+                                        else KnowledgeValueV2.unknown(
+                                            "remaining movement is environment-controlled",
+                                            observed_turn=observation.turn,
+                                        )
+                                    ),
                                     movement_region,
                                 ),
                             ],

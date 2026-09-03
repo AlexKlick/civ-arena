@@ -16,17 +16,24 @@ from civ_arena.config import (
     load_config,
     parse_config,
 )
+from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
+from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.recall import RecallCorpus
 from civ_arena.v2.arena import ArenaV2
 from civ_arena.v2.contracts import (
+    ActionGraphV2,
+    ActionKindV2,
     ArtifactRefV2,
     EpisodeConfigV2,
     EpisodeReceiptV2,
     EventTypeV2,
     PolicyStateV2,
+    TurnReceiptV2,
+    TurnTerminationV2,
 )
-from civ_arena.v2.environment import simulator_facets_v2
+from civ_arena.v2.environment import firetuner_facets_v2, simulator_facets_v2
 from civ_arena.v2.ledger import ObjectStoreV2, load_events_v2, verify_ledger_v2
+from civ_arena.v2.policy import SystemHousekeepingRuntimeV2
 from civ_arena.v2.replay import replay_fake_episode_v2
 from civ_arena.v2.schemas import ContractError
 
@@ -125,6 +132,105 @@ async def test_arena_v2_writes_only_v2_trust_root_and_exactly_replays(
     replayed = await replay_fake_episode_v2(run)
     assert replayed.turn_receipt_count == 1
     assert replayed.action_count == 2
+
+
+@pytest.mark.asyncio
+async def test_prepared_firetuner_phase_receipts_system_housekeeping_before_policy(
+    tmp_path: Path,
+) -> None:
+    mod = FakeMod()
+    mod.pending_blockers = [
+        "BLOCKING|ENDTURN_BLOCKING_FILL_CIVIC_SLOT",
+        "BLOCKING|ENDTURN_BLOCKING_CIVIC",
+    ]
+    server = FakeTunerServer(mod=mod)
+    port = await server.start()
+    adapter = FireTunerAdapter(
+        "127.0.0.1",
+        port,
+        simulate_hook=lambda event, player_id, turn=0: {
+            "turn_start": f"Simulate.TurnStartAt({player_id}, {turn})",
+            "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",
+            "advance_turn": "Simulate.AdvanceTurn()",
+        }[event],
+        poll_timeout_s=2.0,
+    )
+    environment, monitor = firetuner_facets_v2(
+        adapter,
+        adapter_version="prepared-firetuner-fixture-1",
+        game_version="civ6-prepared-fixture-1",
+        ruleset_digest="c" * 64,
+        mod_digest="d" * 64,
+    )
+    spec = _spec("prepared-firetuner")
+    spec.adapter = "firetuner"
+
+    async def phases():
+        adapter.expect_turn(1)
+        yield 1, 0
+
+    run = tmp_path / "prepared-firetuner"
+    try:
+        await adapter.setup({})
+        summary = await ArenaV2(
+            run,
+            spec,
+            environment=environment,
+            private_monitor=monitor,
+            system_runtime=SystemHousekeepingRuntimeV2(),
+        ).run_prepared(phases(), expected_phases=1)
+    finally:
+        await adapter.teardown()
+        await server.stop()
+
+    assert summary["termination_reason"] == "success"
+    events = load_events_v2(run / "events.jsonl")
+    system_receipts = [
+        event.payload_value
+        for event in events
+        if event.event_type is EventTypeV2.TURN_COMPLETED
+        and isinstance(event.payload_value, TurnReceiptV2)
+        and event.payload_value.termination is TurnTerminationV2.SYSTEM_HANDOFF
+    ]
+    assert len(system_receipts) == 2
+
+    store = ObjectStoreV2(run)
+    actions = {}
+    for event in events:
+        if event.event_type is not EventTypeV2.ACTION_GRAPH_COMPILED:
+            continue
+        assert isinstance(event.payload_value, ArtifactRefV2)
+        graph = ActionGraphV2.from_doc(store.read_doc(event.payload_value))
+        actions.update({node.action.action_id: node.action for node in graph.nodes})
+    assert {
+        actions[receipt.results[-1].action_id].action_kind
+        for receipt in system_receipts
+    } == {ActionKindV2.FILL_POLICY_SLOTS, ActionKindV2.RESOLVE_CIVIC}
+    first_player_receipt = next(
+        event.payload_value
+        for event in events
+        if event.event_type is EventTypeV2.TURN_COMPLETED
+        and isinstance(event.payload_value, TurnReceiptV2)
+        and event.payload_value.termination is not TurnTerminationV2.SYSTEM_HANDOFF
+    )
+    assert events.index(
+        next(
+            event
+            for event in events
+            if event.event_type is EventTypeV2.TURN_COMPLETED
+            and event.payload_value == system_receipts[-1]
+        )
+    ) < events.index(
+        next(
+            event
+            for event in events
+            if event.event_type is EventTypeV2.TURN_COMPLETED
+            and event.payload_value == first_player_receipt
+        )
+    )
+    assert mod.pending_blockers == []
+    assert verify_ledger_v2(run).termination_reason == "success"
+    assert not (run / "summary.json").exists()
 
 
 @pytest.mark.asyncio

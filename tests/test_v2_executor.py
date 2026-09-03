@@ -5,7 +5,10 @@ from typing import Any
 
 import pytest
 
+from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
+from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.v2 import (
+    PLAYER_ACTION_KINDS_V2,
     ActionGraphCompilerV2,
     ActionIntentV2,
     ActionKindV2,
@@ -22,13 +25,16 @@ from civ_arena.v2 import (
     PolicyKindV2,
     RejectionCodeV2,
     TransactionalExecutorV2,
+    TurnContextV2,
     TurnProposalV2,
     TurnTerminationV2,
+    firetuner_facets_v2,
     replay_fake_episode_v2,
     simulator_facets_v2,
 )
 from civ_arena.v2.enumeration import ActionEnumeratorV2
 from civ_arena.v2.ledger import EpisodeRecorderV2, verify_ledger_v2
+from civ_arena.v2.policy import SystemHousekeepingRuntimeV2
 
 FIXED_TIME = "2026-09-02T18:00:00+00:00"
 
@@ -43,7 +49,9 @@ def _policy(
     return PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.SCRIPTED,
         policy_version="executor-fixture-v2",
-        registered_action_kinds=registered or list(ActionKindV2),
+        registered_action_kinds=(
+            registered if registered is not None else PLAYER_ACTION_KINDS_V2
+        ),
     )
 
 
@@ -197,6 +205,77 @@ async def test_unregistered_action_never_reaches_environment() -> None:
     assert receipt.authorizations[0].reason_code is (
         AuthorizationReasonV2.UNREGISTERED_ACTION
     )
+
+
+@pytest.mark.asyncio
+async def test_only_system_policy_can_execute_housekeeping_and_hands_back_turn() -> None:
+    mod = FakeMod()
+    mod.pending_blockers = ["BLOCKING|ENDTURN_BLOCKING_CIVIC"]
+    server = FakeTunerServer(mod=mod)
+    port = await server.start()
+    adapter = FireTunerAdapter(
+        "127.0.0.1",
+        port,
+        simulate_hook=lambda event, player_id, turn=0: {
+            "turn_start": f"Simulate.TurnStartAt({player_id}, {turn})",
+            "turn_deactivated": f"Simulate.TurnDeactivated({player_id})",
+            "advance_turn": "Simulate.AdvanceTurn()",
+        }[event],
+        poll_timeout_s=2.0,
+    )
+    environment, _monitor = firetuner_facets_v2(
+        adapter,
+        adapter_version="executor-system-fixture-1",
+        game_version="civ6-system-fixture-1",
+        ruleset_digest="c" * 64,
+        mod_digest="d" * 64,
+    )
+    try:
+        await environment.reset({})
+        observation = await environment.begin_turn(0, 1)
+        legal = ActionEnumeratorV2().enumerate(observation)
+        graph = ActionGraphCompilerV2().compile(observation, legal)
+        civic = next(
+            action
+            for action in legal.actions
+            if action.action_kind is ActionKindV2.RESOLVE_CIVIC
+        )
+
+        player = _policy()
+        forged_player_proposal = TurnProposalV2.create(
+            policy_id=player.descriptor_id,
+            observation_id=observation.observation_id,
+            intents=[_intent(civic, 0)],
+        )
+        refused = await TransactionalExecutorV2(
+            environment,
+            player,
+            episode_id="executor-system-refused",
+        ).execute(forged_player_proposal, observation, graph)
+        assert refused.results == ()
+        assert refused.authorizations[0].reason_code is (
+            AuthorizationReasonV2.UNREGISTERED_ACTION
+        )
+        assert mod.pending_blockers == ["BLOCKING|ENDTURN_BLOCKING_CIVIC"]
+
+        system = SystemHousekeepingRuntimeV2()
+        proposal = await system.propose_turn(
+            TurnContextV2(observation, legal, graph, system.descriptor)
+        )
+        receipt = await TransactionalExecutorV2(
+            environment,
+            system.descriptor,
+            episode_id="executor-system-accepted",
+        ).execute(proposal, observation, graph)
+        assert receipt.termination is TurnTerminationV2.SYSTEM_HANDOFF
+        assert [result.status for result in receipt.results] == [
+            ActionStatusV2.ACCEPTED
+        ]
+        assert receipt.pre_observation_id != receipt.post_observation_id
+        assert mod.pending_blockers == []
+    finally:
+        await adapter.teardown()
+        await server.stop()
 
 
 class _ExecutionWrapper:

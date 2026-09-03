@@ -82,6 +82,8 @@ _TOOL_ATTRS = {
     "set_research": "researching",
     "set_city_production": "none",   # production is outside recorder coverage
     "purchase": "gold,exists",
+    "resolve_civic": "none",
+    "fill_policy_slots": "none",
 }
 
 
@@ -169,6 +171,9 @@ _ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
         a["city_id"], a["item_id"]), True),
     "purchase": lambda _pid, a: (lua_translator.purchase(
         a["city_id"], a["item_id"]), True),
+    "resolve_civic": lambda _pid, _a: (lua_translator.resolve_civic(), False),
+    "fill_policy_slots": lambda _pid, _a: (
+        lua_translator.fill_policy_slots(), True),
 }
 
 # (event, player_id) -> fake-side Lua; the driver attaches this ONLY in
@@ -478,6 +483,35 @@ class FireTunerAdapter:
         """The mod's hook-event ring, flattened (driver targeting)."""
         lines = await self._conn.execute_read(lua_translator.mod_trace())
         return response_parser._split_lines(lines)  # noqa: SLF001
+
+    async def observe_turn_blockers(self, player_id: int) -> tuple[str, ...]:
+        """Read only the active player's visible end-turn notifications.
+
+        Engine spellings are normalized into the closed V2 vocabulary.  An
+        unknown blocking notification remains visible as an unregistered
+        marker so observation construction fails closed without reflecting the
+        engine's raw text into a policy-visible error.
+        """
+
+        if self._phase_open != player_id:
+            raise RuntimeError("turn blockers require the player's open phase")
+        lines = await self._conn.execute_write(lua_translator.blocker_query())
+        normalized: list[str] = []
+        for row in response_parser._split_lines(lines):  # noqa: SLF001
+            if not row.startswith("BLOCKING|"):
+                continue
+            token = row.partition("|")[2]
+            if token == "ENDTURN_BLOCKING_CIVIC":
+                normalized.append("civic_choice")
+            elif "FILL_CIVIC_SLOT" in token:
+                normalized.append("policy_slots")
+            elif "PRODUCTION" in token:
+                normalized.append("production")
+            elif "RESEARCH" in token:
+                normalized.append("research")
+            else:
+                normalized.append("unregistered")
+        return tuple(sorted(set(normalized)))
 
     async def refresh_digest(self) -> str:
         """Poll the whole-board digest and return the new state hash."""

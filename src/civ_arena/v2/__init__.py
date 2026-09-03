@@ -1,6 +1,8 @@
 """Breaking V2 graph-turn control contract."""
 
 from civ_arena.v2.contracts import (
+    PLAYER_ACTION_KINDS_V2,
+    SYSTEM_ACTION_KINDS_V2,
     ActionGraphEdgeV2,
     ActionGraphMetricsV2,
     ActionGraphNodeV2,
@@ -133,6 +135,7 @@ __all__ = [
     "ObservationPhaseV2",
     "ObservationV2",
     "ObservableExecutionFacetV2",
+    "PLAYER_ACTION_KINDS_V2",
     "PolicyDescriptorV2",
     "PolicyKindV2",
     "PolicyOperationV2",
@@ -147,6 +150,7 @@ __all__ = [
     "ResourceKindV2",
     "ResourceModeV2",
     "RandomStateV2",
+    "SYSTEM_ACTION_KINDS_V2",
     "TurnContextV2",
     "TurnProposalV2",
     "TurnReceiptV2",

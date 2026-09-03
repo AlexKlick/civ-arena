@@ -11,6 +11,7 @@ from civ_arena.v1_compat import (
     load_v1_events_read_only,
 )
 from civ_arena.v2 import (
+    PLAYER_ACTION_KINDS_V2,
     ActionGraphCompilerV2,
     ActionIntentV2,
     ActionKindV2,
@@ -51,7 +52,7 @@ def _policy() -> PolicyDescriptorV2:
     return PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.SCRIPTED,
         policy_version="replay-fixture-v2",
-        registered_action_kinds=list(ActionKindV2),
+        registered_action_kinds=PLAYER_ACTION_KINDS_V2,
     )
 
 

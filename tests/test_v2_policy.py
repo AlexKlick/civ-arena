@@ -13,6 +13,7 @@ from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.config import LLMSpec
 from civ_arena.strategy.store import StrategyStore
 from civ_arena.v2.contracts import (
+    PLAYER_ACTION_KINDS_V2,
     ActionKindV2,
     ArtifactRefV2,
     ComputeConfigV2,
@@ -495,7 +496,7 @@ async def test_replay_runtime_requires_exact_policy_and_observation_binding() ->
     replay_descriptor = PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.REPLAY,
         policy_version="2.0",
-        registered_action_kinds=ALL_ACTION_KINDS_V2,
+        registered_action_kinds=PLAYER_ACTION_KINDS_V2,
     )
     proposal = TurnProposalV2.create(
         policy_id=replay_descriptor.descriptor_id,
@@ -514,7 +515,7 @@ async def test_replay_runtime_requires_exact_policy_and_observation_binding() ->
     wrong = PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.REPLAY,
         policy_version="2.1",
-        registered_action_kinds=ALL_ACTION_KINDS_V2,
+        registered_action_kinds=PLAYER_ACTION_KINDS_V2,
     )
     with pytest.raises(ContractError, match="descriptor mismatch"):
         await runtime.propose_turn(
@@ -533,5 +534,5 @@ def test_policy_descriptor_is_secret_free_and_seat_specific() -> None:
     assert first != second
     assert first.policy_kind is PolicyKindV2.SCRIPTED
     assert first.observation_only is True
-    assert set(first.registered_action_kinds) == set(ActionKindV2)
+    assert first.registered_action_kinds == PLAYER_ACTION_KINDS_V2
     assert "key" not in str(first.to_doc()).lower()

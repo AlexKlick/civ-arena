@@ -242,6 +242,7 @@ OBSERVABLE_PREDICATES = frozenset(
         "status",
         "strength",
         "terrain",
+        "turn_blockers",
         "turns_remaining",
         "type",
         "yields",
@@ -303,21 +304,34 @@ class ObservationPhaseV2(enum.StrEnum):
 class ActionKindV2(enum.StrEnum):
     ATTACK = "attack"
     END_TURN = "end_turn"
+    FILL_POLICY_SLOTS = "fill_policy_slots"
     FORTIFY = "fortify"
     FOUND_CITY = "found_city"
     MOVE_UNIT = "move_unit"
     PURCHASE = "purchase"
+    RESOLVE_CIVIC = "resolve_civic"
     SET_CITY_PRODUCTION = "set_city_production"
     SET_RESEARCH = "set_research"
+
+
+SYSTEM_ACTION_KINDS_V2 = (
+    ActionKindV2.FILL_POLICY_SLOTS,
+    ActionKindV2.RESOLVE_CIVIC,
+)
+PLAYER_ACTION_KINDS_V2 = tuple(
+    kind for kind in ActionKindV2 if kind not in SYSTEM_ACTION_KINDS_V2
+)
 
 
 ACTION_PARAMETER_KEYS: dict[ActionKindV2, frozenset[str]] = {
     ActionKindV2.ATTACK: frozenset({"unit_id", "target_id"}),
     ActionKindV2.END_TURN: frozenset(),
+    ActionKindV2.FILL_POLICY_SLOTS: frozenset(),
     ActionKindV2.FORTIFY: frozenset({"unit_id"}),
     ActionKindV2.FOUND_CITY: frozenset({"unit_id", "name"}),
     ActionKindV2.MOVE_UNIT: frozenset({"unit_id", "dest"}),
     ActionKindV2.PURCHASE: frozenset({"city_id", "item_id"}),
+    ActionKindV2.RESOLVE_CIVIC: frozenset(),
     ActionKindV2.SET_CITY_PRODUCTION: frozenset({"city_id", "item_id"}),
     ActionKindV2.SET_RESEARCH: frozenset({"tech_id"}),
 }
@@ -1723,6 +1737,15 @@ class PolicyDescriptorV2:
             self.registered_action_kinds
         ):
             raise ContractError("registered action kinds must be unique and sorted")
+        registered = set(self.registered_action_kinds)
+        system_kinds = set(SYSTEM_ACTION_KINDS_V2)
+        if self.policy_kind is PolicyKindV2.SYSTEM:
+            if not registered or not registered.issubset(system_kinds):
+                raise ContractError(
+                    "system policies must register only system action kinds"
+                )
+        elif registered & system_kinds:
+            raise ContractError("player policies cannot register system action kinds")
         if self.policy_kind is PolicyKindV2.LLM and (self.provider is None or self.model is None):
             raise ContractError("LLM policy descriptors require provider and model identity")
         doc = self.to_doc()
@@ -2347,6 +2370,7 @@ class TurnTerminationV2(enum.StrEnum):
     FAILED = "failed"
     MANDATORY_UNRESOLVED = "mandatory_unresolved"
     REPLANS_EXHAUSTED = "replans_exhausted"
+    SYSTEM_HANDOFF = "system_handoff"
 
 
 @dataclass(frozen=True)
@@ -2376,8 +2400,25 @@ class TurnReceiptV2:
         auth_ids = {item.authorization_id for item in self.authorizations}
         if any(result.authorization_id not in auth_ids for result in self.results):
             raise ContractError("action result lacks its authorization in the turn receipt")
-        if self.termination is TurnTerminationV2.COMPLETED and self.safe_error is not None:
-            raise ContractError("completed turn receipt cannot carry an error")
+        if self.termination in {
+            TurnTerminationV2.COMPLETED,
+            TurnTerminationV2.SYSTEM_HANDOFF,
+        } and self.safe_error is not None:
+            raise ContractError("successful turn receipt cannot carry an error")
+        if (
+            self.termination is TurnTerminationV2.SYSTEM_HANDOFF
+            and (
+                not self.results
+                or self.results[-1].status
+                not in {
+                ActionStatusV2.ACCEPTED,
+                ActionStatusV2.DUPLICATE,
+                }
+            )
+        ):
+            raise ContractError(
+                "system handoff must end with an accepted execution"
+            )
         doc = self.to_doc()
         validate_doc(self.SCHEMA_REF, doc)
         _assert_identity(doc, "receipt_id")

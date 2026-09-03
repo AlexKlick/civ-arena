@@ -10,6 +10,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from civ_arena.v2 import (
+    PLAYER_ACTION_KINDS_V2,
+    SYSTEM_ACTION_KINDS_V2,
     ActionGraphEdgeV2,
     ActionGraphMetricsV2,
     ActionGraphNodeV2,
@@ -501,6 +503,90 @@ def test_turn_receipt_links_pre_and_post_state_hashes() -> None:
     assert receipt.post_observation_id == result.post_observation_id
 
 
+def test_system_turn_contracts_are_strict_roundtrippable_and_separated() -> None:
+    blockers = ObservableFactV2(
+        subject=PLAYER,
+        subject_scope=FactSubjectScopeV2.SELF,
+        predicate="turn_blockers",
+        value=KnowledgeValueV2.known(
+            ("civic_choice", "policy_slots"), observed_turn=3
+        ),
+        source=FactSourceV2.DIRECT,
+    )
+    observation = ObservationV2.create(
+        environment_id="firetuner-v2",
+        game_version="civ6-fixture-1",
+        ruleset_digest=RULESET,
+        turn=3,
+        active_player=PLAYER,
+        observing_player=PLAYER,
+        phase=ObservationPhaseV2.TURN,
+        observed_at_seq=0,
+        facts=[blockers],
+        mandatory_action_kinds=SYSTEM_ACTION_KINDS_V2,
+    )
+    assert ObservationV2.from_doc(observation.to_doc()) == observation
+    for index, kind in enumerate(SYSTEM_ACTION_KINDS_V2):
+        intent = ActionIntentV2.create(kind, PLAYER, proposal_index=index)
+        assert ActionIntentV2.from_doc(intent.to_doc()) == intent
+
+    system = PolicyDescriptorV2.create(
+        policy_kind=PolicyKindV2.SYSTEM,
+        policy_version="system-fixture-v2",
+        registered_action_kinds=SYSTEM_ACTION_KINDS_V2,
+    )
+    assert PolicyDescriptorV2.from_doc(system.to_doc()) == system
+    with pytest.raises(ContractError, match="player policies cannot register"):
+        PolicyDescriptorV2.create(
+            policy_kind=PolicyKindV2.SCRIPTED,
+            policy_version="forged-player-v2",
+            registered_action_kinds=[ActionKindV2.RESOLVE_CIVIC],
+        )
+    with pytest.raises(ContractError, match="only system action kinds"):
+        PolicyDescriptorV2.create(
+            policy_kind=PolicyKindV2.SYSTEM,
+            policy_version="forged-system-v2",
+            registered_action_kinds=[ActionKindV2.END_TURN],
+        )
+
+    action = LegalActionV2.create(
+        ActionKindV2.RESOLVE_CIVIC,
+        PLAYER,
+        observation.observation_id,
+        mandatory=True,
+    )
+    authorization = AuthorizationV2.create(
+        decision=AuthorizationDecisionV2.AUTHORIZED,
+        intent_id="b" * 64,
+        action_id=action.action_id,
+        observation_id=observation.observation_id,
+        graph_id="c" * 64,
+        reason_code=AuthorizationReasonV2.AUTHORIZED,
+    )
+    result = ActionResultV2.create(
+        status=ActionStatusV2.ACCEPTED,
+        action_id=action.action_id,
+        authorization_id=authorization.authorization_id,
+        pre_observation_id=observation.observation_id,
+        post_observation_id=observation.observation_id,
+        verification=VerificationStatusV2.NOT_VERIFIABLE,
+    )
+    receipt = TurnReceiptV2.create(
+        episode_id="system-episode",
+        turn=3,
+        player_id=0,
+        pre_observation_id=observation.observation_id,
+        post_observation_id=observation.observation_id,
+        proposal_id="d" * 64,
+        graph_ids=["c" * 64],
+        authorizations=[authorization],
+        results=[result],
+        replan_count=0,
+        termination=TurnTerminationV2.SYSTEM_HANDOFF,
+    )
+    assert TurnReceiptV2.from_doc(receipt.to_doc()) == receipt
+
+
 def test_receipt_semantic_hash_is_canonical() -> None:
     before = _observation()
     action = _action(before)
@@ -552,7 +638,7 @@ def _policy() -> PolicyDescriptorV2:
     return PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.SCRIPTED,
         policy_version="canonical-first-v2",
-        registered_action_kinds=list(ActionKindV2),
+        registered_action_kinds=PLAYER_ACTION_KINDS_V2,
     )
 
 

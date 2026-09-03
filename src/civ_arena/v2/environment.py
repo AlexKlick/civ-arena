@@ -45,6 +45,13 @@ FAKE_RULESET_DIGEST = sha256_hex(
 )
 NO_MOD_DIGEST = sha256_hex(canonical({"mod": "none"}))
 
+_TURN_BLOCKER_ACTIONS = {
+    "civic_choice": ActionKindV2.RESOLVE_CIVIC,
+    "policy_slots": ActionKindV2.FILL_POLICY_SLOTS,
+    "production": ActionKindV2.SET_CITY_PRODUCTION,
+    "research": ActionKindV2.SET_RESEARCH,
+}
+
 
 @dataclass(frozen=True)
 class EnvironmentExecutionV2:
@@ -199,16 +206,38 @@ class _AdapterCoreV2:
             research,
             production,
         )
-        mandatory: list[ActionKindV2] = []
-        if not overview["you"].get("researching") and research:
-            mandatory.append(ActionKindV2.SET_RESEARCH)
-        if any(
-            not city.get("production_queue")
-            for city in cities
-            if city.get("owner", city.get("owner_id")) == player_id
-        ):
-            mandatory.append(ActionKindV2.SET_CITY_PRODUCTION)
         phase_player = int(phase["phase_player"])
+        blockers: tuple[str, ...] = ()
+        observe_blockers = getattr(self.adapter, "observe_turn_blockers", None)
+        if phase_player == player_id and callable(observe_blockers):
+            raw_blockers = await observe_blockers(player_id)
+            if not isinstance(raw_blockers, tuple | list) or any(
+                not isinstance(item, str) for item in raw_blockers
+            ):
+                raise ContractError("live turn blockers have an invalid observable shape")
+            if any(item not in _TURN_BLOCKER_ACTIONS for item in raw_blockers):
+                raise ContractError("live turn contains an unregistered observable blocker")
+            blockers = tuple(sorted(set(raw_blockers)))
+            facts.append(
+                _fact(
+                    _player_ref(player_id),
+                    FactSubjectScopeV2.SELF,
+                    "turn_blockers",
+                    blockers,
+                    turn,
+                )
+            )
+        mandatory: list[ActionKindV2] = []
+        if phase_player == player_id:
+            if not overview["you"].get("researching") and research:
+                mandatory.append(ActionKindV2.SET_RESEARCH)
+            if any(
+                not city.get("production_queue")
+                for city in cities
+                if city.get("owner", city.get("owner_id")) == player_id
+            ):
+                mandatory.append(ActionKindV2.SET_CITY_PRODUCTION)
+            mandatory.extend(_TURN_BLOCKER_ACTIONS[item] for item in blockers)
         if phase_player == player_id:
             observation_phase = ObservationPhaseV2.TURN
             active = _player_ref(player_id)

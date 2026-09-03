@@ -30,6 +30,8 @@ from civ_arena.game.sim.state import parse_key
 from civ_arena.recall import RecallCorpus
 from civ_arena.strategy.store import StrategyStore
 from civ_arena.v2.contracts import (
+    PLAYER_ACTION_KINDS_V2,
+    SYSTEM_ACTION_KINDS_V2,
     ActionIntentV2,
     ActionKindV2,
     EntityRefV2,
@@ -61,6 +63,60 @@ class AgentRuntimeV2(Protocol):
     descriptor: PolicyDescriptorV2
 
     async def propose_turn(self, context: TurnContextV2) -> TurnProposalV2: ...
+
+
+class SystemHousekeepingRuntimeV2:
+    """Observation-only proposer for player-visible live turn blockers.
+
+    The runtime deliberately proposes at most one action.  Each accepted
+    mutation must be re-observed and the entire graph recompiled before the
+    next blocker can be considered, exactly like an untrusted player policy.
+    """
+
+    def __init__(self) -> None:
+        self.descriptor = PolicyDescriptorV2.create(
+            policy_kind=PolicyKindV2.SYSTEM,
+            policy_version="live-housekeeping-v2.0",
+            artifact_digest=sha256_hex(
+                canonical(
+                    {
+                        "algorithm": "one-mandatory-system-action-per-proposal",
+                        "action_kinds": [item.value for item in SYSTEM_ACTION_KINDS_V2],
+                    }
+                )
+            ),
+            registered_action_kinds=SYSTEM_ACTION_KINDS_V2,
+        )
+
+    async def propose_turn(self, context: TurnContextV2) -> TurnProposalV2:
+        if context.policy != self.descriptor:
+            raise ContractError("system turn context policy descriptor mismatch")
+        candidates = sorted(
+            (
+                action
+                for action in context.legal_actions.actions
+                if action.mandatory
+                and action.action_kind in SYSTEM_ACTION_KINDS_V2
+            ),
+            key=lambda action: action.action_id,
+        )
+        intents: list[ActionIntentV2] = []
+        if candidates:
+            action = candidates[0]
+            intents.append(
+                ActionIntentV2.create(
+                    action.action_kind,
+                    action.actor,
+                    target=action.target,
+                    parameters=dict(action.parameters),
+                    proposal_index=0,
+                )
+            )
+        return TurnProposalV2.create(
+            policy_id=self.descriptor.descriptor_id,
+            observation_id=context.observation.observation_id,
+            intents=intents,
+        )
 
 
 def _safe_scalar(value: Any) -> bool:
@@ -1161,7 +1217,7 @@ def policy_descriptor_v2(
         artifact_digest=sha256_hex(canonical(safe_identity)),
         provider=provider,
         model=model,
-        registered_action_kinds=ALL_ACTION_KINDS_V2,
+        registered_action_kinds=PLAYER_ACTION_KINDS_V2,
     )
 
 

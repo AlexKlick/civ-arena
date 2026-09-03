@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from civ_arena.v2.ledger import verify_ledger_v2
+
 REPO = Path(__file__).resolve().parents[1]
 CONFIG = REPO / "configs" / "live-hotseat-001.yaml"
 
@@ -28,33 +30,45 @@ def test_hotseat_dispatch_rehearsal_alternates_seats(tmp_path):
                           timeout=300.0)
     assert proc.returncode == 0, proc.stderr + proc.stdout
 
-    summary = json.loads(
-        (runs_root / "live-hotseat-001" / "summary.json").read_text())
-    assert summary["phase"] == "dispatch-hotseat"
-    assert summary["clean"] is True
-    assert summary["violations_total"] == 0
-    rows = summary["per_turn"]
-    # ALTERNATION: each round drives every seat once, in seat order
-    assert [(r["turn"], r["player"]) for r in rows] == [
+    run_dir = runs_root / "live-hotseat-001"
+    validation = verify_ledger_v2(run_dir)
+    assert validation.termination_reason == "success"
+    records = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text().splitlines()
+    ]
+    terminal = records[-1]["payload"]["episode_receipt"]
+    assert terminal["termination_reason"] == "success"
+    assert terminal["turns_completed"] == 4
+    receipts = [
+        row["payload"]["turn_receipt"]
+        for row in records
+        if row["event_type"] == "TurnCompleted"
+        and row["payload"]["turn_receipt"]["termination"] == "completed"
+    ]
+    # ALTERNATION: each round drives every seat once, in seat order.
+    assert [(r["turn"], r["player_id"]) for r in receipts] == [
         (1, 0), (1, 1), (2, 0), (2, 1)]
-    agents = {r["player"]: r["agent"] for r in rows}
-    assert agents[0] == "hotseat-planner"
-    assert agents[1] == "hotseat-turtler"
-    # both seats actually played (commanded effects landed for each)
-    assert sum(r["allowed_mutations"] for r in rows if r["player"] == 0) > 0
-    assert sum(r["allowed_mutations"] for r in rows if r["player"] == 1) > 0
-
-    records = [json.loads(line) for line in
-               (runs_root / "live-hotseat-001" / "events.jsonl")
-               .read_text().splitlines()]
-    # every tool call has its result pair (the log's replay contract)
-    results = [r for r in records if r["kind"] == "TOOL_RESULT"]
-    assert len(results) == len([r for r in records
-                                if r["kind"] == "TOOL_CALL"])
-    # both seats' calls are in the log
-    players_called = {r["player_id"] for r in records
-                      if r["kind"] == "TOOL_CALL"}
-    assert players_called == {0, 1}
-    # the planner seat's belief journal landed per seat
-    assert (runs_root / "live-hotseat-001" / "planner"
-            / "p0-journal.jsonl").exists()
+    assert all(receipt["results"] for receipt in receipts)
+    assert all(
+        result["status"] in {"accepted", "duplicate"}
+        for receipt in receipts
+        for result in receipt["results"]
+    )
+    assert {item["policy_kind"] for item in terminal["policies"]} == {
+        "planner",
+        "scripted",
+        "system",
+    }
+    state_events = [
+        row for row in records if row["event_type"] == "PolicyStateRecorded"
+    ]
+    assert len(state_events) >= 4  # mandatory-decision replans add durable states
+    assert {row["correlation_id"] for row in state_events} == {
+        "turn-1-p0",
+        "turn-1-p1",
+        "turn-2-p0",
+        "turn-2-p1",
+    }
+    assert not (run_dir / "summary.json").exists()
+    assert not (run_dir / "planner" / "p0-journal.jsonl").exists()

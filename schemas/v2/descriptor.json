@@ -88,7 +88,41 @@
           "uniqueItems": true,
           "items": {"$ref": "urn:civ-arena:common:2#/$defs/ActionKindV2"}
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"policy_kind": {"const": "system"}},
+            "required": ["policy_kind"]
+          },
+          "then": {
+            "properties": {
+              "registered_action_kinds": {
+                "minItems": 1,
+                "items": {"enum": ["fill_policy_slots", "resolve_civic"]}
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "registered_action_kinds": {
+                "items": {
+                  "enum": [
+                    "attack",
+                    "end_turn",
+                    "fortify",
+                    "found_city",
+                    "move_unit",
+                    "purchase",
+                    "set_city_production",
+                    "set_research"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

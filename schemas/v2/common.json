@@ -250,6 +250,7 @@
             "status",
             "strength",
             "terrain",
+            "turn_blockers",
             "turns_remaining",
             "type",
             "yields"
@@ -349,6 +350,15 @@
         },
         {
           "if": {
+            "properties": {"predicate": {"const": "turn_blockers"}},
+            "required": ["predicate"]
+          },
+          "then": {
+            "properties": {"value": {"$ref": "#/$defs/KnowledgeStringArrayV2"}}
+          }
+        },
+        {
+          "if": {
             "properties": {"predicate": {"const": "coord"}},
             "required": ["predicate"]
           },
@@ -421,10 +431,12 @@
       "enum": [
         "attack",
         "end_turn",
+        "fill_policy_slots",
         "fortify",
         "found_city",
         "move_unit",
         "purchase",
+        "resolve_civic",
         "set_city_production",
         "set_research"
       ]
@@ -450,6 +462,7 @@
             "slot_empty",
             "target_exists",
             "terrain",
+            "turn_blockers",
             "type"
           ]
         },
@@ -481,7 +494,7 @@
         },
         "subject": {"$ref": "#/$defs/EntityRefV2"},
         "attribute": {
-          "enum": ["buildings", "coord", "created", "fortified", "gold", "hp", "movement", "population", "production_queue", "researched", "researching", "status", "turn"]
+          "enum": ["buildings", "coord", "created", "fortified", "gold", "hp", "movement", "population", "production_queue", "researched", "researching", "status", "turn", "turn_blockers"]
         },
         "expected": {"$ref": "#/$defs/KnowledgeValueV2"},
         "region": {"$ref": "#/$defs/Identifier"}

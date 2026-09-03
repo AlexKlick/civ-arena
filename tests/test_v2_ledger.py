@@ -7,7 +7,7 @@ import pytest
 
 from civ_arena.canonical import canonical
 from civ_arena.v2 import (
-    ActionKindV2,
+    PLAYER_ACTION_KINDS_V2,
     AdapterKindV2,
     ArtifactRefV2,
     ComputeConfigV2,
@@ -71,7 +71,7 @@ def _policy() -> PolicyDescriptorV2:
     return PolicyDescriptorV2.create(
         policy_kind=PolicyKindV2.SCRIPTED,
         policy_version="fixture-v2",
-        registered_action_kinds=list(ActionKindV2),
+        registered_action_kinds=PLAYER_ACTION_KINDS_V2,
     )
 
 

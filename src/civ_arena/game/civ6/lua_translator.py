@@ -424,11 +424,13 @@ for row in GameInfo.Civics() do
     if not has then
         cu:SetProgressingCivic(row.Index)
         print("CIVIC_SET|" .. row.CivicType)
+        print("ACT|resolve_civic|OK|" .. row.CivicType)
         print("---END---")
         return
     end
 end
 print("CIVIC_FAIL|none-available")
+print("ACT|resolve_civic|ERR|ILLEGAL_MOVE|none-available")
 print("---END---")
 """
 
@@ -444,7 +446,12 @@ local slotTypeMap = {SLOT_ECONOMIC=0, SLOT_MILITARY=1, SLOT_DIPLOMATIC=2,
                      SLOT_WILDCARD=3, SLOT_GREAT_PERSON=4}
 local n = 0
 pcall(function() n = cu:GetNumPolicySlots() end)
-if n <= 0 then print("SLOTS_NONE|0") print("---END---") return end
+if n <= 0 then
+    print("SLOTS_NONE|0")
+    print("ACT|fill_policy_slots|ERR|ILLEGAL_MOVE|no-slots")
+    print("---END---")
+    return
+end
 local addList = {}
 local clearList = {}
 local picks = {}
@@ -469,10 +476,16 @@ for i = 0, n - 1 do
 end
 local count = 0
 for _ in pairs(addList) do count = count + 1 end
-if count == 0 then print("SLOTS_NONE|" .. count) print("---END---") return end
+if count == 0 then
+    print("SLOTS_NONE|" .. count)
+    print("ACT|fill_policy_slots|ERR|ILLEGAL_MOVE|no-empty-slot")
+    print("---END---")
+    return
+end
 UI.RequestPlayerOperation(me, PlayerOperations.UNLOCK_POLICIES, {})
 cu:RequestPolicyChanges(clearList, addList)
 print("POLICIES_SET|" .. count .. "|" .. table.concat(picks, ","))
+print("ACT|fill_policy_slots|OK|" .. count)
 print("---END---")
 """
 

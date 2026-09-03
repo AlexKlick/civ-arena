@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterable
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from civ_arena.game.sim.chaos import ChaosDirector, ChaosEvent, MutationSpec
 from civ_arena.recall import RecallCorpus
 from civ_arena.strategy.store import StrategyStore
 from civ_arena.v2.contracts import (
+    AdapterKindV2,
     ChaosEventConfigV2,
     ChaosHookV2,
     ChaosSpecV2,
@@ -49,6 +51,7 @@ from civ_arena.v2.ledger import EpisodeRecorderV2
 from civ_arena.v2.policy import (
     AgentRuntimeV2,
     PolicyServicesV2,
+    SystemHousekeepingRuntimeV2,
     build_policy_runtime_v2,
     restore_policy_history_v2,
     snapshot_policy_state_v2,
@@ -84,6 +87,7 @@ class ArenaV2:
         parent_episode_id: str | None = None,
         parent_terminal_event_hash: str | None = None,
         parent_episode_dir: Path | str | None = None,
+        system_runtime: SystemHousekeepingRuntimeV2 | None = None,
     ) -> None:
         if spec.schema != 2:
             raise ContractError("ArenaV2 requires a schema-2 MatchSpec")
@@ -101,6 +105,7 @@ class ArenaV2:
         self.episode_id = episode_id or spec.match_id
         self.parent_episode_id = parent_episode_id
         self.parent_terminal_event_hash = parent_terminal_event_hash
+        self.system_runtime = system_runtime
         self.recall_root = Path(recall_root) if recall_root else self.run_dir.parent
         self.telemetry = TelemetryRegistry()
         self.diary = DiaryStore()
@@ -175,6 +180,8 @@ class ArenaV2:
                 )
             self.runtimes[agent.player_id] = runtime
         descriptors = [runtime.descriptor for runtime in self.runtimes.values()]
+        if self.system_runtime is not None:
+            descriptors.append(self.system_runtime.descriptor)
         if len({item.descriptor_id for item in descriptors}) != len(descriptors):
             raise ContractError("V2 policy descriptors must be unique per seat")
 
@@ -238,8 +245,50 @@ class ArenaV2:
         turn: int,
         player_id: int,
     ) -> tuple[bool, str | None]:
-        snapshot = self.private_monitor.snapshot()
+        snapshot = (
+            self.private_monitor.snapshot()
+            if self.episode_config.watchdog_mode is WatchdogModeV2.ROLLBACK
+            else None
+        )
         observation = await self.environment.begin_turn(player_id, turn)
+        if self.system_runtime is not None:
+            for _ in range(32):
+                legal = ActionEnumeratorV2(self.spec.max_graph_actions).enumerate(
+                    observation
+                )
+                graph = ActionGraphCompilerV2(self.spec.max_graph_actions).compile(
+                    observation, legal
+                )
+                system_proposal = await self.system_runtime.propose_turn(
+                    TurnContextV2(
+                        observation,
+                        legal,
+                        graph,
+                        self.system_runtime.descriptor,
+                    )
+                )
+                if not system_proposal.intents:
+                    break
+                system_receipt = await TransactionalExecutorV2(
+                    self.environment,
+                    self.system_runtime.descriptor,
+                    episode_id=self.episode_id,
+                    max_graph_actions=self.spec.max_graph_actions,
+                    max_replans_per_turn=self.spec.max_replans_per_turn,
+                    recorder=recorder,
+                ).execute(system_proposal, observation, graph)
+                self._receipts.append(system_receipt)
+                if system_receipt.termination is not TurnTerminationV2.SYSTEM_HANDOFF:
+                    self._watchdog_sweep(snapshot)
+                    return False, system_receipt.safe_error or "system housekeeping failed"
+                completed_kind = system_proposal.intents[0].action_kind
+                observation = await self.environment.observe(player_id)
+                if completed_kind in observation.mandatory_action_kinds:
+                    self._watchdog_sweep(snapshot)
+                    return False, "system housekeeping made no observable progress"
+            else:
+                self._watchdog_sweep(snapshot)
+                return False, "system housekeeping exceeded its action bound"
         runtime = self.runtimes[player_id]
         executor = TransactionalExecutorV2(
             self.environment,
@@ -308,8 +357,14 @@ class ArenaV2:
             self._watchdog_sweep(snapshot)
             return False, receipt.safe_error or "turn execution failed"
 
-    async def run(self) -> dict[str, Any]:
-        """Run and terminally receipt every outcome, including cancellation."""
+    async def _run_schedule(
+        self,
+        phases: AsyncIterable[tuple[int, int]],
+        *,
+        expected_phases: int,
+        reset_environment: bool,
+    ) -> dict[str, Any]:
+        """Run one already-authorized phase schedule under a single V2 ledger."""
 
         if self.parent_episode_id is not None and self.resume_plan is None:
             raise ContractError(
@@ -337,6 +392,8 @@ class ArenaV2:
             self.private_monitor.drain_authorized_mutations()
 
         policies = [runtime.descriptor for runtime in self.runtimes.values()]
+        if self.system_runtime is not None:
+            policies.append(self.system_runtime.descriptor)
         recorder = EpisodeRecorderV2(
             self.run_dir,
             episode_id=self.episode_id,
@@ -365,32 +422,29 @@ class ArenaV2:
                     self.runtimes[player_id].descriptor.descriptor_id,
                     recorder,
                 )
-            if self.resume_plan is None:
+            if reset_environment and self.resume_plan is None:
                 await self.environment.reset(
                     {"seed": self.spec.seed, "chaos_director": self.chaos}
                 )
             stopped = False
-            agents = self.spec.agents
-            phase_start = (
-                self.resume_plan.completed_phases if self.resume_plan is not None else 0
-            )
-            phase_stop = self.spec.max_turns * len(agents)
-            for phase_index in range(phase_start, phase_stop):
-                turn = phase_index // len(agents) + 1
+            async for turn, player_id in phases:
+                if player_id not in self.runtimes:
+                    raise ContractError("phase schedule names an unregistered player")
                 final_turn = turn
-                agent = agents[phase_index % len(agents)]
                 completed, reason = await self._run_phase(
                     recorder,
                     turn=turn,
-                    player_id=agent.player_id,
+                    player_id=player_id,
                 )
                 if not completed:
                     aborted = reason
                     stopped = True
                     break
                 phases_completed += 1
-            if not stopped:
+            if not stopped and phases_completed == expected_phases:
                 termination = EpisodeTerminationV2.SUCCESS
+            elif not stopped:
+                aborted = "phase schedule ended before its declared horizon"
         except asyncio.CancelledError:
             termination = EpisodeTerminationV2.CANCELLED
             aborted = "match cancelled"
@@ -442,3 +496,43 @@ class ArenaV2:
                 for player_id, service in sorted(self.services.items())
             },
         }
+
+    async def run(self) -> dict[str, Any]:
+        """Run and terminally receipt a normal deterministic match."""
+
+        agents = self.spec.agents
+        phase_start = (
+            self.resume_plan.completed_phases if self.resume_plan is not None else 0
+        )
+        phase_stop = self.spec.max_turns * len(agents)
+
+        async def phases() -> AsyncIterable[tuple[int, int]]:
+            for phase_index in range(phase_start, phase_stop):
+                turn = phase_index // len(agents) + 1
+                yield turn, agents[phase_index % len(agents)].player_id
+
+        return await self._run_schedule(
+            phases(),
+            expected_phases=phase_stop - phase_start,
+            reset_environment=True,
+        )
+
+    async def run_prepared(
+        self,
+        phases: AsyncIterable[tuple[int, int]],
+        *,
+        expected_phases: int,
+    ) -> dict[str, Any]:
+        """Run a handshake-prepared live phase schedule without resetting it."""
+
+        if self.environment.descriptor.adapter_kind is not AdapterKindV2.FIRETUNER:
+            raise ContractError("prepared schedules are reserved for FireTuner")
+        if self.resume_plan is not None or self.parent_episode_id is not None:
+            raise ContractError("live prepared schedules cannot resume")
+        if expected_phases < 1:
+            raise ContractError("prepared schedule horizon must be positive")
+        return await self._run_schedule(
+            phases,
+            expected_phases=expected_phases,
+            reset_environment=False,
+        )
