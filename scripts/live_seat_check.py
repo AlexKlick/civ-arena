@@ -32,9 +32,12 @@ for i, p in ipairs(ps) do
   local cfg = PlayerConfigurations[pid]
   if cfg ~= nil then
     leader = tostring(cfg:GetLeaderTypeName())
-    slot = tostring(cfg:GetSlotStatus())
-    pause = tostring(cfg:GetWantsPause())
-    cfghuman = tostring(cfg:IsHuman())
+    if cfg.GetSlotStatus ~= nil then slot = tostring(cfg:GetSlotStatus()) end
+    -- GetWantsPause is front-end-only: absent in the GameCore context.
+    if cfg.GetWantsPause ~= nil then
+      pause = tostring(cfg:GetWantsPause())
+    end
+    if cfg.IsHuman ~= nil then cfghuman = tostring(cfg:IsHuman()) end
   end
   table.insert(out, "P" .. pid
     .. "|human=" .. tostring(p:IsHuman())

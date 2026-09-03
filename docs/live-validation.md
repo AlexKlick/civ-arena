@@ -597,3 +597,53 @@ driven by arena agents (planner vs turtler/planner). The engine AI is
 out of the game entirely, the puppet/lease machinery already exists
 per-player, and both seats already speak the arena's tool surface.
 That is the shape of a true full-length autonomous 1v1.
+
+## A1 — the in-game re-flag probe: ARCHITECTURE 1 CONFIRMED (2026-09-03)
+
+The 2026-09-02 catch-22 (hotseat session kills the tuner; the tuner-safe
+NONE-load demotes non-local humans) is BROKEN. The probe sequence, all
+observed live (artifacts: runs/a1-reflag-probe-*/probe-record.txt):
+
+1. **Hotseat create with EMPTY passwords** — the `--full --empty` variant
+   reads back `P0PW|`/`P1PW|` as EMPTY STRINGS (not nil), so the shipped
+   playerchange.lua `OnKeyUp_Return` auto-OK applies; the launch panel
+   indeed rendered with NO password field and one Return started Player 1's
+   turn. (ReadyButton ORB hitbox at window 0.50/0.888, as 09-02.)
+2. **UI Quick Save at turn 1** (the tuner is dead inside the hotseat-session
+   game by design — the wire save cannot run there; ESC menu → Quick Save
+   at 0.50/0.383), then file-swap the quicksave into
+   `Saves/Single/auto/AutoSave_0001.Civ6Save` — the only save location the
+   LoadGame params reliably resolve (09-02 learning; unchanged).
+3. **LoadGame(SERVER_TYPE_NONE)** with the load-menu screen OPEN (Single
+   Player → Load Game clicks first): loads OUR match, and 4318 rebinds at
+   the map transition. A fall-through load ALSO tears the front-end down
+   (4318 dies even when nothing loads) — every load attempt costs the
+   process's tuner; get the file right before loading.
+4. **The demote, precisely**: P0 human slot=3(SS_TAKEN); P1 human=FALSE
+   slot=**1(SS_OPEN)** — the seat is VACATED, not set to COMPUTER; the map
+   roster auto-fills AI majors (T_ROOSEVELT, TOMYRIS) + city-states.
+5. **The re-flag takes**: `PlayerConfigurations[1]:SetSlotStatus(SS_TAKEN)`
+   + pcall pause-clear + BroadcastPlayerInfo from the InGame context.
+   Read-backs: REFLAG_SLOT|1|3, REFLAG_CFGHUMAN|1|true; the GameCore
+   census then reads P1 human=TRUE slot=3 — and it HOLDS across turn
+   boundaries. (GetWantsPause is front-end-only — nil in GameCore.)
+6. **The engine WAITS on the re-flagged seat instead of running AI**: with
+   both puppets armed and seat 0's turn ended, the screen shows "WAITING
+   FOR GILGAMESH" (the human-wait state) — the engine-AI-turn class that
+   hung every long game is OUT of the game on this path. HOOK_ENTER|1 and
+   LEASE_SET|1|1 fire; city-states cycle HOOK_SKIP|not-puppet.
+7. **The local player does NOT auto-switch on the NONE path** — the engine
+   treats seat 1 like a remote human. `PlayerManager.SetLocalPlayerAndObserver(1)`
+   from GameCore WORKS from the wire (LOCALP 0→1, mid-game) — the A2
+   driver delta is exactly: switch the local player to the lease-holder at
+   each lease engagement; every GetLocalPlayer()-bound act builder and the
+   InGame ENDTURN then work for either seat unchanged.
+8. **A full engine cycle ran**: turn 1 p0→p1, turn 2 p0→p1 with leases
+   engaging each time and the re-flag intact at the final census.
+
+No hand-off panel appears on this path (the engine goes straight to
+waiting), so the planned Return-sweep is stall-path only. X-server aging
+re-confirmed: ~35 min is already too old for the menu bind — bounce X
+per session (the gaming-mode pin in /run/gaming-session-mode must say
+headless; a stale "local" pin from a hot-plug leaves the session 640x480
+with a dead render path — `gaming-mode` re-detects and restarts).
