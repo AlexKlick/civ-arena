@@ -1,6 +1,6 @@
 # CAR-M1 V2 ledger verification and exact fake replay
 
-Status: CAR-106 implementation candidate
+Status: implemented by CAR-103/CAR-106 (`a5ea3c2`, `b443673`)
 
 `events.jsonl` is the only episode trust root. Every line is canonical JSON,
 schema 2, sequence-bound, semantically hashed, and chained to the preceding

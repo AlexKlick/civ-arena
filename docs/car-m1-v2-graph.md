@@ -1,6 +1,6 @@
 # CAR-M1 V2 legal-action graph kernel
 
-Status: CAR-105 implementation candidate
+Status: implemented by CAR-105 and made authoritative by CAR-107 (`c8a19c1` through `128cbd2`)
 
 `ActionGraphCompilerV2.compile(observation, legal_actions)` is a pure,
 observable-only compiler. It independently re-enumerates the complete legal

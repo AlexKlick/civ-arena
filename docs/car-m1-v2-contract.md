@@ -1,6 +1,6 @@
 # CAR-M1 V2 observable turn contract
 
-Status: CAR-102 contract freeze candidate
+Status: frozen and implemented by CAR-102 (`13c3c54`)
 
 JSON Schema dialect: Draft 2020-12
 

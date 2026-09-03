@@ -1,6 +1,6 @@
 # CAR-M1 V2 environment boundary
 
-Status: CAR-104 implementation candidate
+Status: implemented by CAR-104 and cut over by CAR-107 (`caa2954` through `128cbd2`)
 
 The V2 environment is split into two independently handed-out objects:
 

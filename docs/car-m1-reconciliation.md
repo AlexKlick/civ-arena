@@ -16,6 +16,7 @@ existing plan-local DAG as the required legal-action graph.
 | Source checkout at campaign handoff | `master` at `f60282ff2eda9cf991ba509a33b1c6772b798685`, tree `808ba83a1a2fbe2caa426f96999e75cc2192888c` |
 | CAR worktree | `/home/alexk/worktrees/civ-arena-car-m1-v2-20260902`, branch `car-m1-v2` |
 | Clean-floor commit | `eb43f337866c49d75722944b280ea884f4145d25`, tree `a1ee1dfb49874c74e795e591bb2343eb4b159af6` |
+| Latest implementation commit before final reporting | `b60ac0426c5462fa88ab24796e98dcb5c1a3b4ad`, tree `527a590f0069f852db497ce899a16412ce6158e0` |
 | GitHub repository | private `AlexKlick/civ-arena`; default branch `master` |
 | GitHub default-branch head at reconciliation | `292ea9209481fb67896179722097f24a745aa804` |
 | Pull requests at reconciliation | none |
@@ -45,28 +46,39 @@ gates.
 CAR-101 repaired the two retained pytest failures and the two Ruff findings
 present at the actual handoff. The tested working diff was SHA-256
 `e44c943dd3f018b48fd25cb0dede499a862582c27aec6c74f7f017e772535216`
-before and after the serial gate.
+before and after the serial gate. The original scratch-log names are reused by
+the final exact-head gate, so the durable baseline result is this reconciliation
+record plus clean-floor commit `eb43f33`, not the later contents of those `/tmp`
+paths.
 
 | Gate | Retained log | Result |
 |---|---|---|
-| `.venv/bin/python -m ruff check .` | `/tmp/car-m1-ruff.log` | PASS: zero findings |
-| `.venv/bin/python -m pytest -q` | `/tmp/car-m1-pytest.log` | PASS: 521 passed, 0 failed, 1 skipped in 615.51s |
-| `uv build` | `/tmp/car-m1-build.log` | PASS: sdist and wheel built |
+| `.venv/bin/python -m ruff check .` | CAR-101 captured run | PASS: zero findings |
+| `.venv/bin/python -m pytest -q` | CAR-101 captured run | PASS: 521 passed, 0 failed, 1 skipped in 615.51s |
+| `uv build` | CAR-101 captured run | PASS: sdist and wheel built |
 
 This is repository/build proof only. It is not provider, browser, FireTuner,
 live Civ VI, remote integration, or independent-review proof.
 
 ## M1 gate matrix
 
-| M1 gate | Current status and exact evidence | Residual V2 gap | Owner | Disposition |
+| M1 gate | Implemented substrate | Verification boundary | Owner | Disposition |
 |---|---|---|---|---|
-| Versioned state/action contract | `src/civ_arena/game/adapter.py` has frozen-ish adapter dataclasses; `src/civ_arena/arena/events.py` writes schema 1 | No Draft 2020-12 schemas, strict V2 construction, semantic identities, or explicit knowledge states | CAR-102 | Replace at the public turn boundary; retain V1 reader |
-| Hidden-state isolation | Bound sessions, `arena/visibility.py`, simulator ground-truth oracle, and hostile-agent tests exist | Adapter observation is omniscient before projection; V2 policy values/errors/receipts are not structurally observable-only | CAR-102/CAR-104 | Amend and split policy/referee facets |
-| Action dependency graph | `planner/action_dag.py` canonicalizes one selected plan and has local dependency rules | Not the complete observable legal-action graph; lacks normative edge identities, complete edge kinds, graph identity, and deterministic cycle witnesses | CAR-105 | Replace as execution authority |
-| Transactional revalidation | `planner/executor.py` prevalidates against a rolling belief and reconciles selected tools | It does not bind authorization to observation/graph identity or fully re-observe, re-enumerate, and recompile after every accepted mutation | CAR-105/CAR-107 | Replace mutation path |
-| Receipt and replay | `arena/events.py` is sequenced append-only V1; `replay.py` re-executes fake runs | No event hash chain, object custody, typed terminal receipts, environment binding, or V2 tamper verification | CAR-103/CAR-106 | Freeze V1 read-only; new runs V2 only |
-| Live adapter | FireTuner adapter, fake tuner, hotseat driver, and retained M18 evidence exist | Policy/referee facets are not split; housekeeping can mutate outside a graph-authorized system proposal; no V2 capability descriptor | CAR-104/CAR-107/CAR-110 | Port without claiming fake smoke as live proof |
-| Baselines and experiment | M19/M20 experiment tooling is historical evidence | No identical-proposal A/B/C/D turn-core corpus or declared control-failure composite | CAR-108/CAR-109 | Build isolated V2 harness; keep provider evidence separate |
+| Versioned state/action contract | Nine Draft 2020-12 documents under `schemas/v2/`; frozen strict `from_doc`/`to_doc` types and semantic identities in `v2/contracts.py` (`13c3c54`) | Repository tests and schema construction are verified; no claim about external consumers | CAR-102 | COMPLETE |
+| Hidden-state isolation | Observable execution facet and private referee monitor; closed observation vocabulary; safe errors/receipts; noninterference pins (`13c3c54`, `caa2954`) | Actual-live observation behavior remains part of the blocked live lane | CAR-102/CAR-104 | SOURCE COMPLETE |
+| Action dependency graph | Full observable legal-action graph with eight typed edge kinds, stable identities, dominance, deterministic witnesses/order, overflow refusal, exact reduction (`c8a19c1`) | Verified in simulator/property tests; no provider/live extrapolation | CAR-105 | COMPLETE |
+| Transactional revalidation | Graph-bound executor remaps each intent and fully recomputes after every accepted mutation; terminal end-turn and system housekeeping are authorized proposals (`4193051` through `128cbd2`) | Actual Civ VI execution is blocked at host launch | CAR-105/CAR-107 | SOURCE COMPLETE |
+| Receipt and replay | Locked hash-chained V2 event root, content-addressed objects, typed terminal receipts, child resume, exact fake replay, frozen V1 reader (`a5ea3c2`, `b443673`, `128cbd2`) | Exact live replay is not claimed | CAR-103/CAR-106 | FAKE/REPO COMPLETE |
+| Live adapter | FireTuner split boundary, V2 hotseat driver, executor-authorized housekeeping, environment identity, four immutable CAR-110 configs; 4/4 fake rehearsals (`0cf3a8b`, `b60ac04`) | Actual four-run Civ VI gate BLOCKED: current Steam handoff starts no game process/window/listener | CAR-104/CAR-107/CAR-110 | BLOCKED (HOST/LIVE) |
+| Baselines and experiment | Immutable 80-generated/20-curated manifest and 400-row A/B/C/D result; D=4 vs A=508, B=224, C=225 (`4a86085`, `8e50f7b`, `4da3a2f`) | Provider pilot captured only 14/20 valid proposals; full model strata prohibited | CAR-108/CAR-109 | DETERMINISTIC PASS; PROVIDER BLOCKED |
+
+The normalized evidence and research verdict are in
+[`docs/car-m1-v2-validation-report.md`](car-m1-v2-validation-report.md).
+Repository completion, deterministic artifacts, provider calls, host/live
+execution, remote state, independent review, and owner approval are distinct
+lanes. The overall CAR-M1/H1 verdict is `BLOCKED` until the mandatory provider
+and actual-live evidence exists, regardless of the deterministic result or
+final repository gate.
 
 ## GitHub coordination
 
