@@ -83,7 +83,7 @@ class ReplayRuntime:
         await facade.end_turn()
 
 
-def _strip(records: list[dict[str, Any]]) -> list[tuple]:
+def _strip(records: list[dict[str, Any]], live: bool = False) -> list[tuple]:
     """Replay-comparable projection: envelope fields dropped.
 
     ``recalled`` is compared, unlike the observation ``observed`` digest:
@@ -91,17 +91,28 @@ def _strip(records: list[dict[str, Any]]) -> list[tuple]:
     construction), but a recall re-queries an EXTERNAL corpus — if the
     corpus changed between run and replay, the model would have been fed
     different lessons, and the certificate must say so, not stay green.
-    ``.get`` keeps pre-M13 records comparable (None == None)."""
+    ``.get`` keeps pre-M13 records comparable (None == None).
+
+    ``live=True`` (B1, live-run mode): the live digest hashes
+    (``after_state_hash`` / ``state_hash``) are sha over Civ VI engine
+    digests — a domain the SIMULATOR cannot re-derive, so elementwise
+    hash equality is unsatisfiable by construction. Live mode compares
+    the STRUCTURAL SKELETON (kind, turn, player, agent, tool,
+    args_digest, status, rejection, recalled) and excludes the hash
+    fields; the declared limitation is that the live certificate is
+    structural re-execution, not state equality."""
     out: list[tuple] = []
     for rec in records:
         kind = rec["kind"]
         if kind in ("TOOL_CALL", "TOOL_RESULT"):
-            out.append((
+            row = (
                 kind, rec.get("turn"), rec.get("player_id"), rec.get("agent_id"),
                 rec.get("tool"), rec.get("args_digest"), rec.get("status"),
-                rec.get("rejection"), rec.get("after_state_hash"),
-                rec.get("recalled"),
-            ))
+                rec.get("rejection"),
+            )
+            if not live:
+                row = row + (rec.get("after_state_hash"),)
+            out.append(row + (rec.get("recalled"),))
         elif kind == "VIOLATION":
             out.append((kind, rec.get("turn"), rec.get("agent_id"),
                         json.dumps(rec.get("watchdog"), sort_keys=True)))
@@ -109,7 +120,10 @@ def _strip(records: list[dict[str, Any]]) -> list[tuple]:
             out.append((kind, rec.get("turn"), rec.get("player_id"),
                         json.dumps(rec.get("manifest"), sort_keys=True)))
         elif kind == "TURN_END":
-            out.append((kind, rec.get("turn"), rec.get("state_hash")))
+            row: tuple = (kind, rec.get("turn"))
+            if not live:
+                row = row + (rec.get("state_hash"),)
+            out.append(row)
         else:
             continue  # MATCH_START/END, LEASE_*, CHECKPOINT, HEARTBEAT, UNAUTHORIZED
     return out
@@ -130,7 +144,27 @@ def load_calls(records: list[dict[str, Any]],
 
 
 async def replay_run(run_dir: Path, spec: MatchSpec,
-                     replay_dir: Path) -> dict[str, Any]:
+                     replay_dir: Path, live: bool | None = None,
+                     ) -> dict[str, Any]:
+    """``live`` (B1): None auto-detects by the run's own summary — the
+    live driver writes a ``"phase"`` key, a simulated Arena.run never
+    does. Live mode (a) normalizes the live turn axis onto the replay's
+    (a live dispatch attaches mid-game at engine turn N; the sim always
+    starts at 1), (b) excludes undriven seats from the REPLAYED strip
+    (live seat 1 is the engine's own AI — outside the referee — so its
+    replayed synthetic end_turn pair is not comparable), and (c) uses
+    _strip's structural skeleton (see its docstring)."""
+    if live is None:
+        live = _is_live_run(run_dir)
+    # a replay dir is a DERIVED artifact, never a trust root: a stale one
+    # from an earlier replay would have the Arena APPEND a second match
+    # into the same events.jsonl (observed 2026-09-03: 388+308 'identical'
+    # rows reported as 696) — wipe it so every replay starts from zero
+    stale = Path(replay_dir) / "events.jsonl"
+    if stale.exists():
+        stale.unlink()
+        for leftover in Path(replay_dir).glob("*-replay*"):
+            leftover.unlink()
     records = _load_records(Path(run_dir) / "events.jsonl")
     agents_by_id = {a.agent_id: a.player_id for a in spec.agents}
     calls = load_calls(records, agents_by_id)
@@ -149,25 +183,80 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
                   recall_root=Path(run_dir).parent)
     summary = await arena.run()
 
-    live = _strip(records)
-    replayed = _strip(arena.log.records())
+    strip_kwargs = {"live": True} if live else {}
+    live_strip = _strip(records, **strip_kwargs)
+    replayed_records = arena.log.records()
+    if live:
+        driven = set(calls)  # pids with recorded TOOL_CALLs
+        replayed_records = [
+            rec for rec in replayed_records
+            # undriven seats (live seat 1 = the engine's own AI, outside
+            # the referee) contribute nothing comparable; VIOLATIONS are
+            # always kept — a replay violation against a clean live log
+            # must diverge loudly
+            if rec.get("kind") == "VIOLATION"
+            or rec.get("player_id") in driven]
+        offset = _live_turn_offset(records)
+        if offset:
+            live_strip = [_shift_turns(row, -offset) for row in live_strip]
+    replayed = _strip(replayed_records, **strip_kwargs)
     first_divergence: int | None = None
-    for i, (a, b) in enumerate(zip(live, replayed, strict=False)):
+    divergences: list[str] = []
+    for i, (a, b) in enumerate(zip(live_strip, replayed, strict=False)):
         if a != b:
-            first_divergence = i
-            break
-    if first_divergence is None and len(live) != len(replayed):
-        first_divergence = min(len(live), len(replayed))
+            if first_divergence is None:
+                first_divergence = i
+            if live and len(divergences) < 20:
+                divergences.append(f"#{i}: live={_row_str(a)} "
+                                   f"replayed={_row_str(b)}")
+            elif not live:
+                break
+    if first_divergence is None and len(live_strip) != len(replayed):
+        first_divergence = min(len(live_strip), len(replayed))
 
     return {
         "summary": summary,
         "identical": first_divergence is None,
         "first_divergence": first_divergence,
-        "live_events": len(live),
+        "divergences": divergences,
+        "live_events": len(live_strip),
         "replayed_events": len(replayed),
         "live_final_hash": _final_hash(run_dir),
         "replayed_final_hash": summary.get("final_state_hash"),
+        "live_mode": live,
     }
+
+
+def _row_str(row: tuple) -> str:
+    """One strip row, compact for the itemized divergence report."""
+    kind = row[0]
+    if kind in ("TOOL_CALL", "TOOL_RESULT"):
+        return (f"{kind}[t{row[1]}p{row[2]} {row[4]} "
+                f"{row[6] or ''}{('/' + row[7]) if row[7] else ''}]")
+    return f"{kind}[t{row[1]}]"
+
+
+def _is_live_run(run_dir: Path) -> bool:
+    summary = Path(run_dir) / "summary.json"
+    if not summary.exists():
+        return False
+    try:
+        return "phase" in json.loads(summary.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _live_turn_offset(records: list[dict[str, Any]]) -> int:
+    """The live log's first driven turn minus one (a live dispatch that
+    attached at engine turn 2 has offset 1). 0 when there are no calls."""
+    turns = [rec.get("turn") for rec in records
+             if rec["kind"] == "TOOL_CALL" and rec.get("turn") is not None]
+    return min(turns) - 1 if turns else 0
+
+
+def _shift_turns(row: tuple, delta: int) -> tuple:
+    """Shift a strip row's turn element (index 1 in every comparable kind)."""
+    return (row[0], row[1] + delta, *row[2:]) if len(row) > 1 else row
 
 
 def _final_hash(run_dir: Path) -> str | None:
@@ -194,19 +283,34 @@ async def _main_async(argv: list[str] | None = None) -> int:
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--config", type=Path, required=True)
     ap.add_argument("--replay-dir", type=Path, default=None)
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--live", dest="live", action="store_true",
+                      default=None,
+                      help="force live-run mode (auto-detected by default "
+                           "from the run's summary 'phase' key)")
+    mode.add_argument("--force-sim", dest="live", action="store_false",
+                      help="force simulator-mode comparison (full hashes)")
     opts = ap.parse_args(argv)
 
     from civ_arena.config import load_config
 
     spec = load_config(opts.config)
     replay_dir = opts.replay_dir or (opts.run_dir.parent / f"{opts.run_dir.name}-replay")
-    result = await replay_run(opts.run_dir, spec, replay_dir)
+    result = await replay_run(opts.run_dir, spec, replay_dir, live=opts.live)
     if result["identical"]:
         print(f"REPLAY OK: {result['live_events']} comparable events identical; "
-              f"final hash {result['replayed_final_hash']}")
+              f"final hash {result['replayed_final_hash']}"
+              + (" [live mode]" if result.get("live_mode") else ""))
         return 0
     print(f"REPLAY DIVERGED at comparable-event {result['first_divergence']} "
           f"(live {result['live_events']} vs replayed {result['replayed_events']})")
+    if result.get("live_mode"):
+        print("live mode: the sim cannot re-derive the Civ VI board — "
+              "each divergence below is an itemized sim-legality boundary, "
+              "not tamper evidence by itself (a tampered log diverges in "
+              "args_digest/skeleton, which these rows show verbatim):")
+        for line in result["divergences"]:
+            print("  ", line)
     return 4
 
 

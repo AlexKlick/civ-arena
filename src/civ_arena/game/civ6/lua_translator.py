@@ -164,9 +164,13 @@ print("---END---")
 
 def cities_read() -> str:
     """Sim-CITIES-shaped omniscient read. production_queue is read back via
-    a pcall'd BuildQueue chain — if the GameCore accessor is absent the
-    queue reads empty (declared limitation, docs §6: the turtler then re-
-    issues production each turn; EXCLUSIVE replace keeps that legal).
+    GetCurrentProductionTypeHash — the accessor every shipped UI consumer
+    uses (citysupport/productionpanel/productionhelper; 0 = nothing
+    building). The earlier GetCurrentProductionType chain was dead weight:
+    that method exists nowhere in shipped Lua, so the pcall always failed
+    and the queue read '-' on every row — which made housekeeping re-fill
+    production EVERY turn and overwrite the agent's own choice
+    (live-tourney-glm53: MONUMENT x10 replacing SCOUT/SETTLER).
     hp/food_bucket/production_bucket/buildings are placeholder constants:
     foreign cities are hidden entirely under M14d's empty visibility sets,
     so only OWN cities (projection pass-through) ever carry them."""
@@ -188,9 +192,9 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         local queue = "-"
         pcall(function()
             local bq = city:GetBuildQueue()
-            if bq ~= nil and bq.GetCurrentProductionType ~= nil then
-                local h = bq:GetCurrentProductionType()
-                if h ~= nil and h ~= -1 then
+            if bq ~= nil and bq.GetCurrentProductionTypeHash ~= nil then
+                local h = bq:GetCurrentProductionTypeHash()
+                if h ~= nil and h ~= 0 then
                     for row in GameInfo.Units() do
                         if row.Hash == h then queue = row.UnitType break end
                     end
@@ -528,6 +532,33 @@ def set_puppet(player_id: int, enabled: bool) -> str:
     return f"Puppeteer.SetPuppet({player_id}, {str(enabled).lower()})"
 
 
+def switch_local_player(player_id: int) -> str:
+    """A2 (2026-09-03, live-proven in the A1 probe): on the
+    LoadGame(SERVER_TYPE_NONE) path the engine treats a re-flagged human
+    seat like a REMOTE player — it waits on the turn but never makes the
+    seat local, so every GetLocalPlayer()-bound act builder and the
+    InGame ENDTURN would act as the wrong seat. Switching the local
+    player at lease engagement restores the hotseat semantics; this call
+    works from the GameCore context mid-game (LOCALP 0->1 observed)."""
+    return (f"PlayerManager.SetLocalPlayerAndObserver({player_id}) "
+            f"print('LOCAL_SWITCHED|{player_id}|' "
+            ".. tostring(Game.GetLocalPlayer())) print('---END---')")
+
+
+def unpause_local() -> str:
+    """A2 belt-and-braces: the wire-side core of the game's own hotseat
+    PlayerChange OnOk (playerchange.lua) — clear the seat's WantsPause and
+    broadcast. Idempotent when no pause exists; no hand-off panel appears
+    on the NONE-load path (the engine goes straight to waiting), so this
+    is stall-path insurance, not hot-path."""
+    return ("local lp = Game.GetLocalPlayer() "
+            "local pc = PlayerConfigurations[lp] "
+            "if pc ~= nil and pc.SetWantsPause ~= nil then "
+            "pc:SetWantsPause(false) end "
+            "pcall(function() Network.BroadcastPlayerInfo(lp) end) "
+            "print('UNPAUSED|' .. tostring(lp)) print('---END---')")
+
+
 def begin_ambient_window(player_id: int) -> str:
     return f"Puppeteer.BeginAmbientWindow({player_id})"
 
@@ -787,16 +818,44 @@ CityManager.RequestOperation(pCity, CityOperationTypes.BUILD, tParams)
 local turns = -1
 pcall(function() turns = math.floor(bq:GetTurnsLeft(item.Hash)) end)
 -- Codex P1-4 readback: OK means the queue TOOK the item, not merely that
--- the request was submitted (upstream's NOT_SET verification shape)
-local cur = -1
+-- the request was submitted (upstream's NOT_SET verification shape).
+-- B2: the accessor is GetCurrentProductionTypeHash (0 = nothing) — the
+-- old GetCurrentProductionType chain never existed in shipped Lua, so
+-- cur stayed -1 and EVERY submission "passed" (live-tourney-glm53: ten
+-- MONUMENT re-queues, each overwriting the agent's own choice, all OK).
+local cur = 0
 pcall(function()
-    if bq.GetCurrentProductionType ~= nil then cur = bq:GetCurrentProductionType() end
+    if bq.GetCurrentProductionTypeHash ~= nil then
+        cur = bq:GetCurrentProductionTypeHash()
+    end
 end)
-if cur ~= -1 and cur ~= item.Hash then
+if cur ~= item.Hash then
     print('ACT|set_city_production|ERR|ILLEGAL_MOVE|engine-did-not-set')
     print('---END---') return
 end
 print('ACT|set_city_production|OK|{item_id}|' .. turns)
+print('---END---')"""
+
+
+def current_production_read(city_id: str) -> str:
+    """B2: the in-progress production hash for the local player's city
+    (0 = nothing building) — the housekeeping gate that stops the
+    every-turn re-fill. InGame context (CityManager lives there)."""
+    cid = int(city_id[1:]) % 65536
+    return f"""
+local me = Game.GetLocalPlayer()
+local pCity = CityManager.GetCity(me, {cid})
+if pCity == nil then
+    print('CURPROD|-1') print('---END---') return
+end
+local bq = pCity:GetBuildQueue()
+local h = 0
+pcall(function()
+    if bq ~= nil and bq.GetCurrentProductionTypeHash ~= nil then
+        h = bq:GetCurrentProductionTypeHash()
+    end
+end)
+print('CURPROD|' .. tostring(h))
 print('---END---')"""
 
 

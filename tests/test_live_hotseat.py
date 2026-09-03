@@ -58,3 +58,90 @@ def test_hotseat_dispatch_rehearsal_alternates_seats(tmp_path):
     # the planner seat's belief journal landed per seat
     assert (runs_root / "live-hotseat-001" / "planner"
             / "p0-journal.jsonl").exists()
+
+
+def _fake_mod():
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+
+    mod = FakeMod(injected=True)
+    return mod
+
+
+def test_fake_mod_local_player_follows_lease():
+    """A2: on the Architecture-1 path the engine makes the lease-holder
+    local, so the fake's `me` must follow the lease — an owner-checked
+    act on a seat-1 entity is ACCEPTED during seat 1's lease and
+    rejected (UNKNOWN_ENTITY) without one."""
+    from civ_arena.game.civ6 import lua_translator as lt
+
+    mod = _fake_mod()
+    seat1_units = [uid for uid, u in mod.units.items() if u["owner"] == 1]
+    assert seat1_units, "fake roster must include a seat-1 unit"
+    # composite engine id: owner 1 -> id + owner*65536
+    uid = f"u{seat1_units[0] + 1 * 65536}"
+    lua = lt.move_unit(uid, "1,2")
+
+    # no lease: `me` is 0 — the seat-1 unit is not the local player's
+    out = mod._act("move_unit", lua)  # noqa: SLF001
+    assert out and out[0].startswith("ACT|move_unit|ERR")
+
+    # seat 1's lease engaged: `me` is 1 — the act is owned and accepted
+    mod.lease = {"player": 1, "turn": 1}
+    out = mod._act("move_unit", lua)  # noqa: SLF001
+    assert out and out[0].startswith("ACT|move_unit|OK"), out
+
+
+def test_fake_mod_answers_local_switch_and_unpause():
+    """A2: the driver's lease-engagement commands (switch_local_player,
+    unpause_local) must be answered by the fake — the switch updates the
+    modeled local player and echoes the read-back row."""
+    mod = _fake_mod()
+    rows = mod.respond(
+        'PlayerManager.SetLocalPlayerAndObserver(1) '
+        'print("LOCAL_SWITCHED|1|" .. tostring(Game.GetLocalPlayer())) '
+        'print("---END---")')
+    assert rows and any(r.startswith("LOCAL_SWITCHED|1|1") for r in rows)
+    assert mod.local_player == 1
+    rows = mod.respond(
+        'local lp = Game.GetLocalPlayer() '
+        'PlayerConfigurations[lp]:SetWantsPause(false) '
+        'print("UNPAUSED|" .. tostring(lp)) print("---END---")')
+    assert rows and any(r.startswith("UNPAUSED|") for r in rows)
+
+
+def test_driver_hotseat_fires_local_switch_after_engagement():
+    """A2 static pin: the hotseat loop switches the local player to the
+    lease-holder right after begin_turn engages (the A1-proven delta —
+    the NONE-load path never makes the seat local on its own) and fires
+    the idempotent un-pause; stall recovery is Return-first there."""
+    src = (REPO / "src" / "civ_arena" / "game" / "civ6"
+           / "live_driver.py").read_text()
+    hotseat = src[src.index("async def phase_dispatch_hotseat"):
+                  src.index("_TECH_PREFERENCE")]
+    assert "switch_local_player(agent.player_id)" in hotseat
+    assert "unpause_local()" in hotseat
+    # the switch fires AFTER the begin_turn retry block, BEFORE the digest
+    i_begin = hotseat.index("await driver.referee.begin_turn(")
+    i_switch = hotseat.index("switch_local_player(agent.player_id)")
+    i_digest = hotseat.index("refresh_digest()")
+    assert i_begin < i_switch < i_digest
+    # Return-first stall sweep on the hotseat path only
+    assert 'keys=("Return", "Escape", "Escape")' in hotseat
+    dispatch = src[src.index("async def phase_dispatch("):
+                   src.index("async def phase_dispatch_hotseat")]
+    assert "Return" not in dispatch.split("_recover_stall")[-1].split("\n")[0]
+
+
+def test_driver_abort_paths_write_match_end():
+    """A2 static pin: both dispatch loops catch MatchAborted, run the
+    referee's abort_cleanup, and write a match_end carrying `aborted` —
+    an LLM auth-death mid-match must leave a replay-consumable record."""
+    src = (REPO / "src" / "civ_arena" / "game" / "civ6"
+           / "live_driver.py").read_text()
+    assert src.count("except MatchAborted as exc:") == 2
+    assert src.count('"aborted": str(exc)') == 2
+    assert "driver.referee.abort_cleanup(" in src
+    # single-seat parity: the runtime is aclose()d in phase_dispatch too
+    dispatch = src[src.index("async def phase_dispatch("):
+                   src.index("async def phase_dispatch_hotseat")]
+    assert "aclose" in dispatch

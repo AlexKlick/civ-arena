@@ -789,3 +789,57 @@ def test_llm_client_string_content_normalizes():
     assert _normalize_blocks([{"notype": 1}]) is None
     assert _normalize_blocks(42) is None
     assert _normalize_blocks(None) is None
+
+
+def test_set_city_production_readback_requires_hash_match():
+    """B2: the readback uses GetCurrentProductionTypeHash and OK requires
+    cur == item.Hash — the old GetCurrentProductionType chain never
+    existed in shipped Lua (cur stayed -1, every submission "passed",
+    and housekeeping overwrote the agent's choice ten turns running)."""
+    lua = lua_translator.set_city_production("c1", "MONUMENT")
+    assert "GetCurrentProductionTypeHash" in lua
+    assert "GetCurrentProductionType(" not in lua
+    assert "cur ~= item.Hash" in lua          # 0 (nothing set) FAILS now
+    assert "engine-did-not-set" in lua
+
+
+def test_cities_read_uses_production_type_hash():
+    """B2 content pin: the queue read resolves the hash through
+    GameInfo.Units/Buildings exactly as the shipped UI consumers do."""
+    lua = lua_translator.cities_read()
+    assert "GetCurrentProductionTypeHash" in lua
+    assert "GetCurrentProductionType(" not in lua
+    assert "GameInfo.Units()" in lua and "GameInfo.Buildings()" in lua
+    assert "h ~= 0" in lua                    # 0 = nothing building
+
+
+def test_current_production_read_shape():
+    """B2: the housekeeping gate read — CURPROD|<hash>, 0 = idle,
+    -1 = unknown city."""
+    lua = lua_translator.current_production_read("c1")
+    assert "CURPROD|" in lua
+    assert "GetCurrentProductionTypeHash" in lua
+
+
+def test_fake_mod_curprod_tracks_queue():
+    """B2 rehearsal fidelity: a queued fake city answers a non-zero
+    hash (housekeeping must skip it); an empty queue answers 0."""
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+
+    mod = FakeMod(injected=True)
+    city = next(iter(mod.cities.values()))
+    read = ("local me = Game.GetLocalPlayer() "
+            "local pCity = CityManager.GetCity(me, 1) "
+            "local bq = pCity:GetBuildQueue() "
+            "local h = bq:GetCurrentProductionTypeHash() "
+            "print('CURPROD|' .. tostring(h)) print('---END---')")
+    rows = mod.respond(read)
+    assert rows and rows[0] == "CURPROD|0"
+    mod.respond("-- arena:tool=set_city_production\n"
+                "local me = Game.GetLocalPlayer() "
+                "local pCity = CityManager.GetCity(me, 1) "
+                "CityManager.RequestOperation(pCity, CityOperationTypes.BUILD,"
+                " tParams)")
+    city["queue"] = "MONUMENT"   # the act handler's effect, set directly
+    rows = mod.respond(read)
+    assert rows and rows[0] == "CURPROD|4242"

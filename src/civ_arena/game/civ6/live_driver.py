@@ -31,7 +31,7 @@ from typing import Any
 from civ_arena.agents.runtime import AgentProfile, build_runtime
 from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
-from civ_arena.arena.referee import Referee, RefereeConfig
+from civ_arena.arena.referee import MatchAborted, Referee, RefereeConfig
 from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import AgentSpec, MatchSpec, load_config
@@ -423,6 +423,18 @@ async def phase_dispatch(
               f"({len(per_turn)}/{turns} turns, "
               f"violations={driver.referee.violation_count()})")
         return 0 if ok else 1
+    except MatchAborted as exc:
+        # A2: an LLM auth-death mid-match must still leave a clean,
+        # replay-consumable record (no summary at all was the old shape);
+        # mirrors Arena.run's abort path through the referee.
+        driver.referee.abort_cleanup(agent.agent_id)
+        await driver.match_end(final_turn := (per_turn[-1]["turn"]
+                                              if per_turn else 0), {
+            "phase": "dispatch", "strategy": strategy,
+            "per_turn": per_turn, "clean": False, "aborted": str(exc),
+        })
+        print(f"DISPATCH ABORTED: {exc}")
+        return 2
     finally:
         # Codex P1-7: a crashed run must not leave the engine parked under
         # a frozen lease — release this turn's lease (turn-bound, so a
@@ -433,6 +445,10 @@ async def phase_dispatch(
                     adapter._phase_open, adapter._turn_mirror))  # noqa: SLF001
         except Exception:
             pass
+        close = getattr(runtime, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
         await adapter.teardown()
 
 
@@ -499,6 +515,7 @@ async def phase_dispatch_hotseat(
         await adapter.read_raw(lua_translator.set_puppet(pid, True))
     per_turn: list[dict[str, Any]] = []
     driven_rounds = 0
+    seat_pid: int = -1
     await driver.match_start()
     try:
         while driven_rounds < rounds:
@@ -532,10 +549,20 @@ async def phase_dispatch_hotseat(
             except RuntimeError as e:
                 if "lease to engage" not in str(e):
                     raise
-                await _recover_stall(adapter, agent.player_id, turn)
+                await _recover_stall(adapter, agent.player_id, turn,
+                                     keys=("Return", "Escape", "Escape"))
                 adapter.expect_turn(turn)
                 await driver.referee.begin_turn(
                     agent.player_id, agent.agent_id, turn)
+            # A2 (live-proven A1): on the NONE-load path the engine waits
+            # on a re-flagged human seat WITHOUT making it local — switch
+            # the local player to the lease-holder so every
+            # GetLocalPlayer()-bound act builder and the InGame ENDTURN
+            # act as the driven seat; the un-pause is stall-path insurance
+            # (the game's own PlayerChange OnOk core, idempotent).
+            await adapter.read_raw(
+                lua_translator.switch_local_player(agent.player_id))
+            await adapter.read_raw(lua_translator.unpause_local())
             digest_open = await adapter.refresh_digest()
             await _resolve_blockers(adapter, agent.player_id, turn)
             housekept = adapter.drain_mutations()
@@ -580,6 +607,19 @@ async def phase_dispatch_hotseat(
               f"{len(per_turn)} driven turns, "
               f"violations={driver.referee.violation_count()})")
         return 0 if ok else 1
+    except MatchAborted as exc:
+        # A2: the aborting agent id is recoverable from the last lease —
+        # match_end still writes so replay/labels can consume the record.
+        abort_agent = (seats.get(seat_pid, {}).get("agent", {}).agent_id
+                       if isinstance(seat_pid, int) and seats else None)
+        if abort_agent is not None:
+            driver.referee.abort_cleanup(abort_agent)
+        await driver.match_end(per_turn[-1]["turn"] if per_turn else 0, {
+            "phase": "dispatch-hotseat", "strategy": strategy,
+            "per_turn": per_turn, "clean": False, "aborted": str(exc),
+        })
+        print(f"HOTSEAT ABORTED: {exc}")
+        return 2
     finally:
         try:
             if adapter._phase_open != -1:  # noqa: SLF001
@@ -721,11 +761,29 @@ async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
     """Set production for every own city whose queue reads empty (the
     turtler doctrine's preference order). A city finishing its build
     mid-turn with no follow-up parks ENDTURN_BLOCKING_PRODUCTION on the
-    cycle at turn end — a state the wire cannot release (glm-g1 t12)."""
+    cycle at turn end — a state the wire cannot release (glm-g1 t12).
+
+    B2: the CITIES read is advisory only — its queue field came back '-'
+    on every live row for the accessor's whole life, which made this
+    re-fill EVERY turn and overwrite the agent's own choice. The
+    authority is now current_production_read (the hash accessor the
+    shipped UI uses): a non-zero hash means a build is in progress and
+    the city is skipped regardless of what the CITIES row said."""
     cities = await adapter.observe(ObserveRequest(
         kind=ObserveKind.CITIES, player_id=player_id))
     for city in cities:
-        if city["owner"] != player_id or city.get("production_queue"):
+        if city["owner"] != player_id:
+            continue
+        in_progress = False
+        lines = await adapter.write_raw(lua_translator.current_production_read(
+            city["city_id"]))
+        row = next((ln for ln in lines if ln.startswith("CURPROD|")), None)
+        if row is not None:
+            try:
+                in_progress = int(row.split("|", 1)[1]) != 0
+            except ValueError:
+                in_progress = False
+        if in_progress or city.get("production_queue"):
             continue
         items = await adapter.observe(ObserveRequest(
             kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=player_id,
@@ -773,36 +831,48 @@ async def _ensure_research(adapter: FireTunerAdapter, player_id: int,
     print(f"housekeep[{turn}]: research empty -> STUDY {pick}: {res.status}")
 
 
-async def _dismiss_popups(turn: int) -> None:
+async def _dismiss_popups(turn: int, keys: tuple[str, ...] = ("Escape",
+                                                              "Escape"),
+                          ) -> None:
     """Dismiss a front-end MODAL that froze the engine's between-turn
     processing (2026-09-01 live game, turn 16: an advisor popup held the
     cycle after a clean turn 15 — the lease then never engaged). TWO
     Escapes, spaced: the first closes a modal if one is up; if none was,
     it OPENS the game menu, which the second closes. Bounded and
     self-undoing — only invoked from the already-stalled path, where the
-    alternative is the run aborting."""
+    alternative is the run aborting.
+
+    A2: the hotseat path passes Return FIRST — on the hotseat PlayerChange
+    panel an Escape OPENS the options menu (harmful), while Return runs
+    the engine's own empty-password auto-OK (playerchange.lua
+    OnKeyUp_Return). The wire-side unpause_local() covers the same panel
+    non-interactively; this sweep is the input-path insurance."""
     import subprocess
     import sys as _sys
     from pathlib import Path as _Path
     repo = _Path(__file__).resolve().parents[3]
-    for _ in range(2):
+    for k in keys:
         subprocess.run(
             [_sys.executable, str(repo / "scripts" / "x_click.py"),
-             "--key", "Escape"],
+             "--key", k],
             capture_output=True, timeout=15)
         await asyncio.sleep(2.0)
-    print(f"modal-sweep[{turn}]: popup dismissal sent (Escape x2)")
+    print(f"modal-sweep[{turn}]: popup dismissal sent ({' '.join(keys)})")
 
 
 async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
-                         turn: int) -> None:
+                         turn: int, keys: tuple[str, ...] = ("Escape",
+                                                             "Escape"),
+                         ) -> None:
     """Stall recovery on a lease-engage timeout, by SHAPE (2026-09-01):
     - ATTACH case (our turn ACTIVE, hook past, no puppet — the settle
       window can misread an imminent hook and skip the bootstrap): end
       the parked human turn ourselves, exactly what --bootstrap-end-turn
       does; the engine then processes and the next hook engages.
     - Otherwise assume a front-end modal (advisor tips freeze the
-      between-turn processing): dismiss with Escape x2."""
+      between-turn processing): dismiss with the given keys (hotseat
+      passes Return-first — Escape opens the options menu on the
+      PlayerChange panel)."""
     status = await adapter.poll_status()
     if (status.get("PUPPET_ACTIVE") is not True
             and status.get("TURN_ACTIVE") is True
@@ -811,7 +881,7 @@ async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
               f"{status['TURN']}")
         await adapter.write_raw(lua_translator.request_end_turn(player_id))
         return
-    await _dismiss_popups(turn)
+    await _dismiss_popups(turn, keys)
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,

@@ -89,6 +89,9 @@ class FakeMod:
         self.turn_active = False
         self.puppets: dict[int, bool] = {}
         self.turn = 1
+        # A2: models the engine's local player — the Architecture-1
+        # driver switches it to the lease-holder at engagement.
+        self.local_player = 0
         self.lease: dict[str, int] | None = None
         self.mark: dict[str, object] | None = None  # rolling DiffSinceLast baseline
         self.ledger_rows: list[str] = []
@@ -237,7 +240,11 @@ class FakeMod:
             m = re.search(pat, code)
             return m.group(1) if m else ""
 
-        me = 0
+        # A2 (Architecture 1): the engine makes the lease-holder local —
+        # the driver's switch_local_player call at lease engagement keeps
+        # GetLocalPlayer()-bound acts acting as the driven seat. The fake
+        # models the same truth: `me` follows the lease.
+        me = self.lease["player"] if self.lease else 0
 
         def dec(num: int) -> int:
             return num % 65536
@@ -445,6 +452,29 @@ class FakeMod:
             if not enabled and self.lease and self.lease["player"] == pid:
                 self.lease = None
             return [f"PUPPET_SET|{pid}|{str(enabled).lower()}"]
+        m = re.search(r"SetLocalPlayerAndObserver\(\s*(\d+)\s*\)", code)
+        if m:
+            # A2: the driver's lease-engagement local-player switch — the
+            # fake answers with the read-back the driver's Lua prints.
+            self.local_player = int(m.group(1))
+            return [f"LOCAL_SWITCHED|{self.local_player}|{self.local_player}",
+                    "---END---"]
+        if "SetWantsPause(false)" in code:
+            # A2: the wire-side PlayerChange OnOk (idempotent no-op here —
+            # the fake never parks a seat via WantsPause).
+            return [f"UNPAUSED|{self.local_player}", "---END---"]
+        m = re.search(r"CityManager\.GetCity\(me, (\d+)\)"
+                      r".*?CURPROD", code, re.S)
+        if m and "GetCurrentProductionTypeHash" in code:
+            # B2: the in-progress production hash (0 = nothing). The fake
+            # maps a non-empty queue to a non-zero hash so housekeeping
+            # skips cities with a build in progress.
+            cid = int(m.group(1)) % 65536
+            c = self.cities.get(cid)
+            if c is None or c["owner"] != self.local_player:
+                return ["CURPROD|-1", "---END---"]
+            h = 4242 if c.get("queue") else 0
+            return [f"CURPROD|{h}", "---END---"]
         if "Puppeteer.Status" in code:
             if not self.has_status:
                 return ["MOD_STATUS|unavailable"]
