@@ -2,7 +2,12 @@
 # the LOCAL seat vs the engine's own AI. The arena client speaks the
 # Anthropic protocol (base_url + /messages); llama-server's compat path is
 # VERIFIED with a curl before the match (see docs/live-validation.md §6).
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: live-tourney-qwen38
   seed: 811003
   max_turns: 10

@@ -1,7 +1,12 @@
 # M11 strategy-plane validation: same duel as llm-vs-turtler-001 (identical
 # seed and agents), with the typed memory tools in the model's hands.
 # The api key is NEVER inline — only the env var NAME lives here.
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: llm-vs-turtler-002
   seed: 947381
   max_turns: 40

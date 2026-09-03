@@ -1,7 +1,12 @@
 # M13 recall-lane validation: 40 turns, fresh seed, recall corpus = the
 # three claim-bearing matches (002/003/004 — 66 lessons). The paid leg:
 # does cross-match recall change behavior? Key never inline — env name.
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: llm-vs-turtler-005
   seed: 571903
   max_turns: 40

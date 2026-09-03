@@ -8,7 +8,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from civ_arena.arena.visibility import Scope, VisibilityPolicy
 from civ_arena.canonical import canonical, sha256_hex
-from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
+from civ_arena.game.adapter import ActionCommand, MutationRecord, ObserveKind, ObserveRequest
 from civ_arena.game.sim.simulator import SimulatorAdapter
 from civ_arena.game.sim.state import BUILDINGS, TECHS, TERRAIN, UNIT_TECH_REQ, UNIT_TYPES
 from civ_arena.v2.contracts import (
@@ -93,6 +93,8 @@ class PrivateRefereeMonitorV2(Protocol):
 
     def drain_mutations(self) -> list[Any]: ...
 
+    def drain_authorized_mutations(self) -> list[Any]: ...
+
 
 def _player_ref(player_id: int) -> EntityRefV2:
     return EntityRefV2(EntityTypeV2.PLAYER, f"p{player_id}")
@@ -137,15 +139,20 @@ class _AdapterCoreV2:
         self.observation_sequence = 0
         self.last_observations: dict[int, ObservationV2] = {}
         self.observation_owners: dict[str, int] = {}
+        self.authorized_mutations: list[MutationRecord] = []
 
     async def reset(self, config: Mapping[str, Any]) -> None:
         await self.adapter.setup(dict(config))
         self.observation_sequence = 0
         self.last_observations.clear()
         self.observation_owners.clear()
+        self.authorized_mutations.clear()
 
     async def begin_turn(self, player_id: int, turn: int) -> ObservationV2:
-        await self.adapter.begin_phase(player_id, turn)
+        info = await self.adapter.begin_phase(player_id, turn)
+        self.authorized_mutations.extend(
+            MutationRecord.from_doc(item) for item in info.get("manifest", [])
+        )
         return await self.observe(player_id)
 
     async def _project(
@@ -444,7 +451,10 @@ class _AdapterCoreV2:
             )
         if action.action_kind is ActionKindV2.END_TURN:
             try:
-                await self.adapter.end_phase(player_id, current.turn)
+                info = await self.adapter.end_phase(player_id, current.turn)
+                self.authorized_mutations.extend(
+                    MutationRecord.from_doc(item) for item in info.get("manifest", [])
+                )
             except Exception:
                 self.last_observations.pop(player_id, None)
                 return EnvironmentExecutionV2(
@@ -474,6 +484,8 @@ class _AdapterCoreV2:
                 safe_message="action outcome could not be verified",
             )
         if result.status in {"accepted", "duplicate"}:
+            if result.status == "accepted":
+                self.authorized_mutations.extend(result.mutations)
             # No second authorization bound to this observation can reach the
             # adapter. The executor must re-observe and recompile first.
             self.last_observations.pop(player_id, None)
@@ -524,13 +536,29 @@ class _ObservableFacet:
 
 
 class _PrivateMonitorFacet:
-    __slots__ = ("__drain", "__restore", "__snapshot", "__state_hash")
+    __slots__ = (
+        "__drain",
+        "__drain_authorized",
+        "__restore",
+        "__snapshot",
+        "__state_hash",
+    )
 
     def __init__(self, core: _AdapterCoreV2) -> None:
         self.__snapshot = core.adapter.snapshot
         self.__restore = core.adapter.restore
         self.__state_hash = core.adapter.state_hash
         self.__drain = core.adapter.drain_mutations
+        self.__drain_authorized = self._authorized_drainer(core)
+
+    @staticmethod
+    def _authorized_drainer(core: _AdapterCoreV2) -> Any:
+        def drain() -> list[MutationRecord]:
+            out = list(core.authorized_mutations)
+            core.authorized_mutations.clear()
+            return out
+
+        return drain
 
     def snapshot(self) -> Any:
         return self.__snapshot()
@@ -543,6 +571,9 @@ class _PrivateMonitorFacet:
 
     def drain_mutations(self) -> list[Any]:
         return self.__drain()
+
+    def drain_authorized_mutations(self) -> list[Any]:
+        return self.__drain_authorized()
 
 
 def split_adapter_v2(

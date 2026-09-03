@@ -1,7 +1,12 @@
 # M13 seeding run 2 of 2: same duel shape as llm-vs-turtler-002 on a FRESH
 # seed — replication for the M11 memory-plane result (n=1 -> n=3) and graph
 # history for the recall gate. The api key is NEVER inline — env name only.
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: llm-vs-turtler-004
   seed: 914753
   max_turns: 40

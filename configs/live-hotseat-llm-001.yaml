@@ -3,7 +3,12 @@
 # Seat 0 = glm-5.3 (Z.AI), seat 1 = MiniMax-M3 — two model families, each a
 # live/sim-proven seat driver (live-tourney-glm53-g1; M10 llm lane). Provider
 # wiring copied verbatim from the tourney configs; keys stay env-only.
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: live-hotseat-llm-001
   seed: 271829
   max_turns: 30

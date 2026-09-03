@@ -4,7 +4,12 @@
 # the scripted turtler — the same baseline the sim experiments measured
 # against, now on the real engine. The match alternates seats each turn
 # exactly as the simulator's interleaved phases do.
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: live-hotseat-001
   seed: 271828
   max_turns: 30

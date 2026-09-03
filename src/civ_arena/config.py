@@ -142,6 +142,14 @@ class MatchSpec:
     # Absent/empty => the recall_lessons tool is unavailable (existing
     # configs behave identically).
     recall_runs: list[str] = field(default_factory=list)
+    # Breaking V2 turn-core controls. Programmatic V1 research harnesses may
+    # still construct MatchSpec directly, but every file-backed config must
+    # state these values explicitly (load_config enforces that boundary).
+    schema: int = 2
+    execution_mode: str = "dag_tx"
+    scored: bool = False
+    max_graph_actions: int = 1024
+    max_replans_per_turn: int = 2
 
     def agent_for_player(self, player_id: int) -> AgentSpec:
         for agent in self.agents:
@@ -153,6 +161,7 @@ class MatchSpec:
 VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner"})
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
+VALID_EXECUTION_MODES = frozenset({"dag_tx", "sequential", "legal_list", "dag"})
 
 
 def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
@@ -161,8 +170,19 @@ def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
     return mapping[key]
 
 
-def parse_config(doc: dict[str, Any]) -> MatchSpec:
+def parse_config(doc: dict[str, Any], *, require_v2: bool = False) -> MatchSpec:
+    schema = doc.get("schema")
+    if schema is not None and schema != 2:
+        raise ConfigError(f"config schema {schema!r} is not supported; expected 2")
+    if require_v2 and schema != 2:
+        raise ConfigError("file-backed match configs require top-level schema: 2")
+    if schema == 2:
+        unknown_top = set(doc) - {"schema", "match", "agents", "chaos"}
+        if unknown_top:
+            raise ConfigError(f"config: unknown V2 keys {sorted(unknown_top)}")
     match = _require(doc, "match", "config")
+    if not isinstance(match, dict):
+        raise ConfigError("config.match must be a mapping")
     match_id = str(_require(match, "match_id", "match"))
     seed = int(_require(match, "seed", "match"))
     max_turns = int(match.get("max_turns", 100))
@@ -170,6 +190,18 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
     watchdog_mode = str(match.get("watchdog_mode", "flag_and_continue"))
     violation_limit = int(match.get("violation_limit", 5))
     checkpoint_every = int(match.get("checkpoint_every", 5))
+    if schema == 2:
+        for key in (
+            "execution_mode",
+            "scored",
+            "max_graph_actions",
+            "max_replans_per_turn",
+        ):
+            _require(match, key, "match")
+    execution_mode = str(match.get("execution_mode", "dag_tx"))
+    scored = match.get("scored", False)
+    max_graph_actions = match.get("max_graph_actions", 1024)
+    max_replans_per_turn = match.get("max_replans_per_turn", 2)
 
     if adapter not in VALID_ADAPTERS:
         raise ConfigError(f"unknown adapter {adapter!r}")
@@ -177,6 +209,22 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
         raise ConfigError(f"unknown watchdog_mode {watchdog_mode!r}")
     if max_turns < 1 or checkpoint_every < 1:
         raise ConfigError("max_turns and checkpoint_every must be >= 1")
+    if execution_mode not in VALID_EXECUTION_MODES:
+        raise ConfigError(f"unknown execution_mode {execution_mode!r}")
+    if schema == 2 and execution_mode != "dag_tx":
+        raise ConfigError(
+            "normal V2 match configs require execution_mode: dag_tx; "
+            "control treatments are experiment-harness only"
+        )
+    if not isinstance(scored, bool):
+        raise ConfigError("match.scored must be a boolean")
+    if not isinstance(max_graph_actions, int) or isinstance(max_graph_actions, bool) \
+            or not 1 <= max_graph_actions <= 65_536:
+        raise ConfigError("match.max_graph_actions must be an integer in [1, 65536]")
+    if not isinstance(max_replans_per_turn, int) \
+            or isinstance(max_replans_per_turn, bool) \
+            or not 0 <= max_replans_per_turn <= 100:
+        raise ConfigError("match.max_replans_per_turn must be an integer in [0, 100]")
 
     agents: list[AgentSpec] = []
     seen_players: set[int] = set()
@@ -272,7 +320,10 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
         match_id=match_id, seed=seed, max_turns=max_turns, adapter=adapter,
         watchdog_mode=watchdog_mode, violation_limit=violation_limit,
         checkpoint_every=checkpoint_every, agents=agents, chaos=chaos,
-        recall_runs=recall_runs,
+        recall_runs=recall_runs, schema=2 if schema == 2 else 1,
+        execution_mode=execution_mode, scored=scored,
+        max_graph_actions=max_graph_actions,
+        max_replans_per_turn=max_replans_per_turn,
     )
 
 
@@ -281,4 +332,4 @@ def load_config(path: Path | str) -> MatchSpec:
         doc = yaml.safe_load(fh)
     if not isinstance(doc, dict):
         raise ConfigError(f"{path}: config must be a mapping")
-    return parse_config(doc)
+    return parse_config(doc, require_v2=True)

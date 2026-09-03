@@ -88,6 +88,16 @@ class ObservationIndexV2:
         values = self._values.get((ref.entity_type, ref.entity_id), {})
         return next(iter(values.values())).scope if values else None
 
+    def facts_for(self, ref: EntityRefV2) -> dict[str, Any]:
+        """Return a detached known-fact view for one observable entity."""
+
+        return {
+            predicate: entry.value
+            for predicate, entry in self._values.get(
+                (ref.entity_type, ref.entity_id), {}
+            ).items()
+        }
+
 
 def _known(value: Any, turn: int) -> KnowledgeValueV2:
     if isinstance(value, list):

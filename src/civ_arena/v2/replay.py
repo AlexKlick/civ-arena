@@ -133,8 +133,19 @@ def _assert_authorization(
         return matches[0]
     if authorization.action_id is not None:
         raise ExactReplayError("refused authorization unexpectedly names an action")
+    intent = next(
+        (item for item in proposal.intents if item.intent_id == authorization.intent_id),
+        None,
+    )
     expected_reason = (
-        AuthorizationReasonV2.ACTION_ABSENT
+        AuthorizationReasonV2.MANDATORY_UNRESOLVED
+        if (
+            not matches
+            and intent is not None
+            and intent.action_kind is ActionKindV2.END_TURN
+            and observation.mandatory_action_kinds
+        )
+        else AuthorizationReasonV2.ACTION_ABSENT
         if not matches
         else AuthorizationReasonV2.AMBIGUOUS_INTENT
         if len(matches) > 1
@@ -254,7 +265,9 @@ async def replay_fake_episode_v2(
     postcondition_seen = False
     invalidation_seen = False
     awaiting_turn_start = True
+    continuation_expected = False
     turn_receipt_count = 0
+    completed_turn_count = 0
     action_count = 0
     observation_count = 0
     final_observation_id: str | None = None
@@ -282,6 +295,15 @@ async def replay_fake_episode_v2(
                 turn_executed_actions = []
                 current_proposal = None
                 awaiting_turn_start = False
+            elif continuation_expected:
+                replayed = await environment.observe(player_id)
+                turn_initial_observation = replayed
+                turn_graph_ids = []
+                turn_authorizations = []
+                turn_results = []
+                turn_executed_actions = []
+                current_proposal = None
+                continuation_expected = False
             elif pending_execution is not None and pending_execution.status in {
                 ActionStatusV2.ACCEPTED,
                 ActionStatusV2.DUPLICATE,
@@ -523,10 +545,15 @@ async def replay_fake_episode_v2(
                     raise ExactReplayError(
                         "completed turn lacks an accepted terminal end_turn"
                     )
-            elif terminal.termination_reason.value == "success":
-                raise ExactReplayError("successful episode contains a non-completed turn")
+                completed_turn_count += 1
+                awaiting_turn_start = True
+            else:
+                if current_observation.phase is not ObservationPhaseV2.TURN:
+                    raise ExactReplayError(
+                        "non-completed turn receipt closed the environment phase"
+                    )
+                continuation_expected = True
             turn_receipt_count += 1
-            awaiting_turn_start = True
             current_actions = None
             current_graph = None
             current_proposal = None
@@ -538,10 +565,16 @@ async def replay_fake_episode_v2(
 
         raise ExactReplayError(f"unexpected V2 event in fake replay: {event_type.value}")
 
-    if pending_authorization is not None or not awaiting_turn_start:
+    if pending_authorization is not None:
         raise ExactReplayError("episode terminates with an incomplete turn")
-    if terminal.turns_completed != turn_receipt_count:
-        raise ExactReplayError("episode receipt turn count does not match TurnCompleted events")
+    if terminal.termination_reason.value == "success" and not awaiting_turn_start:
+        raise ExactReplayError("successful episode terminates with an incomplete turn")
+    if not awaiting_turn_start and not continuation_expected:
+        raise ExactReplayError("episode terminates within an incomplete proposal")
+    if terminal.turns_completed != completed_turn_count:
+        raise ExactReplayError(
+            "episode receipt turn count does not match completed turn receipts"
+        )
     return ExactFakeReplayV2(
         episode_id=structural.episode_id,
         event_count=structural.event_count,

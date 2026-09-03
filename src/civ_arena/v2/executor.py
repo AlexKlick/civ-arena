@@ -521,6 +521,28 @@ class TransactionalExecutorV2:
             before_mapped = {
                 candidate.intent.intent_id for candidate in selected[1:]
             }
+            if action.action_kind is ActionKindV2.END_TURN:
+                # Terminal execution is the last opportunity to disposition
+                # every submitted intent. An action absent from every graph
+                # must not silently disappear merely because end_turn closes
+                # the phase before the loop can revisit it.
+                for pending in remaining:
+                    if pending.intent_id == item.intent.intent_id:
+                        continue
+                    matches = self._matches(pending, current_graph)
+                    self._refuse(
+                        pending,
+                        current_observation,
+                        current_graph,
+                        (
+                            AuthorizationReasonV2.ACTION_ABSENT
+                            if not matches
+                            else AuthorizationReasonV2.CONFLICT
+                        ),
+                        authorizations,
+                        correlation_id=correlation_id,
+                    )
+                remaining = [item.intent]
             authorization = self._authorization(
                 item.intent,
                 current_observation,

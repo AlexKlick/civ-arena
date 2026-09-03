@@ -1,7 +1,12 @@
 # M14d tourney leg 1: glm-5.3 (Z.AI) drives the LOCAL seat vs the engine's
 # own AI. Observable live on the gaming session; every call legality-checked
 # through the real referee. Key never inline — env var name only.
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: live-tourney-glm53
   seed: 811001
   max_turns: 10

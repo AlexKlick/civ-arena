@@ -1,6 +1,11 @@
 # M14d tourney leg 1: MiniMax-M3 drives the LOCAL seat vs the engine's own
 # AI (the M10/M11 sim opponent, now on the live board).
+schema: 2
 match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
   match_id: live-tourney-minimax-m3
   seed: 811002
   max_turns: 10
