@@ -427,7 +427,7 @@ async def phase_dispatch(
         # A2: an LLM auth-death mid-match must still leave a clean,
         # replay-consumable record (no summary at all was the old shape);
         # mirrors Arena.run's abort path through the referee.
-        driver.referee.abort_cleanup(agent.agent_id)
+        await driver.referee.abort_cleanup(agent.agent_id)
         await driver.match_end(final_turn := (per_turn[-1]["turn"]
                                               if per_turn else 0), {
             "phase": "dispatch", "strategy": strategy,
@@ -558,10 +558,17 @@ async def phase_dispatch_hotseat(
             # on a re-flagged human seat WITHOUT making it local — switch
             # the local player to the lease-holder so every
             # GetLocalPlayer()-bound act builder and the InGame ENDTURN
-            # act as the driven seat; the un-pause is stall-path insurance
-            # (the game's own PlayerChange OnOk core, idempotent).
-            await adapter.read_raw(
+            # act as the driven seat. Codex r1 P2-10: the read-back is
+            # GATED — a missing or ineffective switch must fail loudly,
+            # not send acts through the wrong seat. The un-pause is
+            # stall-path insurance (idempotent).
+            sw = await adapter.read_raw(
                 lua_translator.switch_local_player(agent.player_id))
+            want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
+            if not any(ln.strip() == want for ln in sw):
+                raise RuntimeError(
+                    f"local-player switch to p{agent.player_id} did not "
+                    f"take: {sw!r} — refusing to act as the wrong seat")
             await adapter.read_raw(lua_translator.unpause_local())
             digest_open = await adapter.refresh_digest()
             await _resolve_blockers(adapter, agent.player_id, turn)
@@ -613,7 +620,7 @@ async def phase_dispatch_hotseat(
         abort_agent = (seats.get(seat_pid, {}).get("agent", {}).agent_id
                        if isinstance(seat_pid, int) and seats else None)
         if abort_agent is not None:
-            driver.referee.abort_cleanup(abort_agent)
+            await driver.referee.abort_cleanup(abort_agent)
         await driver.match_end(per_turn[-1]["turn"] if per_turn else 0, {
             "phase": "dispatch-hotseat", "strategy": strategy,
             "per_turn": per_turn, "clean": False, "aborted": str(exc),
@@ -774,16 +781,21 @@ async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
     for city in cities:
         if city["owner"] != player_id:
             continue
-        in_progress = False
+        # Codex r1 P2-11: the read FAILS CLOSED — a missing/unparsable
+        # CURPROD row or -1 (unknown city) means we cannot prove the city
+        # is idle, so we skip it. Filling on uncertainty is the exact
+        # regression (overwriting the agent's own build) this gate exists
+        # to prevent.
         lines = await adapter.write_raw(lua_translator.current_production_read(
             city["city_id"]))
         row = next((ln for ln in lines if ln.startswith("CURPROD|")), None)
-        if row is not None:
-            try:
-                in_progress = int(row.split("|", 1)[1]) != 0
-            except ValueError:
-                in_progress = False
-        if in_progress or city.get("production_queue"):
+        if row is None:
+            continue
+        try:
+            cur = int(row.split("|", 1)[1])
+        except ValueError:
+            continue
+        if cur != 0 or city.get("production_queue"):
             continue
         items = await adapter.observe(ObserveRequest(
             kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=player_id,

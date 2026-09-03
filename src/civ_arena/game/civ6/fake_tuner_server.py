@@ -242,9 +242,11 @@ class FakeMod:
 
         # A2 (Architecture 1): the engine makes the lease-holder local —
         # the driver's switch_local_player call at lease engagement keeps
-        # GetLocalPlayer()-bound acts acting as the driven seat. The fake
-        # models the same truth: `me` follows the lease.
-        me = self.lease["player"] if self.lease else 0
+        # GetLocalPlayer()-bound acts acting as the driven seat. Codex r1
+        # P2-10: `me` derives from local_player (NOT the lease) so a
+        # missing switch fails loudly in rehearsal exactly as it would
+        # live — ownership follows the switch, not the hook.
+        me = self.local_player
 
         def dec(num: int) -> int:
             return num % 65536

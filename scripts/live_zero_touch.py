@@ -15,7 +15,7 @@ wait for GameCore_Tuner -> optionally run the live smoke.
                                                         # (the tuner only
                                                         # binds on a young
                                                         # X server, ~<35 min)
-    uv run python scripts/live_zero_touch.py --session arch1 \
+    uv run python scripts/live_zero_touch.py --session arch1 --fresh-x \
         --config configs/live-hotseat-001.yaml --rounds 3
     # the full Architecture-1 session (A1-proven 2026-09-03): bounce X ->
     # boot -> hotseat create (EMPTY passwords) -> enter -> UI quicksave ->
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import subprocess
 import sys
@@ -179,8 +180,13 @@ async def tuner_states(port: int | None = None) -> list[str]:
     try:
         _, states = await tuner_client.handshake(r, w)
         return [s for s in states if s and not s.isdigit()]
+    except Exception:
+        # dead-tuner handshakes connect-then-drop (the hotseat session
+        # kills the listener for the process) — that is "no states"
+        return []
     finally:
-        w.close()
+        with contextlib.suppress(Exception):
+            w.close()
 
 
 async def wait_for(check, budget_s: int, label: str,
@@ -206,7 +212,7 @@ def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
     """Run a live-lane phase script with the single-client cooldown
     discipline baked in (the tuner refuses rapid reconnects)."""
     time.sleep(8)
-    r = run([sys.executable, str(REPO / "scripts") / args[0], *args[1:]])
+    r = run([sys.executable, str(REPO / "scripts" / args[0]), *args[1:]])
     out = (r.stdout.strip() or r.stderr.strip())
     print(f"[phase {args[0]} {' '.join(args[1:])}] rc={r.returncode}")
     for ln in out.splitlines():
@@ -250,39 +256,73 @@ async def run_arch1_session(opts) -> int:
     key("Escape")               # skip the intro movie if it is still up
     await asyncio.sleep(8)
 
-    # 1. hotseat create, EMPTY passwords (the launch's transition poll is
-    #    expected to fail — rc 11 — the config+host have applied by then)
-    r = phase(["live_hotseat_launch.py", "--full", "--empty",
-               "--port", str(tuner_port())])
-    if "InSession|true" not in r.stdout or "P1PW|" not in r.stdout:
-        return 23
-    # 2. enter: ReadyButton ORB, then banner/Return alternation to the map
-    click(0.50, 0.888)
-
     async def ingame_up() -> bool:
         return "GameCore_Tuner" in await tuner_states()
 
-    for _ in range(20):         # ~5 min of banner/panel alternation
-        await asyncio.sleep(15)
-        if await ingame_up():
+    # 1. hotseat create, EMPTY passwords (the launch's transition poll is
+    #    expected to fail — rc 11 — the config+host have applied by then).
+    #    Codex r1 P2-8: the password gate demands the EXACT empty rows —
+    #    "P1PW|arena" or "P1PW|nil" must refuse (Return auto-OK needs "")
+    r = phase(["live_hotseat_launch.py", "--full", "--empty",
+               "--port", str(tuner_port())])
+    if "InSession|true" not in r.stdout \
+            or "\nP0PW|\n" not in f"\n{r.stdout}\n" \
+            or "\nP1PW|\n" not in f"\n{r.stdout}\n":
+        return 23
+    # 2. enter: ReadyButton ORB, then the leader-intro banner + hotseat
+    #    hand-off panels. The tuner is DEAD inside this game (the hotseat
+    #    session killed it) — the reliable "turn 1 is live" signal is the
+    #    engine writing the hotseat autosave.
+    click(0.50, 0.888)
+    session_start = time.time()
+    autosave = SAVES / "Hotseat" / "auto" / "AutoSave_0001.Civ6Save"
+
+    def turn1_autosaved() -> bool:
+        try:
+            return autosave.exists() \
+                and autosave.stat().st_mtime > session_start
+        except OSError:
+            return False
+
+    clicked_banner = False
+    for _ in range(24):         # ~8 min of banner/panel alternation
+        await asyncio.sleep(20)
+        if turn1_autosaved():
+            print("[enter] turn-1 autosave landed — game is in")
             break
         try:
             banner = find_teal_banner(capture_window())
         except Exception:
             banner = None
-        if banner:
+        if banner and not clicked_banner:
             click(*banner)
+            clicked_banner = True
         else:
-            key("Return")
-    if not await wait_for(ingame_up, MAP_LOAD_S, "ingame", 15.0):
+            key("Return")       # empty-password hand-off panel auto-OK
+    if not turn1_autosaved():
+        print("[enter] turn-1 autosave never appeared")
         return 24
     # 3. UI quicksave at turn 1 (the tuner is dead inside the hotseat
-    #    session's game by design — the save must go through the menu)
+    #    session's game by design — the save must go through the menu).
+    #    Codex r1 P1-4: a stale quicksave from an earlier run must NOT
+    #    pass as evidence — the gate is the file's mtime moving past the
+    #    session start, exactly like the turn-1 autosave gate.
+    quicksave = SAVES / "Hotseat" / "quick" / "quicksave.Civ6Save"
     key("Escape")
     await asyncio.sleep(4)
     click(0.50, 0.383)
-    await asyncio.sleep(6)
-    if not (SAVES / "Hotseat" / "quick" / "quicksave.Civ6Save").exists():
+    quicksaved = False
+    for _ in range(10):
+        await asyncio.sleep(3)
+        try:
+            if quicksave.exists() \
+                    and quicksave.stat().st_mtime > session_start:
+                quicksaved = True
+                break
+        except OSError:
+            pass
+    if not quicksaved:
+        print("[quicksave] file did not land (or is stale)")
         return 25
     if not swap_save_into_load_slot():
         return 26
@@ -303,20 +343,43 @@ async def run_arch1_session(opts) -> int:
                "--port", str(tuner_port())], settle=25)
     if "loadgame-returned|true" not in r.stdout:
         return 29
+    # the loaded game opens on the leader intro; the tuner binds only at
+    # the map transition — click the banner through, then wait GameCore
+    intro_clicked = False
+    for _ in range(20):
+        if await ingame_up():
+            break
+        try:
+            banner = find_teal_banner(capture_window())
+        except Exception:
+            banner = None
+        if banner and not intro_clicked:
+            click(*banner)
+            intro_clicked = True
+        else:
+            key("Return")
+        await asyncio.sleep(15)
     if not await wait_for(ingame_up, MAP_LOAD_S, "ingame-2", 15.0):
         return 30
-    # 5. census the demote, re-flag, gate the flip
+    # 5. census the demote, re-flag, gate the flip. Codex r1 P2-9: the
+    #    gate requires BOTH the re-flag's own read-back (slot + cfg-human)
+    #    and the GameCore census row — either alone can lie.
     r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-1]", r.stdout.strip())
     r = phase(["live_hotseat_launch.py", "--reflag",
                "--port", str(tuner_port())])
+    if "REFLAG_SLOT|1|3" not in r.stdout \
+            or "REFLAG_CFGHUMAN|1|true" not in r.stdout:
+        print("[gate] re-flag read-back mismatch — refusing to dispatch")
+        return 31
     time.sleep(5)
     r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-2]", r.stdout.strip())
-    if "P1|human=true" not in r.stdout:
-        print("[gate] re-flag did not flip P1 human — refusing to dispatch")
+    if not any(ln.startswith("P1|human=true|") and "|slot=3|" in ln
+               for ln in r.stdout.splitlines()):
+        print("[gate] census did not confirm P1 human slot=3 — refusing")
         return 31
     if not opts.no_smoke:
         smoke = run([sys.executable,

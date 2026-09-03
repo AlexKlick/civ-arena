@@ -156,6 +156,12 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
     _strip's structural skeleton (see its docstring)."""
     if live is None:
         live = _is_live_run(run_dir)
+    # Codex r1 P1-6: the replay dir must never BE the source dir — the
+    # wipe below would destroy the trust-root log. Refuse loudly.
+    if Path(run_dir).resolve() == Path(replay_dir).resolve():
+        raise ValueError(
+            f"replay dir {replay_dir} is the SOURCE run dir — refusing "
+            "to replay into it (the wipe would delete the trust root)")
     # a replay dir is a DERIVED artifact, never a trust root: a stale one
     # from an earlier replay would have the Arena APPEND a second match
     # into the same events.jsonl (observed 2026-09-03: 388+308 'identical'
@@ -179,7 +185,21 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
     # the replay Arena writes to replay_dir but resolves the recall corpus
     # from the SOURCE run's root — a custom --replay-dir must not move or
     # shadow the corpus (the replayed recalls must re-query the same one)
-    arena = Arena(replay_dir, spec, runtimes=runtimes,
+    replay_spec = spec
+    if live:
+        # Codex r1 P2-12: bound the replay to the RECORDED horizon. A
+        # live dispatch stops at --turns (often well under the config's
+        # max_turns); an unbounded replay would run the config's full
+        # length on synthetic end_turns and falsely diverge.
+        turns = [rec.get("turn") for rec in records
+                 if rec["kind"] == "TOOL_CALL" and rec.get("turn")]
+        if turns:
+            import dataclasses
+
+            horizon = max(turns) - _live_turn_offset(records)
+            if 0 < horizon < spec.max_turns:
+                replay_spec = dataclasses.replace(spec, max_turns=horizon)
+    arena = Arena(replay_dir, replay_spec, runtimes=runtimes,
                   recall_root=Path(run_dir).parent)
     summary = await arena.run()
 

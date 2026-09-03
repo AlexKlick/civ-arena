@@ -67,11 +67,12 @@ def _fake_mod():
     return mod
 
 
-def test_fake_mod_local_player_follows_lease():
+def test_fake_mod_ownership_follows_local_player_switch():
     """A2: on the Architecture-1 path the engine makes the lease-holder
-    local, so the fake's `me` must follow the lease — an owner-checked
-    act on a seat-1 entity is ACCEPTED during seat 1's lease and
-    rejected (UNKNOWN_ENTITY) without one."""
+    local — the fake's `me` derives from local_player (Codex r1 P2-10)
+    so a missing switch fails loudly in rehearsal: an owner-checked act
+    on a seat-1 entity is rejected until the switch runs, accepted
+    after."""
     from civ_arena.game.civ6 import lua_translator as lt
 
     mod = _fake_mod()
@@ -81,12 +82,15 @@ def test_fake_mod_local_player_follows_lease():
     uid = f"u{seat1_units[0] + 1 * 65536}"
     lua = lt.move_unit(uid, "1,2")
 
-    # no lease: `me` is 0 — the seat-1 unit is not the local player's
+    # lease engaged but NO switch: `me` is still 0 — the act is rejected
+    mod.lease = {"player": 1, "turn": 1}
     out = mod._act("move_unit", lua)  # noqa: SLF001
     assert out and out[0].startswith("ACT|move_unit|ERR")
 
-    # seat 1's lease engaged: `me` is 1 — the act is owned and accepted
-    mod.lease = {"player": 1, "turn": 1}
+    # the driver's switch ran: `me` is 1 — the act is owned and accepted
+    rows = mod.respond("PlayerManager.SetLocalPlayerAndObserver(1) "
+                       "print('LOCAL_SWITCHED|1|1') print('---END---')")
+    assert any(r.startswith("LOCAL_SWITCHED|1|1") for r in rows)
     out = mod._act("move_unit", lua)  # noqa: SLF001
     assert out and out[0].startswith("ACT|move_unit|OK"), out
 
