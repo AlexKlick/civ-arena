@@ -1,0 +1,26 @@
+# CAR-110 live gate 3: mature expansionist versus turtler.
+schema: 2
+match:
+  execution_mode: dag_tx
+  scored: false
+  max_graph_actions: 1024
+  max_replans_per_turn: 2
+  match_id: car-m1-live-expansionist
+  seed: 271828
+  max_turns: 20
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 0
+
+agents:
+  - agent_id: car-m1-expansionist
+    player_id: 0
+    policy: expansionist
+    seed: 7
+  - agent_id: car-m1-turtler
+    player_id: 1
+    policy: turtler
+    seed: 22
+
+chaos: []

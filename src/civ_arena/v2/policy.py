@@ -34,6 +34,7 @@ from civ_arena.v2.contracts import (
     SYSTEM_ACTION_KINDS_V2,
     ActionIntentV2,
     ActionKindV2,
+    EdgeKindV2,
     EntityRefV2,
     EntityTypeV2,
     EventTypeV2,
@@ -1053,6 +1054,119 @@ class ReplayPolicyRuntimeV2:
         return self.proposal
 
 
+@dataclass(frozen=True)
+class _FrontierPolicyCoreV2:
+    """Behavior identity for the two CAR-M1 live-gate policies."""
+
+    policy: str
+    seed: int
+
+
+@dataclass
+class FrontierPolicyRuntimeV2(LegacyPolicyRuntimeV2):
+    """Select one stable legal-graph frontier action, then close the turn.
+
+    ``canonical-first`` takes the lowest stable action id. ``random-frontier``
+    chooses from the same sorted frontier using a hash of its fixed seed and
+    the observation identity. The latter is random-looking but stateless and
+    exactly reproducible, so resume needs no hidden RNG cursor.
+    """
+
+    @staticmethod
+    def _intent(action: LegalActionV2, proposal_index: int) -> ActionIntentV2:
+        return ActionIntentV2.create(
+            action.action_kind,
+            action.actor,
+            target=action.target,
+            parameters=dict(action.parameters),
+            proposal_index=proposal_index,
+        )
+
+    def _pick(
+        self,
+        actions: list[LegalActionV2],
+        *,
+        observation_id: str,
+        group: str,
+    ) -> LegalActionV2:
+        ordered = sorted(actions, key=lambda action: action.action_id)
+        core = self.runtime
+        if core.policy == "canonical-first":
+            return ordered[0]
+        digest = sha256_hex(
+            canonical(
+                {
+                    "algorithm": "fixed-seed-random-frontier-v2",
+                    "seed": core.seed,
+                    "observation_id": observation_id,
+                    "group": group,
+                    "action_ids": [action.action_id for action in ordered],
+                }
+            )
+        )
+        return ordered[int(digest[:16], 16) % len(ordered)]
+
+    async def propose_turn(self, context: TurnContextV2) -> TurnProposalV2:
+        if context.policy != self.descriptor:
+            raise ContractError("turn context policy descriptor mismatch")
+        if self.runtime.policy not in {"canonical-first", "random-frontier"}:
+            raise ContractError("frontier runtime has an unsupported policy")
+
+        mandatory_groups: dict[tuple[str, str], list[LegalActionV2]] = {}
+        for action in context.legal_actions.actions:
+            if action.mandatory and action.action_kind in PLAYER_ACTION_KINDS_V2:
+                key = (action.action_kind.value, action.actor.entity_id)
+                mandatory_groups.setdefault(key, []).append(action)
+
+        selected: list[LegalActionV2] = []
+        if mandatory_groups:
+            for key, actions in sorted(mandatory_groups.items()):
+                selected.append(
+                    self._pick(
+                        actions,
+                        observation_id=context.observation.observation_id,
+                        group=f"mandatory:{key[0]}:{key[1]}",
+                    )
+                )
+        else:
+            predecessors = {
+                edge.target_action_id
+                for edge in context.graph.edges
+                if edge.kind in {EdgeKindV2.MUST_PRECEDE, EdgeKindV2.REQUIRES}
+            }
+            frontier = [
+                node.action
+                for node in context.graph.nodes
+                if node.action.action_kind is not ActionKindV2.END_TURN
+                and node.action.action_id not in predecessors
+                and node.action.action_kind in PLAYER_ACTION_KINDS_V2
+            ]
+            if frontier:
+                selected.append(
+                    self._pick(
+                        frontier,
+                        observation_id=context.observation.observation_id,
+                        group="optional-frontier",
+                    )
+                )
+
+        intents = [
+            self._intent(action, index) for index, action in enumerate(selected)
+        ]
+        intents.append(
+            ActionIntentV2.create(
+                ActionKindV2.END_TURN,
+                context.observation.observing_player,
+                proposal_index=len(intents),
+            )
+        )
+        return TurnProposalV2.create(
+            policy_id=self.descriptor.descriptor_id,
+            observation_id=context.observation.observation_id,
+            intents=intents,
+        )
+
+
 def snapshot_policy_state_v2(
     runtime: AgentRuntimeV2,
     services: PolicyServicesV2,
@@ -1230,6 +1344,13 @@ def build_policy_runtime_v2(
     """Build or wrap a scripted/planner/LLM runtime at the V2 boundary."""
 
     legacy = runtime
+    if legacy is None and profile.policy in {"canonical-first", "random-frontier"}:
+        core = _FrontierPolicyCoreV2(profile.policy, profile.seed)
+        return FrontierPolicyRuntimeV2(
+            runtime=core,
+            descriptor=policy_descriptor_v2(profile, runtime=core),
+            services=services,
+        )
     if legacy is None:
         legacy = build_runtime(
             profile,

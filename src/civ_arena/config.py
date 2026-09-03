@@ -133,7 +133,7 @@ def _parse_case_base(block: Any, where: str) -> CaseBaseSpec:
 class AgentSpec:
     agent_id: str
     player_id: int
-    policy: str  # "expansionist" | "turtler" | "llm" | "planner"
+    policy: str  # scripted/frontier, llm, or planner policy id
     seed: int
     model: str | None = None  # display hint; parsed and ignored
     llm: LLMSpec | None = None
@@ -181,7 +181,16 @@ class MatchSpec:
         raise ConfigError(f"no agent for player {player_id}")
 
 
-VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner"})
+VALID_POLICIES = frozenset(
+    {
+        "canonical-first",
+        "expansionist",
+        "llm",
+        "planner",
+        "random-frontier",
+        "turtler",
+    }
+)
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
 VALID_EXECUTION_MODES = frozenset({"dag_tx", "sequential", "legal_list", "dag"})
