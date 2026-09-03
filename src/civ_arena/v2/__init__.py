@@ -64,6 +64,7 @@ from civ_arena.v2.environment import (
     simulator_facets_v2,
     split_adapter_v2,
 )
+from civ_arena.v2.executor import TransactionalExecutorV2
 from civ_arena.v2.graph import (
     ActionGraphCompilerV2,
     GraphSelectionError,
@@ -131,6 +132,7 @@ __all__ = [
     "TurnProposalV2",
     "TurnReceiptV2",
     "TurnTerminationV2",
+    "TransactionalExecutorV2",
     "ValidationCommandV2",
     "ValidationReceiptV2",
     "VerificationStatusV2",

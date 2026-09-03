@@ -31,12 +31,18 @@ from civ_arena.v2.contracts import (
     LegalActionV2,
     ObservationPhaseV2,
     ObservationV2,
+    RejectionCodeV2,
     TurnProposalV2,
     TurnReceiptV2,
     TurnTerminationV2,
+    VerificationStatusV2,
 )
 from civ_arena.v2.enumeration import ActionEnumeratorV2
 from civ_arena.v2.environment import EnvironmentExecutionV2, simulator_facets_v2
+from civ_arena.v2.executor import (
+    TransactionalExecutorV2,
+    verify_observable_postconditions,
+)
 from civ_arena.v2.graph import ActionGraphCompilerV2
 from civ_arena.v2.ledger import (
     LedgerIntegrityError,
@@ -153,20 +159,38 @@ def _assert_recorded_result(
         raise ExactReplayError("action result names a different authorization")
     if result.pre_observation_id != pre_observation.observation_id:
         raise ExactReplayError("action result pre-observation mismatch")
-    if result.status is not execution.status:
+    expected_verification = (
+        verify_observable_postconditions(action, post_observation)
+        if post_observation is not None
+        else VerificationStatusV2.NOT_VERIFIABLE
+    )
+    accepted_divergence = (
+        execution.status in {ActionStatusV2.ACCEPTED, ActionStatusV2.DUPLICATE}
+        and result.status is ActionStatusV2.DIVERGED
+        and expected_verification is VerificationStatusV2.MISMATCHED
+        and result.rejection_code is RejectionCodeV2.POSTCONDITION_DIVERGED
+    )
+    if result.status is not execution.status and not accepted_divergence:
         raise ExactReplayError(
             f"fake execution status diverged: {result.status.value} != "
             f"{execution.status.value}"
         )
-    if result.status in {ActionStatusV2.ACCEPTED, ActionStatusV2.DUPLICATE}:
-        if post_observation is None:
-            raise ExactReplayError("successful action has no recorded post observation")
+    if result.status in {
+        ActionStatusV2.ACCEPTED,
+        ActionStatusV2.DUPLICATE,
+        ActionStatusV2.DIVERGED,
+    } and post_observation is not None:
         if result.post_observation_id != post_observation.observation_id:
             raise ExactReplayError("action result post-observation mismatch")
+    elif result.status in {ActionStatusV2.ACCEPTED, ActionStatusV2.DUPLICATE}:
+        if post_observation is None:
+            raise ExactReplayError("successful action has no recorded post observation")
     elif result.post_observation_id is not None:
         raise ExactReplayError("unsuccessful action carries a post observation")
-    if any(effect not in action.expected_effects for effect in result.observable_effects):
-        raise ExactReplayError("action result contains an unregistered observable effect")
+    if post_observation is not None and result.verification is not expected_verification:
+        raise ExactReplayError("action result postcondition verification mismatch")
+    if result.observable_effects != action.expected_effects:
+        raise ExactReplayError("action result does not carry the exact registered effects")
 
 
 async def replay_fake_episode_v2(
@@ -204,6 +228,13 @@ async def replay_fake_episode_v2(
     store = ObjectStoreV2(root)
     enumerator = ActionEnumeratorV2(terminal.compute.max_graph_actions)
     compiler = ActionGraphCompilerV2(terminal.compute.max_graph_actions)
+    dispatcher = TransactionalExecutorV2(
+        environment,
+        terminal.policies[0],
+        episode_id=terminal.episode_id,
+        max_graph_actions=terminal.compute.max_graph_actions,
+        max_replans_per_turn=terminal.compute.max_replans_per_turn,
+    )
 
     current_observation: ObservationV2 | None = None
     current_actions: LegalActionSetV2 | None = None
@@ -378,7 +409,7 @@ async def replay_fake_episode_v2(
                 raise ExactReplayError("ActionExecutionStarted does not name pending action")
             if pending_execution is not None:
                 raise ExactReplayError("action execution started more than once")
-            pending_execution = await environment.execute_authorized(
+            pending_execution = await dispatcher.replay_dispatch(
                 pending_authorization,
                 pending_action,
             )
@@ -477,8 +508,10 @@ async def replay_fake_episode_v2(
                 raise ExactReplayError("turn receipt authorization history mismatch")
             if receipt.results != tuple(turn_results):
                 raise ExactReplayError("turn receipt result history mismatch")
-            if receipt.replan_count != max(0, len(turn_graph_ids) - 1):
-                raise ExactReplayError("turn receipt replan count mismatch")
+            if not 0 <= receipt.replan_count <= terminal.compute.max_replans_per_turn:
+                raise ExactReplayError("turn receipt replan count exceeds episode limit")
+            if receipt.replan_count > max(0, len(turn_graph_ids) - 1):
+                raise ExactReplayError("turn receipt replan count exceeds revalidations")
             if receipt.termination is TurnTerminationV2.COMPLETED:
                 if (
                     not turn_executed_actions

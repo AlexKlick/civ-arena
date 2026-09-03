@@ -259,7 +259,7 @@ async def _record_fake_episode(
             graph_ids=graph_ids,
             authorizations=authorizations,
             results=results,
-            replan_count=1,
+            replan_count=0,
             termination=TurnTerminationV2.COMPLETED,
         )
         recorder.ledger.append(
@@ -309,7 +309,8 @@ async def _record_fake_episode(
         authorization_id=end_auth.authorization_id,
         pre_observation_id=second.observation_id,
         post_observation_id=final_observation.observation_id,
-        verification=VerificationStatusV2.NOT_VERIFIABLE,
+        verification=VerificationStatusV2.MATCHED,
+        observable_effects=end_turn.expected_effects,
     )
     results.append(end_result)
     for event_type in (
@@ -340,7 +341,7 @@ async def _record_fake_episode(
         graph_ids=graph_ids,
         authorizations=authorizations,
         results=results,
-        replan_count=1,
+        replan_count=0,
         termination=TurnTerminationV2.COMPLETED,
     )
     recorder.ledger.append(

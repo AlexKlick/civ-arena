@@ -81,6 +81,9 @@ class ObservationIndexV2:
         entry = self.entry(ref, predicate)
         return default if entry is None else entry.value
 
+    def has_entity(self, ref: EntityRefV2) -> bool:
+        return (ref.entity_type, ref.entity_id) in self._values
+
     def scope(self, ref: EntityRefV2) -> FactSubjectScopeV2 | None:
         values = self._values.get((ref.entity_type, ref.entity_id), {})
         return next(iter(values.values())).scope if values else None
