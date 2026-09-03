@@ -583,13 +583,20 @@ def test_config_case_base_gating() -> None:
 
 
 def test_live_dispatch_profiles_carry_case_base(tmp_path, monkeypatch):
-    """F1: BOTH live dispatch paths (M14d single-seat and M18 hotseat) build
-    their runtimes through _agent_profile + build_runtime — a configured
-    case base reaches the live runtime ARMED, a configured-but-missing
-    artifact fails loudly at construction (pre-spend), and an unarmed spec
-    stays unarmed. With the shared builder, pinning it pins both paths."""
+    """F1: BOTH V2 live dispatch paths converge on ArenaV2's runtime builder.
+
+    A configured case base reaches the wrapped live runtime ARMED, a
+    configured-but-missing artifact fails loudly at construction (pre-spend),
+    and an unarmed spec stays unarmed.  The V1 ``_agent_profile`` helper was
+    deliberately removed by the breaking V2 cutover; pin the authoritative
+    shared builder instead of resurrecting that obsolete live path.
+    """
+    import inspect
+
     from civ_arena.config import CaseBaseSpec
-    from civ_arena.game.civ6.live_driver import _agent_profile
+    from civ_arena.game.civ6 import live_driver
+    from civ_arena.v2.arena import ArenaV2
+    from civ_arena.v2.environment import simulator_facets_v2
 
     (tmp_path / "configs").mkdir()
     row = {"root_key": abstract_key(playout(21, 4), 0),
@@ -597,19 +604,45 @@ def test_live_dispatch_profiles_carry_case_base(tmp_path, monkeypatch):
     _write_casebase([_label_doc([row])], tmp_path / "configs" / "live-cb.json")
     monkeypatch.chdir(tmp_path)  # build_runtime resolves configs/ against cwd
 
+    for dispatch in (
+        live_driver.phase_dispatch_v2,
+        live_driver.phase_dispatch_hotseat_v2,
+    ):
+        assert "_run_live_v2(" in inspect.getsource(dispatch)
+
+    def runtime_for(agent: AgentSpec):
+        environment, monitor = simulator_facets_v2()
+        spec = MatchSpec(
+            match_id=f"live-{agent.agent_id}",
+            seed=1,
+            max_turns=1,
+            adapter="firetuner",
+            watchdog_mode="flag_and_continue",
+            violation_limit=0,
+            checkpoint_every=1,
+            agents=[agent],
+        )
+        arena = ArenaV2(
+            tmp_path / f"run-{agent.agent_id}",
+            spec,
+            environment=environment,
+            private_monitor=monitor,
+        )
+        return arena.runtimes[agent.player_id].runtime
+
     armed = AgentSpec(agent_id="planner", player_id=0, policy="planner",
                       seed=7, case_base=CaseBaseSpec(path="live-cb.json"))
-    rt = build_runtime(_agent_profile(armed))
+    rt = runtime_for(armed)
     assert rt.case_base is not None and rt.case_base.artifact_sha256
 
     missing = AgentSpec(agent_id="planner2", player_id=0, policy="planner",
                         seed=7, case_base=CaseBaseSpec(path="gone.json"))
     with pytest.raises(ValueError, match="does not exist"):
-        build_runtime(_agent_profile(missing))
+        runtime_for(missing)
 
     plain = AgentSpec(agent_id="turtler", player_id=1, policy="turtler",
                       seed=22)
-    assert _agent_profile(plain).case_base is None
+    assert getattr(runtime_for(plain), "case_base", None) is None
 
 
 # ---------------------------------------------------------- CLI guards F2/F3
