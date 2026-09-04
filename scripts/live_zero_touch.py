@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -97,6 +98,35 @@ async def run(cmd: list[str], *, timeout=240, **kw) -> subprocess.CompletedProce
 async def civ6_pids() -> list[int]:
     out = (await run(["pgrep", "-f", r"Civilization VI/./Civ6"])).stdout
     return [int(x) for x in out.split()]
+
+
+async def require_active_display(artifacts: Path | None = None) -> None:
+    """An X server without an active output cannot create Steam windows.
+
+    In particular, a persisted local gaming mode can survive unplugging the
+    monitor. Merely finding xinit/Steam processes does not establish readiness.
+    This probe sends no desktop input and never changes the host display mode.
+    """
+    try:
+        result = await run(["xrandr", "--display", DISPLAY, "--query"], timeout=10)
+        active = re.findall(
+            r"^(\S+) connected(?: primary)? [1-9]\d*x[1-9]\d*[+-]\d+[+-]\d+\b",
+            result.stdout, re.MULTILINE)
+        diagnostic = dict(display=DISPLAY, returncode=result.returncode,
+                          active_outputs=active,
+                          stdout=ui_control.redact(result.stdout),
+                          stderr=ui_control.redact(result.stderr))
+    except (OSError, TimeoutError) as exc:
+        diagnostic = dict(display=DISPLAY, returncode=None, active_outputs=[],
+                          error=ui_control.redact(f"{type(exc).__name__}: {exc}"))
+    if artifacts is not None:
+        path = artifacts / f"display-preflight-{uuid.uuid4().hex}.json"
+        path.write_text(json.dumps(diagnostic, sort_keys=True) + "\n")
+    if diagnostic["returncode"] != 0 or not diagnostic["active_outputs"]:
+        raise RuntimeError(
+            f"display preflight failed: {DISPLAY} has no verified active output; "
+            "restore the gaming session display mode before launching Steam/Civ6")
+    print(f"[display] {DISPLAY} active outputs: {', '.join(diagnostic['active_outputs'])}")
 
 
 async def kill_game() -> None:
@@ -241,8 +271,11 @@ def swap_save_into_load_slot(backup_dir: Path) -> bool:
 async def run_arch1_session(opts) -> int:
     """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
     failed gate. Exit codes continue the ladder's scheme from 20."""
+    await require_active_display(opts.artifacts)
     if opts.fresh_x and not await bounce_x():
         return 20
+    if opts.fresh_x:
+        await require_active_display(opts.artifacts)
     await kill_game()
     launch(opts.artifacts)
     if not await wait_for(port_up, 240, "tuner-bind", 10.0):
@@ -502,8 +535,11 @@ async def controlled_arch1(opts) -> int:
 async def main(opts) -> int:
     if getattr(opts, "session", None) == "arch1":
         return await controlled_arch1(opts)
+    await require_active_display()
     if opts.fresh_x and not await bounce_x():
         return 20
+    if opts.fresh_x:
+        await require_active_display()
     if opts.kill_first:
         await kill_game()
         launch()

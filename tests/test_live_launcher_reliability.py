@@ -101,3 +101,89 @@ async def test_launcher_forwards_only_remaining_startup_budget(tmp_path, monkeyp
     assert summary['startup_timeout_s'] == 0.3
     assert summary['driver_startup_timeout_s'] == forwarded
     assert summary['elapsed_s'] + forwarded <= 0.31
+
+
+@pytest.mark.parametrize('output', [
+    'HDMI-0 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis)',
+    'DFP-0 connected 2944x1840+0+0 (normal left inverted right x axis y axis)',
+    'VIRTUAL-1 connected 1280x720-1280+0 (normal left inverted right x axis y axis)',
+])
+async def test_display_preflight_accepts_physical_and_headless_outputs(
+        output, tmp_path, monkeypatch):
+    async def run(args, **kw):
+        assert args == ['xrandr', '--display', ':1', '--query']
+        assert kw['timeout'] == 10
+        return SimpleNamespace(returncode=0, stdout=output, stderr='')
+    monkeypatch.setattr(z, 'run', run)
+    await z.require_active_display(tmp_path)
+    records = list(tmp_path.glob('display-preflight-*.json'))
+    assert len(records) == 1
+    assert json.loads(records[0].read_text())['active_outputs'] == [output.split()[0]]
+
+
+@pytest.mark.parametrize('output', [
+    'Screen 0: minimum 8 x 8, current 640 x 480, maximum 32767 x 32767\n'
+    'HDMI-0 disconnected primary (normal left inverted right x axis y axis)',
+    'HDMI-0 connected primary (normal left inverted right x axis y axis)',
+    'VIRTUAL-1 connected 0x0+0+0 (normal left inverted right x axis y axis)',
+])
+async def test_display_preflight_rejects_absent_or_inactive_output(
+        output, tmp_path, monkeypatch):
+    async def run(args, **kw):
+        return SimpleNamespace(returncode=0, stdout=output, stderr='')
+    monkeypatch.setattr(z, 'run', run)
+    with pytest.raises(RuntimeError, match='no verified active output'):
+        await z.require_active_display(tmp_path)
+    diagnostic = json.loads(next(tmp_path.glob('display-preflight-*.json')).read_text())
+    assert diagnostic['active_outputs'] == []
+    assert diagnostic['stdout'] == output
+
+
+@pytest.mark.parametrize('failure', ['nonzero', 'missing', 'timeout'])
+async def test_display_preflight_retains_helper_failures(failure, tmp_path, monkeypatch):
+    async def run(args, **kw):
+        if failure == 'missing':
+            raise FileNotFoundError('xrandr')
+        if failure == 'timeout':
+            raise TimeoutError('display probe')
+        return SimpleNamespace(returncode=1, stdout='', stderr="Can't open display :1")
+    monkeypatch.setattr(z, 'run', run)
+    with pytest.raises(RuntimeError, match='display preflight failed'):
+        await z.require_active_display(tmp_path)
+    diagnostic = json.loads(next(tmp_path.glob('display-preflight-*.json')).read_text())
+    if failure == 'nonzero':
+        assert diagnostic['returncode'] == 1
+        assert diagnostic['stderr'] == "Can't open display :1"
+    else:
+        assert diagnostic['returncode'] is None
+        expected = 'FileNotFoundError' if failure == 'missing' else 'TimeoutError'
+        assert expected in diagnostic['error']
+
+
+@pytest.mark.parametrize('failure_at', [0, 1])
+async def test_arch1_display_failure_preserves_terminal_before_game_launch(
+        failure_at, tmp_path, monkeypatch):
+    monkeypatch.setattr(z, 'SAVES', tmp_path / 'absent-saves')
+    actions = []
+    async def display(artifacts):
+        actions.append('display')
+        if actions.count('display') == failure_at + 1:
+            raise RuntimeError('display preflight failed: :1 has no verified active output')
+    async def bounce():
+        actions.append('bounce')
+        return True
+    async def kill():
+        pytest.fail('must not kill or launch a game after failed display preflight')
+    monkeypatch.setattr(z, 'require_active_display', display)
+    monkeypatch.setattr(z, 'bounce_x', bounce)
+    monkeypatch.setattr(z, 'kill_game', kill)
+    monkeypatch.setattr(z, 'launch', lambda *a: pytest.fail('must not launch'))
+    opts = SimpleNamespace(run_id='display-failed', runs_root=tmp_path / 'runs',
+                           startup_timeout=1, config='unused', fresh_x=True)
+    assert await z.controlled_arch1(opts) == 2
+    assert actions == (['display'] if failure_at == 0 else ['display', 'bounce', 'display'])
+    summary = json.loads((opts.artifacts / 'summary.json').read_text())
+    records = [json.loads(x) for x in (opts.artifacts / 'events.jsonl').read_text().splitlines()]
+    assert not summary['clean'] and 'display preflight failed' in summary['aborted']
+    assert [row['kind'] for row in records] == ['MATCH_START', 'MATCH_END']
+    assert records[-1]['summary'] == summary
