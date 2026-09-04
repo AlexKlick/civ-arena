@@ -37,6 +37,10 @@ class NoTarget(RuntimeError):
     pass
 
 
+class FrameChanged(RuntimeError):
+    pass
+
+
 def redact(text: str) -> str:
     # Only bounded diagnostics escape a helper; never environment contents.
     for name, value in os.environ.items():
@@ -133,6 +137,8 @@ def send(window: Window, *, key: str | None = None,
     try:
         x11.XRaiseWindow(d, window.window_id)
         x11.XSetInputFocus(d, window.window_id, 1, 0)
+        if select_window(window.display) != window:
+            raise FrameChanged("window changed before input")
         if key is not None:
             symbol = x11.XStringToKeysym(key.encode())
             code = x11.XKeysymToKeycode(d, symbol) if symbol else 0
@@ -175,7 +181,10 @@ def perform(*, display: str = ":1", key: str | None = None,
             if banner and point is None:
                 return Outcome("no_target", "banner absent", asdict(window), digest)
             # Focus/capture/input all use the same selected ID and geometry.
-            send(window, key=key, at=point)
+            try:
+                send(window, key=key, at=point)
+            except FrameChanged:
+                continue
             return Outcome("sent", window=asdict(window), capture_sha256=digest)
         raise RuntimeError("window kept moving or resizing; no input sent")
     except NoTarget as exc:
