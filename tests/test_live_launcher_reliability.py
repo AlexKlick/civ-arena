@@ -1,0 +1,56 @@
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+SPEC = importlib.util.spec_from_file_location(
+    'zero_touch', Path(__file__).resolve().parents[1] / 'scripts/live_zero_touch.py')
+z = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(z)
+
+
+async def test_launcher_subprocess_result_is_awaited(monkeypatch):
+    async def run(args, **kw):
+        return SimpleNamespace(stdout='127.0.0.1:4318\n', returncode=0)
+    monkeypatch.setattr(z, 'run', run)
+    assert await z.port_up()
+
+
+async def test_startup_deadline_preserves_saves_and_terminal_record(tmp_path, monkeypatch):
+    saves = tmp_path / 'saves'
+    saves.mkdir()
+    (saves / 'old.Civ6Save').write_bytes(b'old save')
+    monkeypatch.setattr(z, 'SAVES', saves)
+    async def stall(opts):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(z, 'run_arch1_session', stall)
+    opts = SimpleNamespace(run_id='unique', runs_root=tmp_path / 'runs',
+                           startup_timeout=0.03, config='unused')
+    assert await z.controlled_arch1(opts) == 2
+    assert (opts.artifacts / 'saves-before/old.Civ6Save').read_bytes() == b'old save'
+    summary = json.loads((opts.artifacts / 'summary.json').read_text())
+    records = [json.loads(x) for x in (opts.artifacts / 'events.jsonl').read_text().splitlines()]
+    assert [r['kind'] for r in records] == ['MATCH_START', 'MATCH_END']
+    assert records[-1]['summary'] == summary
+    assert not summary['clean'] and 'TimeoutError' in summary['aborted']
+    with pytest.raises(FileExistsError):
+        await z.controlled_arch1(opts)
+
+
+def test_slot_backup_is_run_specific(tmp_path, monkeypatch):
+    saves = tmp_path / 'saves'
+    source = saves / 'Hotseat/quick/quicksave.Civ6Save'
+    dest = saves / 'Single/auto/AutoSave_0001.Civ6Save'
+    source.parent.mkdir(parents=True)
+    dest.parent.mkdir(parents=True)
+    source.write_bytes(b'new')
+    dest.write_bytes(b'old')
+    monkeypatch.setattr(z, 'SAVES', saves)
+    assert z.swap_save_into_load_slot(tmp_path / 'run-a')
+    source.write_bytes(b'next')
+    assert z.swap_save_into_load_slot(tmp_path / 'run-b')
+    assert (tmp_path / 'run-a' / dest.name).read_bytes() == b'old'
+    assert (tmp_path / 'run-b' / dest.name).read_bytes() == b'new'

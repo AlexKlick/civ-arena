@@ -647,3 +647,107 @@ re-confirmed: ~35 min is already too old for the menu bind — bounce X
 per session (the gaming-mode pin in /run/gaming-session-mode must say
 headless; a stale "local" pin from a hot-plug leaves the session 640x480
 with a dead render path — `gaming-mode` re-detects and restarts).
+
+## 2026-09-04 — bounded hotseat reliability implementation
+
+Target: two consecutive fresh MiniMax-M3 versus MiniMax-M3 matches, each
+30 complete rounds / 60 completed seat turns. This is an operational
+reliability claim under the existing movement allowance, not a victory or
+strategy-strength claim. Local tests cannot establish that target.
+
+The reviewed source is `3074f1c510e4d0297305b19df1b5ab8dd22f3ac0` plus
+`scripts/live_zero_touch.py`, `game/civ6/firetuner.py`, and
+`game/civ6/live_driver.py`. The exact working patch is preserved in local
+commit `fa130633e8e81bf672315008fc1a98fdda873799` and
+`/tmp/civ-reliability-20260904/reviewed.patch`. Work continues on isolated
+branch `fix/hotseat-reliability-20260904` in
+`/home/alexk/civ-arena-reliability-20260904`; the original checkout and run
+folders remain untouched.
+
+### Verified findings
+
+- UI recovery uses `sys.executable -m civ_arena.game.civ6.ui_control`, with
+  one visible `WM_CLASS=Civ6` identity including display, window ID, and
+  geometry. Moving or resizing requires a new capture before input.
+- Helper outcomes are `sent`, `no_target`, `failed`, or `skipped_fake`.
+  `sent` proves input only. Engine status and successful phase engagement
+  determine recovery. Each action has a supporting screenshot/hash and an
+  event-log audit; fake controllers send no desktop input.
+- The default clocks are startup 2700s, play 7200s, agent turn 600s,
+  stalled transition 180s/eight sweeps, and cleanup 20s. A transition's
+  budget spans release and next engagement, including polling and helpers.
+  Only successful engagement resets it. Clocks stay outside simulator hashes.
+- Forced LLM closure checks the actual result, repairs a completeness
+  rejection with one bounded standing-order pass, and retries once.
+  Replayed rejected `end_turn` calls stay within their original turn.
+- Only released leases produce completed-seat rows. A round needs both
+  seats in order at the same engine turn; missing, duplicate, and reordered
+  pairs are failures. Fatal errors preserve the game and close connections.
+- `declare_own_endpath_drift: true` remains enabled in the existing configs:
+  only own-unit `moves`, `movement`, `pos`, `q`, and `r` rows from the
+  end path are admitted. Each admitted row and its observed owner are
+  recorded in `HEARTBEAT` audit events. Foreign units and other attributes
+  remain subject to the watchdog. This is not strict mod mutation accounting.
+
+### Follow-up probes
+
+Run gates in order and stop at the first failure: host/provider preflight,
+three-round planner/turtler rehearsal, three-round MiniMax smoke, then
+30-round acceptance A and a separate fresh 30-round acceptance B. Capture
+both the game panel and engine status at real handoffs. Any code change
+requires affected checks and restarts the consecutive acceptance requirement.
+
+Use the project interpreter with this worktree's source explicitly selected:
+
+```bash
+cd /home/alexk/civ-arena-reliability-20260904
+export PYTHONPATH="$PWD/src"
+/home/alexk/documents/civ-arena/.venv/bin/python scripts/live_zero_touch.py \
+  --session arch1 --fresh-x \
+  --config configs/live-hotseat-001.yaml --rounds 3 \
+  --startup-timeout 2700 --match-timeout 7200 --agent-turn-timeout 600 \
+  --recovery-timeout 180 --recovery-sweeps 8 \
+  --run-id "rehearsal-$(date -u +%Y%m%dT%H%M%SZ)" \
+  > /tmp/civ-rehearsal-launch.log 2>&1
+```
+
+For smoke and acceptance, use `configs/live-hotseat-llm-minimax2-001.yaml`
+with `--rounds 3` or `--rounds 30` and a new run ID each time. Provider,
+model, token cap, retries, and 2000-request cap per seat are unchanged.
+Secrets remain in `ANTHROPIC_AUTH_TOKEN_MINIMAX2`; never print its value.
+Every startup creates `<run-id>-startup`, copies the existing save inventory,
+and records its own startup-only event log/summary. The match event log is
+`runs/<run-id>/events.jsonl`; driver output is retained in the startup
+folder's `dispatch.log`. Do not confuse a clean startup with a clean match.
+
+Audit a completed match with:
+
+```bash
+/home/alexk/documents/civ-arena/.venv/bin/python \
+  -m civ_arena.game.civ6.validate_run runs/RUN_ID --rounds 30
+```
+
+This validates event structure, identity, counts, closures, deadlines, and
+allowance accounting. It does not replay the live engine or establish
+state-hash equality with a simulator. Keep structural replay results separate
+from live engine-state observations and screenshots.
+
+Stop and preserve: send SIGTERM to the task-owned launcher or driver PID.
+The launcher forwards termination to its driver; allow the driver's 20s
+cleanup interval plus a small scheduling margin. No new UI/game actions are
+sent during cleanup. Preserve both run folders, save backups, event logs,
+wire log, screenshots, and process output. A hard kill or unwritable event
+log leaves an incomplete run; it cannot pass acceptance. Never rerun into
+an existing run ID, rotate previous evidence, or restore a save automatically.
+
+### Blocked checks
+
+Live gates and the two acceptance runs are pending current host/provider
+preflight. The inspected host had a gaming X session but no Civ6 window or
+listener on 127.0.0.1:4318; a fresh Architecture-1 startup is required.
+
+### Evidence gaps
+
+No new live handoff capture, provider tool round trip, six-turn live rehearsal,
+or 60-turn acceptance result is claimed by this implementation record yet.
+The previously reported 58-test baseline is historical evidence only.

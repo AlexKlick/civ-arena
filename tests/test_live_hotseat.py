@@ -60,6 +60,22 @@ def test_hotseat_dispatch_rehearsal_alternates_seats(tmp_path):
             / "p0-journal.jsonl").exists()
 
 
+    from civ_arena.game.civ6.validate_run import validate
+    result = validate(runs_root / "live-hotseat-001", 2, require_live=False)
+    expected_errors = ["clean commit identity"] if summary["identity"]["dirty"] else []
+    assert result["errors"] == expected_errors
+    # Even a coordinated summary + MATCH_END edit cannot hide a missing
+    # seat turn from the authoritative release/tool/completion event rows.
+    summary["per_turn"].pop()
+    records[-1]["summary"] = summary
+    (runs_root / "live-hotseat-001" / "summary.json").write_text(json.dumps(summary))
+    (runs_root / "live-hotseat-001" / "events.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n")
+    result = validate(runs_root / "live-hotseat-001", 2, require_live=False)
+    assert result["status"] == "FAIL"
+    assert "completed seat count" in result["errors"]
+
+
 def _fake_mod():
     from civ_arena.game.civ6.fake_tuner_server import FakeMod
 
@@ -144,8 +160,8 @@ def test_driver_abort_paths_write_match_end():
     an LLM auth-death mid-match must leave a replay-consumable record."""
     src = (REPO / "src" / "civ_arena" / "game" / "civ6"
            / "live_driver.py").read_text()
-    assert src.count("except MatchAborted as exc:") == 2
-    assert src.count('"aborted": str(exc)') == 2
+    assert "except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:" in src
+    assert '"aborted": failure' in src
     assert "driver.referee.abort_cleanup(" in src
     # single-seat parity: the runtime is aclose()d in phase_dispatch too
     dispatch = src[src.index("async def phase_dispatch("):

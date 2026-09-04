@@ -29,9 +29,13 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
+import shutil
+import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from civ_arena.game.civ6 import ui_control
@@ -49,50 +53,61 @@ INTRO_SETTLE_S = 300     # host -> BEGIN GAME clickable (varies 80-300s)
 MAP_LOAD_S = 300         # BEGIN GAME -> GameCore_Tuner
 
 
-def bounce_x() -> bool:
+async def bounce_x() -> bool:
     """M17e/A1: the tuner binds 4318 only on a YOUNG X server (the menu
     bind is gone by ~35 min). Killing the gaming session's xinit tree
     makes its supervisor respawn a fresh one in seconds."""
-    out = run(["pgrep", "-f", "xinit.*headless-gaming-session"]).stdout
+    out = (await run(["pgrep", "-f", "xinit.*headless-gaming-session"])).stdout
     pids = [int(x) for x in out.split()]
     if not pids:
         print("[fresh-x] no gaming xinit found — nothing to bounce")
         return False
     for pid in pids:
-        run(["kill", "-TERM", str(pid)])
+        await run(["kill", "-TERM", str(pid)])
     for _ in range(24):            # respawn within ~2 min
-        time.sleep(5)
-        out = run(["pgrep", "-f",
-                   "xinit.*headless-gaming-session"]).stdout
+        await asyncio.sleep(5)
+        out = (await run(["pgrep", "-f",
+                   "xinit.*headless-gaming-session"])).stdout
         new = [int(x) for x in out.split()]
         if any(p not in pids for p in new):
             fresh = next(p for p in new if p not in pids)
             print(f"[fresh-x] respawned xinit {fresh}")
-            time.sleep(10)         # openbox/sunshine/steam settle
+            await asyncio.sleep(10)         # openbox/sunshine/steam settle
             return True
     print("[fresh-x] session never respawned")
     return False
 
 
-def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, **kw)
+async def run(cmd: list[str], *, timeout=180, **kw) -> subprocess.CompletedProcess:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=REPO, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        start_new_session=True, **kw)
+    try:
+        async with asyncio.timeout(timeout):
+            out, err = await proc.communicate()
+        return subprocess.CompletedProcess(cmd, proc.returncode, out.decode(), err.decode())
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            await proc.communicate()
 
 
-def civ6_pids() -> list[int]:
-    out = run(["pgrep", "-f", r"Civilization VI/./Civ6"]).stdout
+async def civ6_pids() -> list[int]:
+    out = (await run(["pgrep", "-f", r"Civilization VI/./Civ6"])).stdout
     return [int(x) for x in out.split()]
 
 
-def kill_game() -> None:
+async def kill_game() -> None:
     for _ in range(3):
-        pids = civ6_pids()
+        pids = await civ6_pids()
         if not pids:
             break
-        run(["pkill", "-f", r"Civilization VI/./Civ6"])
-        time.sleep(3)
-    run(["pkill", "-f", "SteamLaunch AppId=289070"])
-    time.sleep(3)
-    print(f"[kill] game clear: {civ6_pids() or 'none'}")
+        await run(["pkill", "-f", r"Civilization VI/./Civ6"])
+        await asyncio.sleep(3)
+    await run(["pkill", "-f", "SteamLaunch AppId=289070"])
+    await asyncio.sleep(3)
+    print(f"[kill] game clear: {await civ6_pids() or 'none'}")
 
 
 def launch() -> None:
@@ -103,13 +118,13 @@ def launch() -> None:
     print("[launch] URI handoff fired")
 
 
-def port_up() -> bool:
+async def port_up() -> bool:
     """The tuner binds 4318 — and ONLY 4318. 4319 is NOT a tuner fallback
     (the old docstring's game-five theory is wrong, M18-live disproven):
     it is the EOS/net service, up from boot, and sending it FireTuner
     handshakes correlates with game-process death within ~2 min (twice
     reproduced). Accepting 4319 here let boot gates pass on EOS alone."""
-    out = run(["ss", "-tln"]).stdout
+    out = (await run(["ss", "-tln"])).stdout
     return "127.0.0.1:4318" in out
 
 
@@ -189,21 +204,21 @@ async def key(k: str) -> None:
         raise RuntimeError(f"required key: {result}")
 
 
-def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
+async def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
     """Run a live-lane phase script with the single-client cooldown
     discipline baked in (the tuner refuses rapid reconnects)."""
-    time.sleep(8)
-    r = run([sys.executable, str(REPO / "scripts" / args[0]), *args[1:]])
+    await asyncio.sleep(8)
+    r = await run([sys.executable, str(REPO / "scripts" / args[0]), *args[1:]])
     out = (r.stdout.strip() or r.stderr.strip())
     print(f"[phase {args[0]} {' '.join(args[1:])}] rc={r.returncode}")
     for ln in out.splitlines():
         print("   ", ln)
     if settle:
-        time.sleep(settle)
+        await asyncio.sleep(settle)
     return r
 
 
-def swap_save_into_load_slot() -> bool:
+def swap_save_into_load_slot(backup_dir: Path) -> bool:
     """A1: the LoadGame params only reliably resolve
     Saves/Single/auto/AutoSave_0001 — copy the hotseat quicksave there
     (backing up whatever occupied the slot)."""
@@ -213,8 +228,10 @@ def swap_save_into_load_slot() -> bool:
         print(f"[swap] missing {src}")
         return False
     if dst.exists():
-        dst.rename(dst.with_suffix(".Civ6Save.prev.bak"))
-    dst.write_bytes(src.read_bytes())
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(dst, backup_dir / dst.name)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
     print(f"[swap] {src.name} -> {dst}")
     return True
 
@@ -222,9 +239,9 @@ def swap_save_into_load_slot() -> bool:
 async def run_arch1_session(opts) -> int:
     """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
     failed gate. Exit codes continue the ladder's scheme from 20."""
-    if opts.fresh_x and not bounce_x():
+    if opts.fresh_x and not await bounce_x():
         return 20
-    kill_game()
+    await kill_game()
     launch()
     if not await wait_for(port_up, 240, "tuner-bind", 10.0):
         return 21
@@ -244,7 +261,7 @@ async def run_arch1_session(opts) -> int:
     #    expected to fail — rc 11 — the config+host have applied by then).
     #    Codex r1 P2-8: the password gate demands the EXACT empty rows —
     #    "P1PW|arena" or "P1PW|nil" must refuse (Return auto-OK needs "")
-    r = phase(["live_hotseat_launch.py", "--full", "--empty",
+    r = await phase(["live_hotseat_launch.py", "--full", "--empty",
                "--port", str(tuner_port())])
     if "InSession|true" not in r.stdout \
             or "\nP0PW|\n" not in f"\n{r.stdout}\n" \
@@ -272,7 +289,7 @@ async def run_arch1_session(opts) -> int:
             print("[enter] turn-1 autosave landed — game is in")
             break
         try:
-            banner = find_teal_banner(capture_window())
+            banner = await asyncio.to_thread(lambda: find_teal_banner(capture_window()))
         except Exception:
             banner = None
         if banner and clicked_banner < 3:
@@ -309,10 +326,10 @@ async def run_arch1_session(opts) -> int:
         print("[quicksave] file did not land (or is stale)")
         dump_screen("no-quicksave")
         return 25
-    if not swap_save_into_load_slot():
+    if not swap_save_into_load_slot(opts.artifacts / "load-slot-backup"):
         return 26
     # 4. fresh process, then the load with the load-menu screen OPEN
-    kill_game()
+    await kill_game()
     launch()
     if not await wait_for(port_up, 240, "tuner-bind-2", 10.0):
         return 27
@@ -324,7 +341,7 @@ async def run_arch1_session(opts) -> int:
     await asyncio.sleep(5)
     await click(0.57, 0.55)           # Load Game
     await asyncio.sleep(5)
-    r = phase(["live_hotseat_launch.py", "--load",
+    r = await phase(["live_hotseat_launch.py", "--load",
                "--port", str(tuner_port())], settle=25)
     if "loadgame-returned|true" not in r.stdout:
         dump_screen("load-failed")
@@ -340,7 +357,7 @@ async def run_arch1_session(opts) -> int:
         if await ingame_up():
             break
         try:
-            banner = find_teal_banner(capture_window())
+            banner = await asyncio.to_thread(lambda: find_teal_banner(capture_window()))
         except Exception:
             banner = None
         if banner and intro_clicks < 3:
@@ -362,28 +379,29 @@ async def run_arch1_session(opts) -> int:
     # census-1 needs the tuner reconnect cooldown too (the pivot run
     # died here: the census ran right after the ingame-2 poll's
     # connection closed and the single-client refusal returned EMPTY)
-    time.sleep(8)
-    r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
+    await asyncio.sleep(8)
+    r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-1]", r.stdout.strip())
-    r = phase(["live_hotseat_launch.py", "--reflag",
+    r = await phase(["live_hotseat_launch.py", "--reflag",
                "--port", str(tuner_port())])
     if "REFLAG_SLOT|1|3" not in r.stdout \
             or "REFLAG_CFGHUMAN|1|true" not in r.stdout:
         print("[gate] re-flag read-back mismatch — refusing to dispatch")
         dump_screen("reflag-gate")
         return 31
-    time.sleep(5)
-    r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
+    await asyncio.sleep(5)
+    r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-2]", r.stdout.strip())
-    if not any(ln.startswith("P1|human=true|") and "|slot=3|" in ln
-               for ln in r.stdout.splitlines()):
-        print("[gate] census did not confirm P1 human slot=3 — refusing")
+    if r.returncode or not all(any(ln.startswith(f"P{pid}|human=true|")
+                                      and "|slot=3|" in ln
+                                      for ln in r.stdout.splitlines()) for pid in (0, 1)):
+        print("[gate] census did not confirm both human seats slot=3 — refusing")
         dump_screen("census-gate")
         return 31
     if not opts.no_smoke:
-        smoke = run([sys.executable,
+        smoke = await run([sys.executable,
                      str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
                      "--port", str(tuner_port())])
         last = (smoke.stdout.strip().splitlines() or ["<none>"])[-1]
@@ -396,24 +414,87 @@ async def run_arch1_session(opts) -> int:
                                   "mod attached, ready to dispatch"},
                          sort_keys=True))
         return 0
-    # 6. dispatch both seats
+    return 0
+
+
+async def dispatch(opts) -> int:
     args = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
             str(REPO / opts.config), "--phase", "dispatch-hotseat",
-            "--turns", str(opts.rounds), "--port", str(tuner_port())]
-    if opts.run_id:
-        args += ["--run-id", opts.run_id]
-    print("[dispatch]", " ".join(args[2:]), flush=True)
-    proc = subprocess.run(args, cwd=REPO)
-    return proc.returncode
+            "--turns", str(opts.rounds), "--port", str(tuner_port()),
+            "--run-id", opts.run_id, "--runs-root", str(opts.runs_root)]
+    for flag, value in (("startup-timeout", opts.startup_timeout),
+                        ("match-timeout", opts.match_timeout),
+                        ("agent-turn-timeout", opts.agent_turn_timeout),
+                        ("recovery-timeout", opts.recovery_timeout),
+                        ("recovery-sweeps", opts.recovery_sweeps)):
+        args += ["--" + flag, str(value)]
+    print("[dispatch]", " ".join(args), flush=True)
+    # Keep complete driver output in its own supporting log. The driver handles
+    # its deadlines and SIGTERM; launcher cancellation gives it 20s to seal.
+    with (opts.artifacts / "dispatch.log").open("w") as log:
+        proc = await asyncio.create_subprocess_exec(*args, cwd=REPO, stdout=log, stderr=log)
+        try:
+            return await proc.wait()
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), 22)
+                except TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    print("[dispatch] hard kill: run INCOMPLETE")
+
+
+async def controlled_arch1(opts) -> int:
+    from civ_arena.arena.events import EventLog
+
+    opts.run_id = opts.run_id or f"arch1-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    # Allocate exclusively BEFORE any game input or save mutation.
+    opts.artifacts = opts.runs_root / (opts.run_id + "-startup")
+    opts.artifacts.mkdir(parents=True, exist_ok=False)
+    if (opts.runs_root / opts.run_id).exists():
+        raise RuntimeError("dispatch run id already exists")
+    log = EventLog(opts.artifacts / "events.jsonl")
+    namespace = dict(match_id=opts.run_id + "-startup", game_instance_id=opts.run_id,
+                     turn=0, phase_player_id=-1, player_id=None, agent_id=None,
+                     visibility_scope="referee")
+    log.write("MATCH_START", **namespace, startup_timeout_s=opts.startup_timeout)
+    started = time.monotonic()
+    code, failure = 2, None
+    try:
+        async with asyncio.timeout(opts.startup_timeout):
+            # Copy the entire existing save inventory before the fresh game
+            # can rotate autosaves or overwrite quicksave. Never remove it.
+            if SAVES.exists():
+                await asyncio.to_thread(shutil.copytree, SAVES, opts.artifacts / "saves-before")
+            code = await run_arch1_session(opts)
+            if code:
+                failure = f"startup gate failed: exit {code}"
+    except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:
+        failure = ui_control.redact(f"{type(exc).__name__}: {exc}")
+    finally:
+        summary = dict(clean=code == 0 and failure is None, aborted=failure,
+                       phase="arch1-startup", elapsed_s=time.monotonic() - started,
+                       startup_timeout_s=opts.startup_timeout,
+                       final_observation="unavailable; game preserved",
+                       cleanup="helper processes stopped; game preserved")
+        log.write("MATCH_END", **namespace, summary=summary)
+        (opts.artifacts / "summary.json").write_text(json.dumps(summary, sort_keys=True))
+        log.close()
+    if not summary["clean"]:
+        print("[startup] stopped and preserved:", failure, flush=True)
+        return code or 2
+    return await dispatch(opts) if opts.config else 0
 
 
 async def main(opts) -> int:
     if getattr(opts, "session", None) == "arch1":
-        return await run_arch1_session(opts)
-    if opts.fresh_x and not bounce_x():
+        return await controlled_arch1(opts)
+    if opts.fresh_x and not await bounce_x():
         return 20
     if opts.kill_first:
-        kill_game()
+        await kill_game()
         launch()
         if not await wait_for(port_up, 120, "tuner-bind", 10.0):
             return 1
@@ -429,7 +510,7 @@ async def main(opts) -> int:
     # be long closed before live_newgame's subprocess dials in
     await asyncio.sleep(8)
     # configure-then-host (order proven live): values stick through hosting
-    cfg = run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
+    cfg = await run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
                "config"])
     print("[config]", cfg.stdout.strip() or cfg.stderr.strip())
     if cfg.returncode != 0:
@@ -438,7 +519,7 @@ async def main(opts) -> int:
                ("MapSize|-601637951", "MinMajor|2", "Participating|2")):
         print("[config] read-back mismatch — refusing to host")
         return 3
-    host = run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
+    host = await run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
                 "host"])
     print("[host]", host.stdout.strip() or host.stderr.strip())
     if host.returncode != 0:
@@ -468,7 +549,7 @@ async def main(opts) -> int:
     if not await wait_for(ingame_up, MAP_LOAD_S, "ingame"):
         return 6
     if opts.smoke:
-        smoke = run([sys.executable,
+        smoke = await run([sys.executable,
                      str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
                      "--port", str(tuner_port())])
         print("[smoke]", smoke.stdout.strip().splitlines()[-1] if
@@ -503,5 +584,16 @@ if __name__ == "__main__":
                     help="explicit run id for the dispatch")
     ap.add_argument("--no-smoke", action="store_true",
                     help="skip the smoke stage in --session arch1")
+    ap.add_argument("--startup-timeout", type=float, default=2700)
+    ap.add_argument("--match-timeout", type=float, default=7200)
+    ap.add_argument("--agent-turn-timeout", type=float, default=600)
+    ap.add_argument("--recovery-timeout", type=float, default=180)
+    ap.add_argument("--recovery-sweeps", type=int, default=8)
+    ap.add_argument("--runs-root", type=Path, default=REPO / "runs")
     ap.set_defaults(kill_first=True)
-    sys.exit(asyncio.run(main(ap.parse_args())))
+    async def entry():
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
+        return await main(ap.parse_args())
+    sys.exit(asyncio.run(entry()))
