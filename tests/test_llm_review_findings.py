@@ -124,11 +124,13 @@ async def test_facade_attribute_name_degrades_to_unknown_tool(tmp_path):
 # Finding 4: malformed 200 bodies degrade to ModelUnavailable.
 def test_client_parse_armor():
     client = MiniMaxMessagesClient(FAKE_LLM)
-    for bad in ["not a dict", {"content": "no"}, {"content": [5]},
+    for bad in ["not a dict", {"content": 42}, {"content": [5]},
                 {"content": [{"type": 7}]},
                 {"content": [], "usage": {"input_tokens": "x"}}]:
         with pytest.raises(ModelUnavailable, match="malformed"):
             client._parse(bad)
+    # Plain-string content is intentionally supported by the reviewed client.
+    assert client._parse({"content": "no"}).content == [{"type": "text", "text": "no"}]
     # a non-dict usage is TOLERATED (treated as empty), not fatal
     reply = client._parse({"content": [{"type": "text", "text": "hi"}],
                            "usage": "no"})

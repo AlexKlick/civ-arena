@@ -210,7 +210,7 @@ async def test_turn_mismatch_is_loud():
     server = FakeTunerServer(mod=FakeMod())
     port = await server.start()
     adapter = FireTunerAdapter("127.0.0.1", port, simulate_hook=ahead_hook,
-                               poll_timeout_s=1.0)
+                               poll_timeout_s=1.0, turn_wait_s=1.0)
     try:
         await adapter.setup({})
         with pytest.raises(RuntimeError, match="timed out"):
@@ -234,7 +234,7 @@ async def test_lease_for_the_wrong_player_is_refused():
     port = await server.start()
     adapter = FireTunerAdapter("127.0.0.1", port,
                                simulate_hook=wrong_player_hook,
-                               poll_timeout_s=1.0)
+                               poll_timeout_s=1.0, turn_wait_s=1.0)
     try:
         await adapter.setup({})
         with pytest.raises(RuntimeError,
