@@ -43,6 +43,7 @@ from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
 from civ_arena.game.civ6 import lua_translator, response_parser, ui_control
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
+from civ_arena.game.civ6.spectator import PopupMonitor
 from civ_arena.game.civ6.vendor.connection import GameConnection
 from civ_arena.session.player_session import PlayerSession
 from civ_arena.session.tools import SessionCtx
@@ -504,13 +505,15 @@ class HotseatLimits:
 
 class RecoveryEpisode:
     """One budget spans release and engagement; only engagement resets it."""
-    def __init__(self, limits: HotseatLimits, controller, audit, run_dir: Path):
+    def __init__(self, limits: HotseatLimits, controller, audit, run_dir: Path,
+                 popup_check=None):
         self.limits, self.controller, self.audit = limits, controller, audit
         self.run_dir = run_dir
         self.started = None
         self.attempts = 0
         self.total_attempts = 0
         self.next_sweep = 0.0
+        self.popup_check = popup_check
 
     def start(self):
         if self.started is None:
@@ -538,6 +541,14 @@ class RecoveryEpisode:
         self.total_attempts += 1
         self.audit("recovery_sweep", attempt=self.attempts)
         async with asyncio.timeout(self.remaining()):
+            if await probe():
+                return True
+            if self.popup_check is not None and await self.popup_check():
+                # The semantic handler belongs to this sweep's same budget.
+                # Do not also send blind keys into a newly advanced UI queue.
+                progress = await probe()
+                self.next_sweep = time.monotonic() + 5
+                return progress
             for index, key in enumerate((*keys, None)):
                 if await probe():
                     return True
@@ -627,7 +638,9 @@ async def phase_dispatch_hotseat(
         driver._write("HEARTBEAT", turn=int((status or {}).get("TURN", 0)),
                       audit=event, **payload)
 
-    recovery = RecoveryEpisode(limits, controller, audit, run_dir)
+    popups = PopupMonitor(adapter, controller, audit, timeout=limits.recovery,
+                         attempts=limits.sweeps)
+    recovery = RecoveryEpisode(limits, popups, audit, run_dir, popup_check=popups.check)
 
     async def poll():
         nonlocal status
@@ -645,6 +658,7 @@ async def phase_dispatch_hotseat(
                     or (p.get("PUPPET_ACTIVE") is True and
                         (p.get("LEASE_PLAYER"), p.get("LEASE_TURN")) != (player, turn)))
         async with asyncio.timeout(recovery.remaining()):
+            await popups.quiesce()
             while not await released():
                 if (time.monotonic() >= recovery.next_sweep
                         and await recovery.sweep(released, keys=("Return", "Escape", "Escape"))):
@@ -688,6 +702,7 @@ async def phase_dispatch_hotseat(
             return turn, pid
 
         async with asyncio.timeout(recovery.remaining()):
+            await popups.quiesce()
             while True:
                 result = await probe()
                 if result:
@@ -759,56 +774,67 @@ async def phase_dispatch_hotseat(
             await adapter.refresh_digest()
         adapter.handoff_wait = wait_release
         play_started = time.monotonic()
-        async with asyncio.timeout(limits.match):
-            while ledger.rounds < rounds:
-                turn, seat_pid = await engage()
-                stage = "active_turn"
-                turn_started = time.monotonic()
-                seat = seats[seat_pid]
-                agent = seat["agent"]
-                lease = driver.referee.grant_lease(agent.player_id, agent.agent_id, turn)
-                async with asyncio.timeout(limits.agent_turn):
-                    sw = await adapter.read_raw(lua_translator.switch_local_player(agent.player_id))
-                    want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
-                    if not any(ln.strip() == want for ln in sw):
-                        raise RuntimeError("local-player switch did not take")
-                    await adapter.read_raw(lua_translator.unpause_local())
-                    digest_open = await adapter.refresh_digest()
-                    await _resolve_blockers(adapter, agent.player_id, turn)
-                    housekept = adapter.drain_mutations()
-                    driver.referee._ls.acknowledged.extend(housekept)
-                    allowed_open = len(driver.referee._ls.allowed)
-                    begin_hook = getattr(seat["runtime"], "begin_turn", None)
-                    if begin_hook is not None:
-                        begin_hook(turn)
-                    nxt = ledger.order[(ledger.order.index(seat_pid) + 1) % 2]
-                    adapter.set_pre_end_switch(nxt)
-                    try:
-                        await seat["session"].take_turn(lease, seat["runtime"])
-                    finally:
-                        adapter.set_pre_end_switch(None)
-                    if not lease.released or adapter._phase_open != -1:
-                        raise RuntimeError("agent returned with an open lease")
-                    # Adapter.end_phase observed engine release before the
-                    # referee released the logical lease. Both are required.
-                    digest_close = adapter.state_hash()
-                    allowed = driver.referee._ls.allowed[allowed_open:]
-                    row = {"turn": turn, "player": agent.player_id,
-                           "agent": agent.agent_id, "allowed_mutations": len(allowed),
-                           "digest_changed": digest_open != digest_close,
-                           "mutated": bool(allowed), "lease_released": lease.released,
-                           "violations": driver.referee.violation_count(),
-                           "elapsed_s": time.monotonic() - turn_started}
-                    row["unexpected"] = bool(row["digest_changed"] and not (allowed or housekept))
-                    ledger.append(row, lease)
-                    audit("completed_seat_turn", row=row)
-                    print(f"hotseat turn {turn} p{seat_pid}: "
-                          f"{len(ledger.rows)} completed", flush=True)
-                    if row["unexpected"] or row["violations"]:
-                        raise RuntimeError("watchdog or unexplained digest anomaly")
-            audit("play_complete", elapsed_s=time.monotonic() - play_started)
+        async with asyncio.timeout(limits.match), asyncio.TaskGroup() as tasks:
+            watcher = tasks.create_task(popups.watch(lambda: stage == "active_turn"))
+            try:
+                while ledger.rounds < rounds:
+                    turn, seat_pid = await engage()
+                    stage = "active_turn"
+                    turn_started = time.monotonic()
+                    seat = seats[seat_pid]
+                    agent = seat["agent"]
+                    lease = driver.referee.grant_lease(agent.player_id, agent.agent_id, turn)
+                    async with asyncio.timeout(limits.agent_turn):
+                        sw = await adapter.read_raw(
+                            lua_translator.switch_local_player(agent.player_id))
+                        want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
+                        if not any(ln.strip() == want for ln in sw):
+                            raise RuntimeError("local-player switch did not take")
+                        await adapter.read_raw(lua_translator.unpause_local())
+                        digest_open = await adapter.refresh_digest()
+                        await _resolve_blockers(adapter, agent.player_id, turn)
+                        housekept = adapter.drain_mutations()
+                        driver.referee._ls.acknowledged.extend(housekept)
+                        allowed_open = len(driver.referee._ls.allowed)
+                        begin_hook = getattr(seat["runtime"], "begin_turn", None)
+                        if begin_hook is not None:
+                            begin_hook(turn)
+                        nxt = ledger.order[(ledger.order.index(seat_pid) + 1) % 2]
+                        adapter.set_pre_end_switch(nxt)
+                        try:
+                            await seat["session"].take_turn(lease, seat["runtime"])
+                        finally:
+                            adapter.set_pre_end_switch(None)
+                        if not lease.released or adapter._phase_open != -1:
+                            raise RuntimeError("agent returned with an open lease")
+                        # Adapter.end_phase observed engine release before the
+                        # referee released the logical lease. Both are required.
+                        digest_close = adapter.state_hash()
+                        allowed = driver.referee._ls.allowed[allowed_open:]
+                        row = {"turn": turn, "player": agent.player_id,
+                               "agent": agent.agent_id, "allowed_mutations": len(allowed),
+                               "digest_changed": digest_open != digest_close,
+                               "mutated": bool(allowed), "lease_released": lease.released,
+                               "violations": driver.referee.violation_count(),
+                               "elapsed_s": time.monotonic() - turn_started}
+                        row["unexpected"] = bool(
+                            row["digest_changed"] and not (allowed or housekept))
+                        ledger.append(row, lease)
+                        audit("completed_seat_turn", row=row)
+                        print(f"hotseat turn {turn} p{seat_pid}: "
+                              f"{len(ledger.rows)} completed", flush=True)
+                        if row["unexpected"] or row["violations"]:
+                            raise RuntimeError("watchdog or unexplained digest anomaly")
+                stage = "finishing"
+                await popups.quiesce()
+                audit("play_complete", elapsed_s=time.monotonic() - play_started)
+            finally:
+                watcher.cancel()
     except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:
-        failure = ui_control.redact(f"{type(exc).__name__} during {stage}: {exc}")
+        detail = str(exc)
+        if isinstance(exc, BaseExceptionGroup):
+            detail = "; ".join(f"{type(child).__name__}: {child}" for child in exc.exceptions)
+        failure = ui_control.redact(f"{type(exc).__name__} during {stage}: {detail}")
     finally:
         adapter.handoff_wait = None
         try:
@@ -830,6 +856,7 @@ async def phase_dispatch_hotseat(
             "last_engine_status": status, "final_observation": "cached; not re-polled at shutdown",
             "recovery_attempts": recovery.total_attempts,
             "pending_recovery_attempts": recovery.attempts, "cleanup": cleanup,
+            "informational_popups": popups.summary(),
             "limits": asdict(limits), "elapsed_s": time.monotonic() - began,
             "identity": identity, "movement_allowance": spec.declare_own_endpath_drift,
             "request_usage": {s["agent"].agent_id: getattr(
