@@ -828,3 +828,22 @@ validation sequence above. Acceptance remains 0/2 runs started.
 The [parallel kickoff](strategy-program-kickoff.md) records independent simulator
 evaluation work and the [capability/experiment inventory](strategy-next-experiment.md).
 Those tracks cannot satisfy this live gate or the separate CAR-M1 V2 gates.
+
+## 2026-09-04 — spectator popup control and restored headless display
+
+The user restored headless mode. Current host observations show an active
+2944×1840 output, authenticated Steam startup and a Sunshine streaming client.
+The prior missing-display blocker is cleared at the host-observation level.
+
+The [spectator popup implementation](spectator-popups.md) adds bounded checks
+through the existing driver connection, normal callbacks for six informational
+contexts, serialized UI actions, and terminal popup audit counters. It does not
+provide live popup proof from source or Lua-fixture tests.
+
+The fresh provider preflight failed its echo tool-call predicate. One bounded
+diagnostic attempt also failed: the client reported a text-only response with
+zero tool calls. Both attempts and the first probe's evidence gap are retained
+in the spectator record. No fresh game was launched and no further provider
+requests followed. The existing headless/Moonlight session remains preserved.
+Acceptance remains 0/2 runs started; installed callback execution and real
+handoff observations for this revision remain **BLOCKED** by the failed stage.

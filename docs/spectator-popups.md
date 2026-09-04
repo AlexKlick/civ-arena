@@ -56,6 +56,20 @@ active turn through the driver's terminal path. Successful completion drains
 an in-flight check, then stops the watcher; abort cleanup starts no new checks.
 All clocks stay outside deterministic simulator hashes.
 
+Repository verification at source/test commit
+`51cd3bcefedd78901b08d7d3cec512ef546dd066`: **640 passed, 0 failed, 1 skipped**
+in 512.09 seconds. The full suite ran once; Ruff passed. Only documentation
+changed during and after this gate. No flaky/rerun plugin was requested.
+
+- [Complete pytest log](../runs/spectator-popup-20260904T230258Z/pytest-release.log)
+- [Complete Ruff log](../runs/spectator-popup-20260904T230258Z/ruff-release.log)
+- [33 popup-helper checks, including executable Lua fixtures](../runs/spectator-popup-20260904T230258Z/popup-focused.log)
+- [45 focused driver/UI checks before the final success-path quiesce adjustment](../runs/spectator-popup-20260904T230258Z/integrated-focused.log)
+
+The final quiesce adjustment is included in the full gate. A separate read-only
+review found no confirmed blocker in the controller/driver lifecycle; this is
+repository proof and does not waive the live preflight below.
+
 ## Follow-up probes
 
 After the repository checks, launch a fresh Architecture-1 deterministic
@@ -71,9 +85,25 @@ request caps, mod bytes and the documented movement allowance are unchanged.
 
 ## Blocked checks
 
-At implementation start, no Civ6 process or tuner existed yet. The two
-30-round acceptance runs remain unproven. Source and host readiness do not
-replace the fresh rehearsal, smoke and acceptance gates.
+Live stage status: **BLOCKED** at provider tool preflight. Two bounded attempts
+used the unchanged MiniMax client, configuration and strict echo predicate.
+The first made one POST and failed its required tool-call predicate. Its probe
+retained only the exception type, so its response model, content and usage are
+unavailable. The original script and log remain preserved:
+[first probe](../runs/spectator-popup-20260904T230258Z/provider-preflight.log).
+
+A separately retained diagnostic attempt made one additional POST. Its client
+reported `MiniMax-M3`, 24 input tokens and 8 output tokens, `end_turn`, one text
+block and zero tool calls. It failed the same predicate:
+[diagnostic](../runs/spectator-popup-20260904T230258Z/provider-diagnostic.log).
+This proves that the diagnostic response omitted the requested call; it does
+not establish an authentication failure, provider outage, or the first
+response's contents. No further requests or live launches followed.
+
+Total provider requests in this follow-up: two. No fresh game episode was
+opened. The restored headless session and streaming connection were preserved;
+the staged rehearsal, MiniMax smoke and both 30-round acceptance runs remain
+unproven. Source and host readiness do not replace those gates.
 
 ## Evidence gaps
 
@@ -81,3 +111,9 @@ There is not yet a live captured tech/civic popup dismissal from this revision.
 Sunshine connection evidence is host stream evidence; viewing through the
 user's Moonlight client is outside the repository gate. Later run outcomes
 must record these boundaries explicitly.
+
+The failed first provider response cannot be reconstructed from its exception
+type. No successful tool-result acknowledgment was reached by either attempt.
+The [source/config/mod and installed-UI inventory](../runs/spectator-popup-20260904T230258Z/custody-final.json)
+binds eight repository files and nine installed UI sources; these byte hashes
+are source custody, not a live callback execution receipt.

@@ -18,6 +18,8 @@ the latest startup attempt did not produce a game window or tuner. See
 and [`docs/strategy-program-kickoff.md`](docs/strategy-program-kickoff.md) for
 the parallel reliability, evaluation, and strategy work. A separate CAR-M1
 worktree contains the V2 turn-control candidate; it is not integrated here.
+The hotseat driver also checks and dismisses allowlisted informational popups
+for spectators; see [Moonlight viewing and popup handling](docs/spectator-popups.md).
 
 ## Layout
 
