@@ -451,6 +451,24 @@ class FireTunerAdapter:
                     f"pre-end local switch to p{nxt} did not take: {sw!r}")
             await self._conn.execute_read(
                 lua_translator.finish_all_moves(player_id))
+            # HOTSEAT HAND-OFF PANEL (llm-minimax2-007 traceback,
+            # 2026-09-04): switching local to the NEXT seat makes the
+            # engine surface the empty-password PlayerChange panel on
+            # that seat's turn start — the next seat never activates and
+            # the lease never moves until it is OK'd. One Return runs
+            # the engine's own auto-OK (playerchange.lua
+            # OnKeyUp_Return). Best-effort subprocess key; the release
+            # await below still bounds the whole path.
+            with contextlib.suppress(Exception):
+                import subprocess as _sp
+                import sys as _sys
+                from pathlib import Path as _P
+                _repo = _P(__file__).resolve().parents[3]
+                _sp.run(
+                    [_sys.executable,
+                     str(_repo / "scripts" / "x_click.py"),
+                     "--key", "Return"],
+                    capture_output=True, timeout=15)
         elif self._strategy == "h1":
             await self._conn.execute_write(
                 lua_translator.request_end_turn(player_id))

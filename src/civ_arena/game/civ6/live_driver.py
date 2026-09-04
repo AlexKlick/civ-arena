@@ -526,6 +526,7 @@ async def phase_dispatch_hotseat(
     driven_rounds = 0
     seat_pid: int = -1
     between_wait_s = 0.0
+    sweeps = 0
     try:
         while driven_rounds < rounds:
             status = await adapter.poll_status()
@@ -538,7 +539,18 @@ async def phase_dispatch_hotseat(
                     # hand-off) holds the rollover open indefinitely —
                     # after ~15s of no-seat processing, sweep the modal
                     # keys; the engine then rolls and the next hook fires.
+                    # BOUNDED (llm-minimax2-004 lesson: an undismissable
+                    # modal spun this sweep for ~7h overnight — thousands
+                    # of Escape presses wedged the UI into a pause): give
+                    # up loudly after 8 sweeps, never spin forever.
                     if between_wait_s >= 15.0:
+                        sweeps += 1
+                        if sweeps > 8:
+                            raise RuntimeError(
+                                f"between-seat popup not dismissable after "
+                                f"{sweeps - 1} sweeps at turn "
+                                f"{status.get('TURN')} — needs a human/click "
+                                f"class dismissal (wire-side probe pending)")
                         await _dismiss_popups(
                             int(status.get("TURN", 0)),
                             ("Return", "Escape", "Escape"))
@@ -559,6 +571,8 @@ async def phase_dispatch_hotseat(
             else:
                 turn = int(status.get("LEASE_TURN", status.get("TURN", 0)))
             between_wait_s = 0.0
+            sweeps = 0
+            guard_retries = 0
             seat = seats[seat_pid]
             agent = seat["agent"]
             adapter.expect_turn(turn)
@@ -574,7 +588,16 @@ async def phase_dispatch_hotseat(
                     # the engine has not closed the PREVIOUS seat's phase
                     # yet (a turn-close popup held the t3 hand-off open,
                     # live 2026-09-03) — sweep the modals and re-target
-                    # from a fresh poll
+                    # from a fresh poll. BOUNDED (the unbounded version
+                    # of this retry spun ~7h on a click-class modal,
+                    # llm-minimax2-004/005): after 8 guard retries abort
+                    # loudly instead of spinning.
+                    guard_retries += 1
+                    if guard_retries > 8:
+                        raise RuntimeError(
+                            f"begin_turn phase guard stuck after 8 "
+                            f"retries at turn {turn} — engine phase will "
+                            f"not close (click-class modal?)") from e
                     await _dismiss_popups(
                         turn, ("Return", "Escape", "Escape"))
                     await asyncio.sleep(5)
@@ -925,6 +948,46 @@ async def _dismiss_popups(turn: int, keys: tuple[str, ...] = ("Escape",
             capture_output=True, timeout=15)
         await asyncio.sleep(2.0)
     print(f"modal-sweep[{turn}]: popup dismissal sent ({' '.join(keys)})")
+    # CLICK-CLASS modal (operator's visual-responder idea, live-forced
+    # 2026-09-04 llm-minimax2-004/005: some panels ignore keys entirely
+    # and held the t7/t8 boundary for hours). Locate the Civ-style teal
+    # ribbon button by pixel cluster — the runner's proven locator — and
+    # CLICK it. Degrades silently without a display (rehearsals).
+    await _click_banner_button(turn)
+
+
+async def _click_banner_button(turn: int) -> None:
+    """Find a teal ribbon button on the Civ6 window and click it.
+
+    Reuses scripts/live_zero_touch's cluster locator via a subprocess
+    probe (imports inside the function; any failure — no display, no
+    window, no banner — is logged and swallowed: this is best-effort
+    UI triage from the stalled path only."""
+    import contextlib
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+    repo = _Path(__file__).resolve().parents[3]
+    with contextlib.suppress(Exception):
+        probe = subprocess.run(
+            [_sys.executable, "-c",
+             "import sys; sys.path.insert(0, "
+             f"{str(repo / 'scripts')!r}); "
+             "import live_zero_touch as z; "
+             "b = z.find_teal_banner(z.capture_window()); "
+             "print('BANNER|none' if b is None "
+             "else f'BANNER|{b[0]}|{b[1]}')"],
+            capture_output=True, text=True, timeout=60, cwd=str(repo))
+        out = (probe.stdout or "").strip().splitlines()
+        if out and out[-1].startswith("BANNER|") \
+                and out[-1] != "BANNER|none":
+            fx, fy = out[-1].split("|")[1:3]
+            subprocess.run(
+                [_sys.executable, str(repo / "scripts" / "x_click.py"),
+                 "--at", f"{float(fx):.4f},{float(fy):.4f}"],
+                capture_output=True, timeout=15)
+            print(f"modal-click[{turn}]: banner clicked "
+                  f"({float(fx):.3f}, {float(fy):.3f})")
 
 
 async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
