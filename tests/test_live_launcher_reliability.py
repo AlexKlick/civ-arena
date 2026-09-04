@@ -187,3 +187,41 @@ async def test_arch1_display_failure_preserves_terminal_before_game_launch(
     assert not summary['clean'] and 'display preflight failed' in summary['aborted']
     assert [row['kind'] for row in records] == ['MATCH_START', 'MATCH_END']
     assert records[-1]['summary'] == summary
+
+
+async def test_arch1_from_menu_preserves_process_and_skips_intro_key(tmp_path, monkeypatch):
+    calls = []
+    async def display(*args):
+        calls.append('display')
+    async def no_kill():
+        pytest.fail('must preserve the user-started game')
+    async def no_key(*args):
+        pytest.fail('must not send an intro Escape at the main menu')
+    async def ready(check, budget, label, *args):
+        calls.append(label)
+        return True
+    async def phase(args, **kwargs):
+        calls.append('host-configure')
+        # Stop before hosting completes; no live save/UI operations in this test.
+        return SimpleNamespace(stdout='', returncode=1)
+    monkeypatch.setattr(z, 'require_active_display', display)
+    monkeypatch.setattr(z, 'kill_game', no_kill)
+    monkeypatch.setattr(z, 'launch', lambda *a: pytest.fail('must not relaunch'))
+    monkeypatch.setattr(z, 'key', no_key)
+    monkeypatch.setattr(z, 'wait_for', ready)
+    monkeypatch.setattr(z, 'phase', phase)
+    opts = SimpleNamespace(artifacts=tmp_path, fresh_x=False, kill_first=False)
+    assert await z.run_arch1_session(opts) == 23
+    assert calls == ['display', 'tuner-bind', 'menu', 'host-configure']
+
+
+async def test_from_menu_refuses_x_restart_before_bounce(tmp_path, monkeypatch):
+    async def display(*args):
+        pass
+    async def bounce():
+        pytest.fail('must preserve the running session')
+    monkeypatch.setattr(z, 'require_active_display', display)
+    monkeypatch.setattr(z, 'bounce_x', bounce)
+    with pytest.raises(ValueError, match='cannot restart X'):
+        await z.run_arch1_session(SimpleNamespace(
+            artifacts=tmp_path, fresh_x=True, kill_first=False))

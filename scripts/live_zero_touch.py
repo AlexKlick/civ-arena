@@ -272,12 +272,16 @@ async def run_arch1_session(opts) -> int:
     """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
     failed gate. Exit codes continue the ladder's scheme from 20."""
     await require_active_display(opts.artifacts)
+    kill_first = getattr(opts, "kill_first", True)
+    if not kill_first and opts.fresh_x:
+        raise ValueError("--from-menu cannot restart X; omit --fresh-x")
     if opts.fresh_x and not await bounce_x():
         return 20
     if opts.fresh_x:
         await require_active_display(opts.artifacts)
-    await kill_game()
-    launch(opts.artifacts)
+    if kill_first:
+        await kill_game()
+        launch(opts.artifacts)
     if not await wait_for(port_up, 240, "tuner-bind", 10.0):
         return 21
 
@@ -286,8 +290,9 @@ async def run_arch1_session(opts) -> int:
 
     if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu"):
         return 22
-    await key("Escape")               # skip the intro movie if it is still up
-    await asyncio.sleep(8)
+    if kill_first:
+        await key("Escape")           # skip the intro movie on a fresh launch
+        await asyncio.sleep(8)
 
     async def ingame_up() -> bool:
         return "GameCore_Tuner" in await tuner_states()
