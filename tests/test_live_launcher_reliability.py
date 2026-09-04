@@ -72,3 +72,32 @@ def test_launch_preserves_previous_diagnostics(tmp_path, monkeypatch):
     assert old.read_bytes() == b'previous diagnosis'
     assert len(list(tmp_path.glob('civ6-launch-*.log'))) == 2
     assert all(call[0][0][0] == '/usr/games/steam' for call in calls)
+
+
+async def test_launcher_forwards_only_remaining_startup_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(z, 'SAVES', tmp_path / 'absent-saves')
+    monkeypatch.setattr(z, 'TUNER_COOLDOWN_S', 0.01)
+    async def startup(opts):
+        await asyncio.sleep(0.01)
+        return 0
+    monkeypatch.setattr(z, 'run_arch1_session', startup)
+    captured = []
+    class Proc:
+        returncode = 0
+        async def wait(self):
+            return 0
+    async def spawn(*args, **kwargs):
+        captured.extend(args)
+        return Proc()
+    monkeypatch.setattr(z.asyncio, 'create_subprocess_exec', spawn)
+    opts = SimpleNamespace(run_id='remaining', runs_root=tmp_path / 'runs',
+                           startup_timeout=0.3, config='config.yaml', rounds=3,
+                           match_timeout=7200, agent_turn_timeout=600,
+                           recovery_timeout=180, recovery_sweeps=8)
+    assert await z.controlled_arch1(opts) == 0
+    forwarded = float(captured[captured.index('--startup-timeout') + 1])
+    assert 0 < forwarded < 0.29
+    summary = json.loads((opts.artifacts / 'summary.json').read_text())
+    assert summary['startup_timeout_s'] == 0.3
+    assert summary['driver_startup_timeout_s'] == forwarded
+    assert summary['elapsed_s'] + forwarded <= 0.31

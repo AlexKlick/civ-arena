@@ -50,6 +50,7 @@ SAVES = Path("/home/alexk/.local/share/aspyr-media/"
 COLD_BOOT_S = 600        # first launch after Steam start: ~8-10 min
 WARM_BOOT_S = 420        # relaunch: states register in ~4-7 min
 INTRO_SETTLE_S = 300     # host -> BEGIN GAME clickable (varies 80-300s)
+TUNER_COOLDOWN_S = 8
 MAP_LOAD_S = 300         # BEGIN GAME -> GameCore_Tuner
 
 
@@ -423,7 +424,8 @@ async def dispatch(opts) -> int:
             str(REPO / opts.config), "--phase", "dispatch-hotseat",
             "--turns", str(opts.rounds), "--port", str(tuner_port()),
             "--run-id", opts.run_id, "--runs-root", str(opts.runs_root)]
-    for flag, value in (("startup-timeout", opts.startup_timeout),
+    startup_budget = getattr(opts, "driver_startup_timeout", opts.startup_timeout)
+    for flag, value in (("startup-timeout", startup_budget),
                         ("match-timeout", opts.match_timeout),
                         ("agent-turn-timeout", opts.agent_turn_timeout),
                         ("recovery-timeout", opts.recovery_timeout),
@@ -472,12 +474,18 @@ async def controlled_arch1(opts) -> int:
             code = await run_arch1_session(opts)
             if code:
                 failure = f"startup gate failed: exit {code}"
+            elif opts.config:
+                await asyncio.sleep(TUNER_COOLDOWN_S)
+                opts.driver_startup_timeout = opts.startup_timeout - (time.monotonic() - started)
+                if opts.driver_startup_timeout <= 0:
+                    raise TimeoutError("startup budget exhausted before driver setup")
     except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:
         failure = ui_control.redact(f"{type(exc).__name__}: {exc}")
     finally:
         summary = dict(clean=code == 0 and failure is None, aborted=failure,
                        phase="arch1-startup", elapsed_s=time.monotonic() - started,
                        startup_timeout_s=opts.startup_timeout,
+                       driver_startup_timeout_s=getattr(opts, "driver_startup_timeout", None),
                        final_observation="unavailable; game preserved",
                        cleanup="helper processes stopped; game preserved")
         log.write("MATCH_END", **namespace, summary=summary)
@@ -487,7 +495,6 @@ async def controlled_arch1(opts) -> int:
         print("[startup] stopped and preserved:", failure, flush=True)
         return code or 2
     if opts.config:
-        await asyncio.sleep(8)  # single-client tuner reconnect cooldown after smoke
         return await dispatch(opts)
     return 0
 
