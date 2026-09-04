@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "purpose": "legacy-simulator-diagnostic",
+  "turns": 20,
+  "seeds": {
+    "development": [700003, 707922],
+    "held_out": [800003, 807922]
+  },
+  "pairs": [
+    ["mcts-b4", "turtler"],
+    ["expansionist", "turtler"],
+    ["mcts-b4", "mcts-b8"]
+  ]
+}
