@@ -126,7 +126,7 @@ class LLMAgentRuntime:
                 if not uses:
                     # prose-only reply: per the system prompt that means the
                     # model is done. Force the phase closed — never stall.
-                    await facade.end_turn()
+                    await self._close_turn(facade)
                     return
                 results: list[dict[str, Any]] = []
                 for i, use in enumerate(uses):
@@ -147,12 +147,25 @@ class LLMAgentRuntime:
                 messages.append({"role": "user", "content": results})
             # round cap exhausted without end_turn — the runtime closes the
             # phase itself; a model that never finishes cannot stall the match
-            await facade.end_turn()
+            await self._close_turn(facade)
         except ModelUnavailable as exc:
             raise MatchAborted(
                 f"llm runtime {self.profile.agent_id!r}: {exc}") from exc
 
     # ------------------------------------------------------------ helpers
+    async def _close_turn(self, facade: Any) -> None:
+        result = await facade.end_turn()
+        if isinstance(result, dict) and result.get("rejection") == "unmoved_units":
+            units = result.get("unmoved_units")
+            if not isinstance(units, list) or len(units) > 256:
+                raise MatchAborted("invalid or oversized completeness repair")
+            # One bounded pass, via the same audited facade as model actions.
+            for uid in dict.fromkeys(units):
+                await facade.fortify(uid)
+            result = await facade.end_turn()
+        if not isinstance(result, dict) or result.get("status") != "accepted":
+            raise MatchAborted("forced end_turn did not release the turn")
+
     async def _create(self, messages: list[dict[str, Any]]) -> ModelReply:
         posts = getattr(self.client, "posts_sent", 0)
         if posts >= self.llm.max_requests_per_match:
@@ -212,7 +225,10 @@ class LLMAgentRuntime:
         except TypeError as exc:
             self._note_error("llm_malformed_args")
             return False, self._error(f"bad arguments: {exc}")
-        return True, self._compact(result)
+        ok = not isinstance(result, dict) or result.get("status") != "rejected"
+        if name == "end_turn":
+            ok = isinstance(result, dict) and result.get("status") == "accepted"
+        return ok, self._compact(result)
 
     def _compact(self, result: Any) -> str:
         payload = json.dumps(result, sort_keys=True, default=str)

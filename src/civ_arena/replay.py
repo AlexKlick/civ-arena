@@ -71,11 +71,12 @@ class ReplayRuntime:
             fn = getattr(facade, call.tool)
             pos = [call.args[k] for k in ARG_ORDER.get(call.tool, []) if k in call.args]
             if call.tool == "purchase" or call.key is not None:
-                await fn(*pos, idempotency_key=call.key)
+                result = await fn(*pos, idempotency_key=call.key)
             else:
-                await fn(*pos)
+                result = await fn(*pos)
             self.issued += 1
-            if call.tool == "end_turn":
+            if (call.tool == "end_turn" and isinstance(result, dict)
+                    and result.get("status") == "accepted"):
                 return
         # queue exhausted without a recorded end_turn (torn tail, or an agent
         # that never completed): close the phase anyway so replay reports a

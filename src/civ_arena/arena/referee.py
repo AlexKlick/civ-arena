@@ -292,12 +292,24 @@ class Referee:
             else list(omni_units.values())
         owner_of = {u.get("unit_id"): u.get("owner") for u in units}
         journal = getattr(self.adapter, "_journal", None)
+        admitted = []
         for m in list(journal or []):
             eid = getattr(m, "entity_id", None)
-            if (owner_of.get(eid) == ctx.player_id
+            if (getattr(m, "entity_type", None) == "unit"
+                    and owner_of.get(eid) == ctx.player_id
                     and getattr(m, "attr", None) in ("moves", "movement",
                                                      "pos", "q", "r")):
                 self._ls.acknowledged.append(m)
+                admitted.append(m.to_doc())
+        self.log.write(
+            "HEARTBEAT", match_id=self.match_id,
+            game_instance_id=self.game_instance_id, turn=ctx.turn,
+            phase_player_id=ctx.player_id, player_id=ctx.player_id,
+            agent_id=ctx.agent_id, visibility_scope="referee",
+            audit="movement_allowance", allowance="declare_own_endpath_drift",
+            mutations=admitted, owners={m["entity_id"]: owner_of[m["entity_id"]]
+                                        for m in admitted},
+        )
 
     async def _unmoved_units(self, ctx: SessionCtx) -> list[str]:
         """Own units with movement remaining and no standing order (the

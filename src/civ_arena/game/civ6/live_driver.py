@@ -22,10 +22,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
+import signal
+import subprocess
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +115,7 @@ class LiveDriver:
                 "flag_and_continue (docs/design-notes.md: live Civ cannot "
                 "roll back)")
         self.log = EventLog(run_dir / "events.jsonl")
+        self._ended = False
         self.telemetry = TelemetryRegistry()
         self.referee = Referee(
             adapter, VisibilityPolicy(), self.log, self.telemetry,
@@ -135,6 +139,12 @@ class LiveDriver:
             agent_id=agent_id, visibility_scope=visibility_scope, **payload,
         )
 
+    def cached_hash(self):
+        try:
+            return self.adapter.state_hash()
+        except RuntimeError:
+            return None
+
     async def match_start(self) -> None:
         self._write(
             "MATCH_START", turn=0,
@@ -145,7 +155,7 @@ class LiveDriver:
                 "watchdog_mode": self.spec.watchdog_mode,
                 "adapter": self.spec.adapter,
             },
-            initial_state_hash=self.adapter.state_hash(),
+            initial_state_hash=self.cached_hash(),
         )
 
     async def match_end(self, final_turn: int, extra: dict[str, Any]) -> None:
@@ -154,18 +164,21 @@ class LiveDriver:
         # carry the same keys (scores stay empty until the sim-shaped
         # observe surface lands in M14c; live matches are not corpus
         # members, so projection tolerates the empty civ table).
+        if self._ended:
+            raise RuntimeError("MATCH_END already recorded")
         summary = {
             "match_id": self.spec.match_id,
             "game_instance_id": self.game_instance_id,
             "final_turn": final_turn,
             "aborted": None,
             "violations_total": self.referee.violation_count(),
-            "final_state_hash": self.adapter.state_hash(),
+            "final_state_hash": self.cached_hash(),
             "telemetry": self.telemetry.snapshot(),
             "scores": {},
             **extra,
         }
         self._write("MATCH_END", turn=final_turn, summary=summary)
+        self._ended = True
         (self.run_dir / "summary.json").write_text(
             json.dumps(summary, sort_keys=True))
         self.log.close()
@@ -475,250 +488,358 @@ def _agent_profile(agent: AgentSpec) -> AgentProfile:
         case_base=agent.case_base)
 
 
+@dataclass(frozen=True)
+class HotseatLimits:
+    startup: float = 2700
+    match: float = 7200
+    agent_turn: float = 600
+    recovery: float = 180
+    sweeps: int = 8
+    cleanup: float = 20
+
+    def __post_init__(self):
+        if any(v <= 0 for v in asdict(self).values()):
+            raise ValueError("hotseat limits must be positive")
+
+
+class RecoveryEpisode:
+    """One budget spans release and engagement; only engagement resets it."""
+    def __init__(self, limits: HotseatLimits, controller, audit, run_dir: Path):
+        self.limits, self.controller, self.audit = limits, controller, audit
+        self.run_dir = run_dir
+        self.started = None
+        self.attempts = 0
+        self.total_attempts = 0
+        self.next_sweep = 0.0
+
+    def start(self):
+        if self.started is None:
+            self.started = time.monotonic()
+            self.next_sweep = self.started + 15
+
+    def remaining(self):
+        self.start()
+        remaining = self.limits.recovery - (time.monotonic() - self.started)
+        if remaining <= 0:
+            raise TimeoutError("recovery episode deadline expired")
+        return remaining
+
+    def engaged(self):
+        self.audit("engaged", attempts=self.attempts,
+                   elapsed_s=0 if self.started is None else time.monotonic() - self.started)
+        self.started = None
+        self.attempts = 0
+
+    async def sweep(self, probe, *, keys=("Return", "Escape", "Escape")):
+        self.remaining()
+        if self.attempts >= self.limits.sweeps:
+            raise RuntimeError("recovery exhausted: sweep limit")
+        self.attempts += 1
+        self.total_attempts += 1
+        self.audit("recovery_sweep", attempt=self.attempts)
+        async with asyncio.timeout(self.remaining()):
+            for index, key in enumerate((*keys, None)):
+                if await probe():
+                    return True
+                result = await self.controller.action(
+                    key=key, banner=key is None, timeout=min(15, self.remaining()),
+                    evidence=self.run_dir / "recovery" /
+                    f"sweep-{self.total_attempts}-action-{index}.png")
+                self.audit("recovery_input", attempt=self.attempts, key=key,
+                           outcome=asdict(result))
+                # A sent helper is not a successful recovery. Re-poll after
+                # EVERY action and stop inputs at the first observed progress.
+                if await probe():
+                    return True
+                if result.status == "failed":
+                    raise RuntimeError(f"recovery helper failed: {result.diagnostic}")
+        self.next_sweep = time.monotonic() + 5
+        return False
+
+
+class CompletedTurns:
+    def __init__(self, order):
+        self.order = sorted(order)
+        if len(self.order) != 2 or len(set(self.order)) != 2:
+            raise ValueError("hotseat requires two distinct seats")
+        self.rows = []
+        self.first_turn = None
+
+    def expected(self):
+        index = len(self.rows)
+        return (None if self.first_turn is None else self.first_turn + index // 2,
+                self.order[index % 2])
+
+    def check(self, turn, player):
+        expected_turn, expected_player = self.expected()
+        if player != expected_player or (expected_turn is not None and turn != expected_turn):
+            raise RuntimeError(f"out-of-order seat turn {(turn, player)}; "
+                               f"expected {(expected_turn, expected_player)}")
+
+    def append(self, row, lease):
+        self.check(row["turn"], row["player"])
+        if not lease.released:
+            raise RuntimeError("agent returned with an open lease")
+        if self.first_turn is None:
+            self.first_turn = row["turn"]
+        self.rows.append(row)
+
+    @property
+    def rounds(self):
+        return len(self.rows) // 2
+
+
+def implementation_identity(spec, mod_lua):
+    repo = Path(__file__).resolve().parents[4]
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    return {"commit": git("rev-parse", "HEAD"),
+            "tree": git("rev-parse", "HEAD^{tree}"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+            "config": asdict(spec),
+            "mod_sha256": hashlib.sha256(mod_lua.encode()).hexdigest()}
+
+
 async def phase_dispatch_hotseat(
     spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
-    rounds: int, strategy: str, mod_lua: str,
+    rounds: int, strategy: str, mod_lua: str, *,
+    limits: HotseatLimits | None = None, controller=None,
 ) -> int:
-    """M18: the hotseat 1v1 — EVERY seat is driven, the engine's own AI is
-    out of the game (the class of engine hangs that ends long games dies
-    with it). The engine hands the turn between human seats; the loop
-    routes each turn to the agent whose lease engaged (LEASE_PLAYER). One
-    round = every driven seat played once; ``rounds`` bounds the match."""
-    events = run_dir / "events.jsonl"
-    _refuse_rerun(events)
+    """Drive and account for two ordered, completed seats per engine turn."""
+    _refuse_rerun(run_dir / "events.jsonl")
     run_dir.mkdir(parents=True, exist_ok=True)
-    driver = LiveDriver(spec, adapter, run_dir,
-                        f"{spec.match_id}-i{os.getpid()}")
-    seats: dict[int, dict[str, Any]] = {}
-    for agent in spec.agents:
-        profile = _agent_profile(agent)
-        runtime = build_runtime(profile)
-        bind = getattr(runtime, "bind_services", None)
-        if bind is not None:
-            from civ_arena.planner.journal import PlannerJournal
+    driver = LiveDriver(spec, adapter, run_dir, f"{spec.match_id}-i{os.getpid()}")
+    limits = limits or HotseatLimits()
+    controller = controller or (ui_control.FakeController() if adapter._simulate is not None
+                                else ui_control.Controller())
+    seats = {}
+    ledger = CompletedTurns([a.player_id for a in spec.agents])
+    lease = None
+    status = None
+    failure = None
+    stage = "startup"
+    began = time.monotonic()
+    identity = None
+    cleanup = {"status": "unavailable"}
 
-            journal = (PlannerJournal(run_dir / "planner"
-                                      / f"p{agent.player_id}-journal.jsonl")
-                       if agent.policy == "planner" else None)
-            if journal is not None:
-                bind(diary=driver.referee.diary,
-                     strategy=driver.referee.strategy, journal=journal)
+    def audit(event, **payload):
+        driver._write("HEARTBEAT", turn=int((status or {}).get("TURN", 0)),
+                      audit=event, **payload)
+
+    recovery = RecoveryEpisode(limits, controller, audit, run_dir)
+
+    async def poll():
+        nonlocal status
+        status = await adapter.poll_status()
+        audit("engine_status", status=status)
+        return status
+
+    async def wait_release(player, turn):
+        nonlocal stage
+        stage = "recovery"
+        recovery.start()
+        async def released():
+            p = await poll()
+            return (p.get("PUPPET_ACTIVE") is False
+                    or (p.get("PUPPET_ACTIVE") is True and
+                        (p.get("LEASE_PLAYER"), p.get("LEASE_TURN")) != (player, turn)))
+        async with asyncio.timeout(recovery.remaining()):
+            while not await released():
+                if (time.monotonic() >= recovery.next_sweep
+                        and await recovery.sweep(released, keys=("Return", "Escape", "Escape"))):
+                    return
+                await asyncio.sleep(min(1, recovery.remaining()))
+
+    async def engage():
+        nonlocal status, stage
+        stage = "recovery"
+        recovery.start()
+        async def probe():
+            await poll()
+            pid = status.get("LEASE_PLAYER", -1)
+            if status.get("PUPPET_ACTIVE") is True and pid in seats:
+                turn = int(status["LEASE_TURN"])
+                # The last seat's pending release is a stall, never another
+                # completed seat. Any other wrong identity is an anomaly.
+                if ledger.rows and (turn, pid) == (ledger.rows[-1]["turn"],
+                                                   ledger.rows[-1]["player"]):
+                    return None
+                ledger.check(turn, pid)
+            elif not ledger.rows:
+                pid = ledger.order[0]
+                turn = _target_turn(status, pid, -1,
+                                    _last_deact_turn(await adapter.read_trace()))
             else:
-                bind(diary=driver.referee.diary,
-                     strategy=driver.referee.strategy)
-        seats[agent.player_id] = {
-            "agent": agent, "runtime": runtime,
-            "session": PlayerSession(driver.referee, agent.player_id,
-                                     agent.agent_id),
-        }
-    await adapter.setup({})
-    await adapter.inject_mod(mod_lua)
-    # ARM A PUPPET PER DRIVEN SEAT: each hotseat hand-off fires the next
-    # player's hook — every seat must be puppeted or its turn is skipped
-    for pid in seats:
-        await adapter.read_raw(lua_translator.set_puppet(pid, True))
-    # seed the digest BEFORE match_start (its state_hash needs one): on a
-    # freshly-attached game the mod is injected only just now, so setup()'s
-    # own seeding no-opped — the runner's smoke step used to hide this by
-    # injecting first (salvage-path dispatch exposed it, 2026-09-03)
-    await adapter.refresh_digest()
-    await driver.match_start()
-    per_turn: list[dict[str, Any]] = []
-    driven_rounds = 0
-    seat_pid: int = -1
-    between_wait_s = 0.0
-    sweeps = 0
-    try:
-        while driven_rounds < rounds:
-            status = await adapter.poll_status()
-            seat_pid = status.get("LEASE_PLAYER", -1)
-            if seat_pid not in seats:
-                if per_turn:
-                    # engine processing between seats (or pre-first-hook).
-                    # Live-proven 2026-09-03 (llm-minimax2-003): a seat's
-                    # turn-close popup (Ur production choice at the t3
-                    # hand-off) holds the rollover open indefinitely —
-                    # after ~15s of no-seat processing, sweep the modal
-                    # keys; the engine then rolls and the next hook fires.
-                    # BOUNDED (llm-minimax2-004 lesson: an undismissable
-                    # modal spun this sweep for ~7h overnight — thousands
-                    # of Escape presses wedged the UI into a pause): give
-                    # up loudly after 8 sweeps, never spin forever.
-                    if between_wait_s >= 15.0:
-                        sweeps += 1
-                        if sweeps > 8:
-                            raise RuntimeError(
-                                f"between-seat popup not dismissable after "
-                                f"{sweeps - 1} sweeps at turn "
-                                f"{status.get('TURN')} — needs a human/click "
-                                f"class dismissal (wire-side probe pending)")
-                        await _dismiss_popups(
-                            int(status.get("TURN", 0)),
-                            ("Return", "Escape", "Escape"))
-                        between_wait_s = 0.0
-                    await asyncio.sleep(1.0)
-                    between_wait_s += 1.0
-                    continue
-                # COLD START: no seat has engaged yet. The lease only
-                # appears once a begin_phase fires the seat's hook
-                # (rehearsal) or the engine starts the turn naturally
-                # (live) — waiting for LEASE_PLAYER would deadlock. Target
-                # the first seat's next turn exactly as the single-seat
-                # dispatch does.
-                seat_pid = min(seats)
-                turn = _target_turn(
-                    status, seat_pid, -1,
-                    _last_deact_turn(await adapter.read_trace()))
-            else:
-                turn = int(status.get("LEASE_TURN", status.get("TURN", 0)))
-            between_wait_s = 0.0
-            sweeps = 0
-            guard_retries = 0
-            seat = seats[seat_pid]
-            agent = seat["agent"]
+                return None
+            agent = seats[pid]["agent"]
             adapter.expect_turn(turn)
-            # A3-smoke live lesson (2026-09-03): grant the lease only
-            # AFTER begin_turn engages — a begin that times out and
-            # recovers into the other seat's slice must not leave a
-            # dangling LEASE_GRANT in the trust root.
+            previous_wait = adapter._turn_wait_s
+            adapter._turn_wait_s = min(5, recovery.remaining())
             try:
-                await driver.referee.begin_turn(
-                    agent.player_id, agent.agent_id, turn)
-            except RuntimeError as e:
-                if "cannot begin turn" in str(e):
-                    # the engine has not closed the PREVIOUS seat's phase
-                    # yet (a turn-close popup held the t3 hand-off open,
-                    # live 2026-09-03) — sweep the modals and re-target
-                    # from a fresh poll. BOUNDED (the unbounded version
-                    # of this retry spun ~7h on a click-class modal,
-                    # llm-minimax2-004/005): after 8 guard retries abort
-                    # loudly instead of spinning.
-                    guard_retries += 1
-                    if guard_retries > 8:
-                        raise RuntimeError(
-                            f"begin_turn phase guard stuck after 8 "
-                            f"retries at turn {turn} — engine phase will "
-                            f"not close (click-class modal?)") from e
-                    await _dismiss_popups(
-                        turn, ("Return", "Escape", "Escape"))
-                    await asyncio.sleep(5)
-                    continue
-                if "lease to engage" not in str(e):
+                await driver.referee.begin_turn(agent.player_id, agent.agent_id, turn)
+            except RuntimeError as exc:
+                if not any(x in str(exc) for x in ("cannot begin turn", "lease to engage")):
                     raise
-                await _recover_stall(adapter, agent.player_id, turn,
-                                     keys=("Return", "Escape", "Escape"))
-                # HOTSEAT: the recovery's ended parked turn hands the
-                # NEXT slice to the OTHER seat (proven live: p0@2 timed
-                # out while the engine sat in p1's turn-1 slice with the
-                # mod's lease engaged for p1) — retrying our own
-                # (seat, turn) deadlocks. Re-poll: if another seat's
-                # lease engaged, let the loop drive it; retry inline
-                # only when OUR seat engaged (the SP shape).
-                status = await adapter.poll_status()
-                engaged = status.get("LEASE_PLAYER", -1)
-                if engaged in seats and engaged != agent.player_id:
-                    continue
-                adapter.expect_turn(turn)
-                await driver.referee.begin_turn(
-                    agent.player_id, agent.agent_id, turn)
-            lease = driver.referee.grant_lease(
-                agent.player_id, agent.agent_id, turn)
-            # A2 (live-proven A1): on the NONE-load path the engine waits
-            # on a re-flagged human seat WITHOUT making it local — switch
-            # the local player to the lease-holder so every
-            # GetLocalPlayer()-bound act builder and the InGame ENDTURN
-            # act as the driven seat. Codex r1 P2-10: the read-back is
-            # GATED — a missing or ineffective switch must fail loudly,
-            # not send acts through the wrong seat. The un-pause is
-            # stall-path insurance (idempotent).
-            sw = await adapter.read_raw(
-                lua_translator.switch_local_player(agent.player_id))
-            want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
-            if not any(ln.strip() == want for ln in sw):
-                raise RuntimeError(
-                    f"local-player switch to p{agent.player_id} did not "
-                    f"take: {sw!r} — refusing to act as the wrong seat")
-            await adapter.read_raw(lua_translator.unpause_local())
-            digest_open = await adapter.refresh_digest()
-            await _resolve_blockers(adapter, agent.player_id, turn)
-            housekept = adapter.drain_mutations()
-            driver.referee._ls.acknowledged.extend(housekept)  # noqa: SLF001
-            allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
-            begin_hook = getattr(seat["runtime"], "begin_turn", None)
-            if begin_hook is not None:
-                begin_hook(turn)
-            # M18 both-seats (live-proven 2026-09-03): end this seat's
-            # turn with local ALREADY switched to the NEXT seat in order —
-            # a local seat's slice only holds when local is that seat at
-            # the boundary (p0 auto-passed turns 2-3 with local=p1).
-            order = sorted(seats)
-            nxt = order[(order.index(seat_pid) + 1) % len(order)]
-            adapter.set_pre_end_switch(nxt)
-            try:
-                await seat["session"].take_turn(lease, seat["runtime"])
+                audit("engagement_wait", reason=ui_control.redact(str(exc)))
+                return None
             finally:
-                adapter.set_pre_end_switch(None)
-            digest_close = adapter.state_hash()
-            allowed = driver.referee._ls.allowed[allowed_open:]  # noqa: SLF001
-            row = {
-                "turn": turn, "player": agent.player_id,
-                "agent": agent.agent_id,
-                "allowed_mutations": len(allowed),
-                "digest_changed": digest_open != digest_close,
-                "mutated": bool(allowed),
-                "violations": driver.referee.violation_count(),
-            }
-            row["unexpected"] = (row["digest_changed"]
-                                 and not (row["mutated"] or housekept))
-            per_turn.append(row)
-            print(f"hotseat turn {turn} p{agent.player_id} "
-                  f"({agent.agent_id}): allowed={row['allowed_mutations']} "
-                  f"digest_changed={row['digest_changed']} "
-                  f"violations={row['violations']}")
-            if seat_pid == max(seats):
-                driven_rounds += 1
-            if row["unexpected"] or row["violations"]:
-                print("ANOMALY — stopping (record dated in §6)")
-                break
-        final_turn = per_turn[-1]["turn"] if per_turn else 0
-        ok = bool(per_turn) and all(
-            not r["unexpected"] and r["violations"] == 0 for r in per_turn) \
-            and driven_rounds == rounds
-        await driver.match_end(final_turn, {
-            "phase": "dispatch-hotseat", "strategy": strategy,
-            "per_turn": per_turn, "clean": ok,
-        })
-        print(f"HOTSEAT {'CLEAN' if ok else 'ANOMALOUS'} "
-              f"({driven_rounds}/{rounds} rounds, "
-              f"{len(per_turn)} driven turns, "
-              f"violations={driver.referee.violation_count()})")
-        return 0 if ok else 1
-    except MatchAborted as exc:
-        # A2: the aborting agent id is recoverable from the last lease —
-        # match_end still writes so replay/labels can consume the record.
-        abort_agent = (seats.get(seat_pid, {}).get("agent", {}).agent_id
-                       if isinstance(seat_pid, int) and seats else None)
-        if abort_agent is not None:
-            await driver.referee.abort_cleanup(abort_agent)
-        await driver.match_end(per_turn[-1]["turn"] if per_turn else 0, {
-            "phase": "dispatch-hotseat", "strategy": strategy,
-            "per_turn": per_turn, "clean": False, "aborted": str(exc),
-        })
-        print(f"HOTSEAT ABORTED: {exc}")
-        return 2
-    finally:
+                adapter._turn_wait_s = previous_wait
+            return turn, pid
+
+        async with asyncio.timeout(recovery.remaining()):
+            while True:
+                result = await probe()
+                if result:
+                    recovery.engaged()
+                    return result
+                if time.monotonic() >= recovery.next_sweep:
+                    found = None
+                    async def engaged():
+                        nonlocal found
+                        found = await probe()
+                        return found is not None
+                    if await recovery.sweep(engaged):
+                        recovery.engaged()
+                        return found
+                await asyncio.sleep(min(1, recovery.remaining()))
+
+    async def cleanup_all():
+        errors = []
+        # Preserve the game and its lease for diagnosis; cleanup sends no
+        # new game actions. Disconnect first, then close provider resources.
         try:
-            if adapter._phase_open != -1:  # noqa: SLF001
-                await adapter.read_raw(lua_translator.release(
-                    adapter._phase_open, adapter._turn_mirror))  # noqa: SLF001
-        except Exception:
-            pass
+            await adapter.teardown()
+        except Exception as exc:
+            errors.append(ui_control.redact(f"disconnect: {exc}"))
         for seat in seats.values():
             close = getattr(seat["runtime"], "aclose", None)
             if close is not None:
-                with contextlib.suppress(Exception):
+                try:
                     await close()
-        await adapter.teardown()
+                except Exception as exc:
+                    errors.append(ui_control.redact(f"provider close: {exc}"))
+        return {"status": "failed" if errors else "completed", "errors": errors}
+
+    try:
+        # MATCH_START exists even when construction, provider auth, or setup fails.
+        await driver.match_start()
+        identity = implementation_identity(spec, mod_lua)
+        audit("run_identity", identity=identity, limits=asdict(limits),
+              fake=adapter._simulate is not None,
+              movement_allowance=spec.declare_own_endpath_drift)
+        if rounds <= 0:
+            raise ValueError("rounds must be positive")
+        async with asyncio.timeout(limits.startup):
+            for agent in spec.agents:
+                runtime = build_runtime(_agent_profile(agent))
+                seats[agent.player_id] = {
+                    "agent": agent, "runtime": runtime,
+                    "session": PlayerSession(driver.referee, agent.player_id, agent.agent_id),
+                }
+                bind = getattr(runtime, "bind_services", None)
+                if bind is not None:
+                    kwargs = dict(diary=driver.referee.diary, strategy=driver.referee.strategy)
+                    if agent.policy == "planner":
+                        from civ_arena.planner.journal import PlannerJournal
+                        kwargs["journal"] = PlannerJournal(
+                            run_dir / "planner" / f"p{agent.player_id}-journal.jsonl")
+                    bind(**kwargs)
+                if hasattr(runtime, "telemetry"):
+                    runtime.telemetry = driver.telemetry
+                client = getattr(runtime, "client", None)
+                if client is not None and hasattr(client, "on_post"):
+                    client.on_post = lambda client=client, aid=agent.agent_id: audit(
+                        "provider_request", agent=aid, posts_sent=client.posts_sent)
+            await adapter.setup({})
+            caps = await adapter.inject_mod(mod_lua)
+            audit("mod_capabilities", capabilities=caps)
+            for pid in seats:
+                await adapter.read_raw(lua_translator.set_puppet(pid, True))
+            await adapter.refresh_digest()
+        adapter.handoff_wait = wait_release
+        play_started = time.monotonic()
+        async with asyncio.timeout(limits.match):
+            while ledger.rounds < rounds:
+                turn, seat_pid = await engage()
+                stage = "active_turn"
+                turn_started = time.monotonic()
+                seat = seats[seat_pid]
+                agent = seat["agent"]
+                lease = driver.referee.grant_lease(agent.player_id, agent.agent_id, turn)
+                async with asyncio.timeout(limits.agent_turn):
+                    sw = await adapter.read_raw(lua_translator.switch_local_player(agent.player_id))
+                    want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
+                    if not any(ln.strip() == want for ln in sw):
+                        raise RuntimeError("local-player switch did not take")
+                    await adapter.read_raw(lua_translator.unpause_local())
+                    digest_open = await adapter.refresh_digest()
+                    await _resolve_blockers(adapter, agent.player_id, turn)
+                    housekept = adapter.drain_mutations()
+                    driver.referee._ls.acknowledged.extend(housekept)
+                    allowed_open = len(driver.referee._ls.allowed)
+                    begin_hook = getattr(seat["runtime"], "begin_turn", None)
+                    if begin_hook is not None:
+                        begin_hook(turn)
+                    nxt = ledger.order[(ledger.order.index(seat_pid) + 1) % 2]
+                    adapter.set_pre_end_switch(nxt)
+                    try:
+                        await seat["session"].take_turn(lease, seat["runtime"])
+                    finally:
+                        adapter.set_pre_end_switch(None)
+                    if not lease.released or adapter._phase_open != -1:
+                        raise RuntimeError("agent returned with an open lease")
+                    # Adapter.end_phase observed engine release before the
+                    # referee released the logical lease. Both are required.
+                    digest_close = adapter.state_hash()
+                    allowed = driver.referee._ls.allowed[allowed_open:]
+                    row = {"turn": turn, "player": agent.player_id,
+                           "agent": agent.agent_id, "allowed_mutations": len(allowed),
+                           "digest_changed": digest_open != digest_close,
+                           "mutated": bool(allowed), "lease_released": lease.released,
+                           "violations": driver.referee.violation_count(),
+                           "elapsed_s": time.monotonic() - turn_started}
+                    row["unexpected"] = bool(row["digest_changed"] and not (allowed or housekept))
+                    ledger.append(row, lease)
+                    audit("completed_seat_turn", row=row)
+                    print(f"hotseat turn {turn} p{seat_pid}: "
+                          f"{len(ledger.rows)} completed", flush=True)
+                    if row["unexpected"] or row["violations"]:
+                        raise RuntimeError("watchdog or unexplained digest anomaly")
+            audit("play_complete", elapsed_s=time.monotonic() - play_started)
+    except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:
+        failure = ui_control.redact(f"{type(exc).__name__} during {stage}: {exc}")
+    finally:
+        adapter.handoff_wait = None
+        try:
+            async with asyncio.timeout(limits.cleanup):
+                cleanup = await cleanup_all()
+        except (Exception, asyncio.CancelledError) as exc:
+            cleanup = {"status": "failed", "error": ui_control.redact(type(exc).__name__)}
+        if cleanup["status"] != "completed" and failure is None:
+            failure = "cleanup failed"
+        ok = failure is None and ledger.rounds == rounds and len(ledger.rows) == 2 * rounds
+        # Use cached observations: cleanup never queries a changing game.
+        summary = {
+            "phase": "dispatch-hotseat", "strategy": strategy,
+            "per_turn": ledger.rows, "completed_rounds": ledger.rounds,
+            "requested_rounds": rounds, "clean": ok, "aborted": failure,
+            "failure_reason": failure, "failure_stage": stage if failure else None,
+            "last_completed_turn": ledger.rows[-1] if ledger.rows else None,
+            "active_lease": asdict(lease) if lease and not lease.released else None,
+            "last_engine_status": status, "final_observation": "cached; not re-polled at shutdown",
+            "recovery_attempts": recovery.total_attempts,
+            "pending_recovery_attempts": recovery.attempts, "cleanup": cleanup,
+            "limits": asdict(limits), "elapsed_s": time.monotonic() - began,
+            "identity": identity, "movement_allowance": spec.declare_own_endpath_drift,
+            "request_usage": {s["agent"].agent_id: getattr(
+                getattr(s["runtime"], "client", None), "posts_sent", None)
+                for s in seats.values()},
+        }
+        await driver.match_end(ledger.rows[-1]["turn"] if ledger.rows else 0, summary)
+    print(f"HOTSEAT {'CLEAN' if ok else 'ABORTED'}: {len(ledger.rows)}/{rounds * 2} "
+          f"seat turns; {failure or 'completed'}", flush=True)
+    return 0 if ok else 2
 
 # research housekeeping preference: era-1 techs the wire actually offers,
 # then the sorted fallback — a deterministic pick that NEVER leaves
@@ -1001,11 +1122,19 @@ def main() -> None:
                          "ourselves to reach the first driven turn (the "
                          "tuner is single-client, so the standalone "
                          "bootstrap script cannot run beside the driver)")
+    ap.add_argument("--startup-timeout", type=float, default=2700)
+    ap.add_argument("--match-timeout", type=float, default=7200)
+    ap.add_argument("--agent-turn-timeout", type=float, default=600)
+    ap.add_argument("--recovery-timeout", type=float, default=180)
+    ap.add_argument("--recovery-sweeps", type=int, default=8)
     opts = ap.parse_args()
     spec = load_config(opts.config)
     mod_lua = opts.mod_path.read_text(encoding="utf-8")
 
     async def run() -> int:
+        task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
         if opts.fake:
             server = FakeTunerServer(mod=FakeMod(
                 hotseat=[a.player_id for a in spec.agents]
@@ -1040,7 +1169,11 @@ async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
             spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
     if opts.phase == "dispatch-hotseat":
         return await phase_dispatch_hotseat(
-            spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
+            spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,
+            limits=HotseatLimits(startup=opts.startup_timeout, match=opts.match_timeout,
+                                 agent_turn=opts.agent_turn_timeout,
+                                 recovery=opts.recovery_timeout, sweeps=opts.recovery_sweeps),
+            controller=ui_control.FakeController() if opts.fake else ui_control.Controller())
     return await phase_dispatch(
         spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,
         bootstrap=opts.bootstrap_end_turn)

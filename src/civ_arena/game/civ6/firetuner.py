@@ -237,6 +237,7 @@ class FireTunerAdapter:
         self._poll_timeout_s = poll_timeout_s
         self._turn_wait_s = turn_wait_s
         self._simulate = simulate_hook
+        self.handoff_wait = None
         self._phase_open = -1
         self._turn_mirror = -1
         self._journal: list[MutationRecord] = []
@@ -451,24 +452,6 @@ class FireTunerAdapter:
                     f"pre-end local switch to p{nxt} did not take: {sw!r}")
             await self._conn.execute_read(
                 lua_translator.finish_all_moves(player_id))
-            # HOTSEAT HAND-OFF PANEL (llm-minimax2-007 traceback,
-            # 2026-09-04): switching local to the NEXT seat makes the
-            # engine surface the empty-password PlayerChange panel on
-            # that seat's turn start — the next seat never activates and
-            # the lease never moves until it is OK'd. One Return runs
-            # the engine's own auto-OK (playerchange.lua
-            # OnKeyUp_Return). Best-effort subprocess key; the release
-            # await below still bounds the whole path.
-            with contextlib.suppress(Exception):
-                import subprocess as _sp
-                import sys as _sys
-                from pathlib import Path as _P
-                _repo = _P(__file__).resolve().parents[3]
-                _sp.run(
-                    [_sys.executable,
-                     str(_repo / "scripts" / "x_click.py"),
-                     "--key", "Return"],
-                    capture_output=True, timeout=15)
         elif self._strategy == "h1":
             await self._conn.execute_write(
                 lua_translator.request_end_turn(player_id))
@@ -481,12 +464,15 @@ class FireTunerAdapter:
         # advanced, or the lease moved to ANOTHER player (the M18 hotseat
         # hand-off engages the next seat's lease immediately — waiting for
         # -1 would time out; single-seat behavior is unchanged: -1 != pid).
-        await self._await(
-            lambda p: (p.get("PUPPET_ACTIVE") is False
-                       or int(p.get("LEASE_PLAYER", player_id)) != player_id
-                       or int(p.get("TURN", -1)) > turn),
-            f"lease release for player {player_id} (D7-{self._strategy})",
-            timeout_s=self._turn_wait_s)
+        if self.handoff_wait is not None:
+            await self.handoff_wait(player_id, turn)
+        else:
+            await self._await(
+                lambda p: (p.get("PUPPET_ACTIVE") is False
+                           or int(p.get("LEASE_PLAYER", player_id)) != player_id
+                           or int(p.get("TURN", -1)) > turn),
+                f"lease release for player {player_id} (D7-{self._strategy})",
+                timeout_s=self._turn_wait_s)
         # Release books any lease-vs-close drift as UNDECLARED actuals —
         # the referee's next sweep flags them (the live make-or-break check)
         await self._conn.execute_read(lua_translator.release(player_id, turn))
