@@ -1,10 +1,10 @@
 # Live-game validation protocol — FireTuner / Civ VI leg
 
-This repository's spike is **simulator-backed**; everything in it is proven by
-the local test suite without a game. This document is the manual protocol for
-the day a Civilization VI install exists and the live leg gets exercised.
-Nothing here has been executed against a real game yet — treat every step as
-a hypothesis to verify, and stop at the first anomaly.
+This document contains the original protocol followed by dated observations
+from simulator checks and live Civ VI work. Use the dated evidence record
+for the scope and outcome of each attempt. The latest 2026-09-04 attempt
+stopped during startup; repeatable 30-round operational reliability remains
+unproven.
 
 ## 1. Platform reality (unverified claims, both routes documented)
 
@@ -742,12 +742,67 @@ an existing run ID, rotate previous evidence, or restore a save automatically.
 
 ### Blocked checks
 
-Live gates and the two acceptance runs are pending current host/provider
-preflight. The inspected host had a gaming X session but no Civ6 window or
-listener on 127.0.0.1:4318; a fresh Architecture-1 startup is required.
+The fresh attempt `rehearsal-20260904T214144Z` failed its first live startup
+gate: `tuner-bind` timed out after 240 seconds and the launcher exited 21.
+The overall startup lasted 264.913 seconds, within its 2700-second ceiling.
+At 2026-09-04 21:47 UTC, read-only checks found no visible `WM_CLASS=Civ6`
+window, no Civ6 process, no tuner listener, and no tuner client. Steam and
+the restarted gaming X session were running. The cause of Steam failing to
+produce a Civ6 process is not yet established.
+
+Both-human-seat census, mod capability checks, live handoff capture, the
+six-turn deterministic rehearsal, LLM smoke, and both acceptance matches
+are blocked by this missing game/tuner. The sequence stopped at that first
+failed gate; it was not retried.
 
 ### Evidence gaps
 
-No new live handoff capture, provider tool round trip, six-turn live rehearsal,
-or 60-turn acceptance result is claimed by this implementation record yet.
+There is no live handoff screenshot, engine digest, or wire transcript from
+this attempt because Civ6/tuner never became available. Zero live seat turns
+completed and neither acceptance run started. The launch diagnostic file is
+empty; its existence is not proof that Steam accepted or executed the URI.
 The previously reported 58-test baseline is historical evidence only.
+
+### Captured results and handoff
+
+| Check | Result | Evidence and scope |
+|---|---|---|
+| Full pytest gate at `bd65913` | 572 passed, 0 failed, 1 skipped | [Complete log](../runs/reliability-evidence-20260904/pytest-release.log); 526.82s; no flaky/rerun plugin used |
+| Final launcher budget correction at `a8e3e3e` | 6 passed, 0 failed, 0 skipped | [Affected tests](../runs/reliability-evidence-20260904/launcher-reviewed-tests.log); full suite was not repeated for this isolated review correction |
+| Ruff at `a8e3e3e` | PASS | [Complete log](../runs/reliability-evidence-20260904/ruff.log) |
+| Configured MiniMax-M3 tool round trip | PASS | [Provider log](../runs/reliability-evidence-20260904/provider-preflight.log); two requests, both responses `MiniMax-M3`, 351 input and 31 output tokens |
+| Fresh Architecture-1 startup at `a8e3e3e` | FAIL, exit 21 | [Launch log](../runs/reliability-evidence-20260904/rehearsal-launch.log), [startup summary](../runs/rehearsal-20260904T214144Z-startup/summary.json) |
+| Controlled termination | PASS for this startup failure | Exactly one `MATCH_START` and one `MATCH_END`; the terminal event's summary equals the summary file: [events](../runs/rehearsal-20260904T214144Z-startup/events.jsonl) |
+| Save preservation | 22 files preserved | [Inventory and hashes](../runs/reliability-evidence-20260904/preserved-saves.json); every backup matched the source after the failed attempt |
+| Repeatable 30-round live reliability | NOT PROVEN | 0/2 acceptance runs started; 0 live seat turns completed |
+
+The earlier completed full gate had 571 passed, one failed, one skipped.
+The sole failure was a stale parser test that rejected string content even
+though the reviewed client already normalized strings. Both files were
+byte-identical to `3074f1c` before the correction:
+[baseline attribution](../runs/reliability-evidence-20260904/baseline-failure.json).
+The corrected test retains rejection of malformed numeric/list/block content.
+The first full-gate attempt was stopped for a launcher review fix and is
+incomplete evidence; it is not counted as a pass or failure.
+
+The final startup correction shares the 2700s budget with driver setup by
+forwarding only the remainder after boot and reconnect cooldown. The
+7200s play, 600s agent-turn, 180s/eight-sweep recovery, and 20s cleanup limits
+remain as documented. Provider configuration, request caps, and mod bytes
+are unchanged. All clocks remain outside simulator determinism.
+
+[Custody and hashes](../runs/reliability-evidence-20260904/custody.json),
+[read-only review](../runs/reliability-evidence-20260904/review.md), and
+[final host/termination observations](../runs/reliability-evidence-20260904/live-outcome.json)
+are retained locally. Evidence lives under this isolated worktree's `runs/`
+folder and is not published. The original checkout remains at `3074f1c`
+with its original three-file working patch.
+
+Next host probes, before another fresh attempt: inspect Steam's app-289070
+launch handling and readiness, then establish a visible Civ6 window and
+`127.0.0.1:4318` listener. Use read-only `systemctl show headless-gaming.service`,
+`pgrep -ax Civ6`, `DISPLAY=:1 xprop -root _NET_CLIENT_LIST`, and
+`ss -ltn '( sport = :4318 )'` to bind that state. Keep one tuner client.
+The launcher command and stop-and-preserve procedure above are reproducible;
+use a fresh run ID for any future attempt. No automatic save restore or
+further launch attempt was performed after the failed gate.
