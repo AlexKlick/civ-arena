@@ -54,3 +54,21 @@ def test_slot_backup_is_run_specific(tmp_path, monkeypatch):
     assert z.swap_save_into_load_slot(tmp_path / 'run-b')
     assert (tmp_path / 'run-a' / dest.name).read_bytes() == b'old'
     assert (tmp_path / 'run-b' / dest.name).read_bytes() == b'new'
+
+
+def test_launcher_allows_helper_own_transition_budget():
+    import inspect
+    # --full itself waits up to 180s after its initial wire setup.
+    assert inspect.signature(z.run).parameters['timeout'].default > 180
+
+
+def test_launch_preserves_previous_diagnostics(tmp_path, monkeypatch):
+    old = tmp_path / 'civ6-zero.log'
+    old.write_bytes(b'previous diagnosis')
+    calls = []
+    monkeypatch.setattr(z.subprocess, 'Popen', lambda *args, **kw: calls.append((args, kw)))
+    z.launch(tmp_path)
+    z.launch(tmp_path)
+    assert old.read_bytes() == b'previous diagnosis'
+    assert len(list(tmp_path.glob('civ6-launch-*.log'))) == 2
+    assert all(call[0][0][0] == '/usr/games/steam' for call in calls)

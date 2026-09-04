@@ -193,6 +193,9 @@ async def test_persistent_phase_guard_aborts_after_eight_sweeps(tmp_path, monkey
     server = FakeTunerServer(mod=FakeMod(hotseat=[0, 1]))
     port = await server.start()
     adapter = FireTunerAdapter('127.0.0.1', port, simulate_hook=ld._fake_hook)
+    async def no_real_input(*args, **kwargs):
+        pytest.fail("fake hotseat attempted real desktop input")
+    monkeypatch.setattr(ld.ui_control.Controller, 'action', no_real_input)
     original = ld.RecoveryEpisode.start
     def no_backoff(self):
         original(self)

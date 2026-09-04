@@ -78,7 +78,7 @@ async def bounce_x() -> bool:
     return False
 
 
-async def run(cmd: list[str], *, timeout=180, **kw) -> subprocess.CompletedProcess:
+async def run(cmd: list[str], *, timeout=240, **kw) -> subprocess.CompletedProcess:
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=REPO, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         start_new_session=True, **kw)
@@ -110,12 +110,13 @@ async def kill_game() -> None:
     print(f"[kill] game clear: {await civ6_pids() or 'none'}")
 
 
-def launch() -> None:
-    subprocess.Popen(
-        ["bash", "-c",
-         f"HOME=/home/alexk DISPLAY={DISPLAY} setsid nohup "
-         f"/usr/games/steam {STEAM_URI} </dev/null >/tmp/civ6-zero.log 2>&1 &"])
-    print("[launch] URI handoff fired")
+def launch(artifacts: Path | None = None) -> None:
+    path = (artifacts or Path("/tmp")) / f"civ6-launch-{uuid.uuid4().hex}.log"
+    with path.open("x") as log:
+        subprocess.Popen(
+            ["/usr/games/steam", STEAM_URI], env={**os.environ, "DISPLAY": DISPLAY},
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    print(f"[launch] URI handoff fired; log={path}", flush=True)
 
 
 async def port_up() -> bool:
@@ -242,7 +243,7 @@ async def run_arch1_session(opts) -> int:
     if opts.fresh_x and not await bounce_x():
         return 20
     await kill_game()
-    launch()
+    launch(opts.artifacts)
     if not await wait_for(port_up, 240, "tuner-bind", 10.0):
         return 21
 
@@ -330,7 +331,7 @@ async def run_arch1_session(opts) -> int:
         return 26
     # 4. fresh process, then the load with the load-menu screen OPEN
     await kill_game()
-    launch()
+    launch(opts.artifacts)
     if not await wait_for(port_up, 240, "tuner-bind-2", 10.0):
         return 27
     if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu-2"):
@@ -485,7 +486,10 @@ async def controlled_arch1(opts) -> int:
     if not summary["clean"]:
         print("[startup] stopped and preserved:", failure, flush=True)
         return code or 2
-    return await dispatch(opts) if opts.config else 0
+    if opts.config:
+        await asyncio.sleep(8)  # single-client tuner reconnect cooldown after smoke
+        return await dispatch(opts)
+    return 0
 
 
 async def main(opts) -> int:
