@@ -573,7 +573,26 @@ class FakeMod:
             return []  # silent, like the mod
         m = re.search(r"Puppeteer\.FinishAllMoves\(\s*(\d+)\s*\)", code)
         if m:
-            return [f"FINISHED_MOVES|{m.group(1)}|0"]
+            # D7-H2 rehearsal, now the M18 hotseat pre-end path too:
+            # complete the seat's turn (the real engine auto-completes
+            # once no moves remain — live-proven 2026-09-03, p1@3 ended
+            # this way with local already switched to p0). Do NOT zero
+            # moves in the fake's game state — the consumption happens
+            # inside the engine's turn-end, and fake-side zeroing books
+            # as uncommanded unit.moves drift (rehearsal-caught). Same
+            # ledger/lease/hand-off semantics as ENDTURN.
+            pid = int(m.group(1))
+            if self.lease is not None and self.mark is not None:
+                self.ledger_rows.extend(
+                    self._diff(self.lease["player"], self.mark))
+                self.mark = None
+            released = self.lease["player"] if self.lease else None
+            self.lease = None
+            self._diff_cache = None
+            self.turn_active = False
+            if self.hotseat and released in self.hotseat:
+                self._hotseat_next(released)
+            return [f"FINISHED_MOVES|{pid}|0", "PUPPET_ACTIVE|false"]
         if "UI.RequestAction(ActionTypes.ACTION_ENDTURN)" in code:
             # D7-H1 rehearsal: the LOCAL player's end-turn via the UI bus
             # (InGame VM — no Puppeteer, no SetLocalPlayerAndObserver

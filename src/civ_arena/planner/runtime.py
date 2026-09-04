@@ -549,7 +549,15 @@ class PlannerRuntime:
         plan = OPTIONS[self.active].compile_step(bstate, self.player_id)
         plan = await self._filter_to_wire_vocabulary(facade, bstate, plan)
         await execute_plan(facade, self.belief, self.player_id, plan, seed=turn)
-        await facade.end_turn()
+        # TURN-COMPLETENESS GATE contract: on the unmoved_units bounce,
+        # give each listed unit a standing order and re-end (same loop
+        # the LLM seats run; the plan's own idling units are a choice,
+        # fortify says so).
+        res = await facade.end_turn()
+        if isinstance(res, dict) and res.get("rejection") == "unmoved_units":
+            for uid in res.get("unmoved_units") or []:
+                await facade.fortify(uid)
+            await facade.end_turn()
         self._processed_through = turn
         if self.journal is not None:
             # appended only after a COMPLETED turn: a crash mid-turn leaves

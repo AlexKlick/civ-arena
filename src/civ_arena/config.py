@@ -142,6 +142,13 @@ class MatchSpec:
     # Absent/empty => the recall_lessons tool is unavailable (existing
     # configs behave identically).
     recall_runs: list[str] = field(default_factory=list)
+    # Turn-completeness gate (RefereeConfig.completeness_gate): one
+    # end_turn bounce per (player, turn) while own units have movement
+    # and no standing order.
+    completeness_gate: bool = False
+    # Live-hotseat movement-drift tolerance (RefereeConfig.
+    # declare_own_endpath_drift): sim/tests stay strict.
+    declare_own_endpath_drift: bool = False
 
     def agent_for_player(self, player_id: int) -> AgentSpec:
         for agent in self.agents:
@@ -170,6 +177,9 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
     watchdog_mode = str(match.get("watchdog_mode", "flag_and_continue"))
     violation_limit = int(match.get("violation_limit", 5))
     checkpoint_every = int(match.get("checkpoint_every", 5))
+    completeness_gate = bool(match.get("completeness_gate", False))
+    declare_own_endpath_drift = bool(
+        match.get("declare_own_endpath_drift", False))
 
     if adapter not in VALID_ADAPTERS:
         raise ConfigError(f"unknown adapter {adapter!r}")
@@ -270,6 +280,8 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
 
     return MatchSpec(
         match_id=match_id, seed=seed, max_turns=max_turns, adapter=adapter,
+        completeness_gate=completeness_gate,
+        declare_own_endpath_drift=declare_own_endpath_drift,
         watchdog_mode=watchdog_mode, violation_limit=violation_limit,
         checkpoint_every=checkpoint_every, agents=agents, chaos=chaos,
         recall_runs=recall_runs,

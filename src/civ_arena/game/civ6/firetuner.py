@@ -252,7 +252,15 @@ class FireTunerAdapter:
         self._hash_owner: int | None = None
         self._sealed_hash: str | None = None
         self._diff_seq = 0
+        self._pre_end_switch: int | None = None
         self.state = _LiveStateView(self)
+
+    def set_pre_end_switch(self, player_id: int | None) -> None:
+        """M18 hotseat: switch local to THIS seat before the driven seat's
+        end-turn (a local seat's slice only holds when local is that seat
+        at the boundary — live-proven 2026-09-03); the driven seat's turn
+        then ends via the H2 non-local path."""
+        self._pre_end_switch = player_id
 
     # -- lifecycle ---------------------------------------------------------
     async def setup(self, cfg: dict[str, Any]) -> None:
@@ -425,7 +433,25 @@ class FireTunerAdapter:
         # post-processing.
         await self._refresh_digest()
         self._sealed_hash = self.state_hash()
-        if self._strategy == "h1":
+        if self._pre_end_switch is not None \
+                and self._pre_end_switch != player_id:
+            # M18 both-seats (live-proven 2026-09-03): a LOCAL seat's next
+            # slice only holds when local == that seat at the boundary
+            # (p0 auto-passed turns 2-3 with local=p1; switching local to
+            # p0 first made p0@4 hold with its lease engaged). h1 ends the
+            # LOCAL player's turn — with local already moved to the next
+            # seat it would end the WRONG seat — so the driven seat's turn
+            # ends via the H2 non-local path instead.
+            nxt = self._pre_end_switch
+            sw = await self._conn.execute_read(
+                lua_translator.switch_local_player(nxt))
+            want = f"LOCAL_SWITCHED|{nxt}|{nxt}"
+            if not any(ln.strip() == want for ln in sw):
+                raise RuntimeError(
+                    f"pre-end local switch to p{nxt} did not take: {sw!r}")
+            await self._conn.execute_read(
+                lua_translator.finish_all_moves(player_id))
+        elif self._strategy == "h1":
             await self._conn.execute_write(
                 lua_translator.request_end_turn(player_id))
         elif self._strategy == "h2":

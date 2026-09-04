@@ -1,0 +1,48 @@
+# M18 leg 3: LIVE 1v1, BOTH seats MiniMax-M3 via the MiniMax provider
+# (operator directive 2026-09-03: NO zai anywhere in this lane — both
+# seats ride api.minimax.io + ANTHROPIC_AUTH_TOKEN_MINIMAX2). Wiring
+# copied from live-tourney-minimax-m3.yaml (probe-verified provider
+# path); attach continues whatever hotseat game the arch1 session left
+# in a driven state — the B1 live replay normalizes the turn offset.
+match:
+  match_id: live-hotseat-llm-minimax2-001
+  seed: 271183
+  max_turns: 30
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+  completeness_gate: true
+  declare_own_endpath_drift: true
+
+agents:
+  - agent_id: minimax-m3-seat0
+    player_id: 0
+    policy: llm
+    seed: 11
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+  - agent_id: minimax-m3-seat1
+    player_id: 1
+    policy: llm
+    seed: 22
+    llm:
+      base_url: "https://api.minimax.io/anthropic/v1"
+      api_key_env: "ANTHROPIC_AUTH_TOKEN_MINIMAX2"   # sk-cp coding-plan key
+      model_id: "MiniMax-M3"
+      max_tokens: 4096
+      max_tool_rounds: 16
+      max_result_chars: 8000
+      request_timeout_s: 120
+      max_retries: 2
+      max_requests_per_match: 2000
+
+chaos: []

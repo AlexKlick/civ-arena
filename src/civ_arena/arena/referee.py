@@ -70,6 +70,23 @@ RECALL_DIGEST_BUDGET = 3900
 class RefereeConfig:
     watchdog_mode: str = "flag_and_continue"  # "flag_and_continue" | "rollback"
     violation_limit: int = 5
+    # TURN-COMPLETENESS GATE (operator request 2026-09-03): reject
+    # end_turn ONCE per (player, turn) while own units still have
+    # movement and no standing order — models "forget" unit handling
+    # otherwise (live-observed llm-minimax2-002: founded cities, never
+    # moved the warriors).
+    completeness_gate: bool = False
+    # LIVE-HOTSEAT ONLY (the sim/tests stay strict — the watchdog-teeth
+    # pin drifts an own-unit movement row and MUST keep flagging): the
+    # engine's movement bookkeeping around sanctioned acts (fortify
+    # consumes moves + settles the hex; the H2 end-path zeroes movement)
+    # is under-declared by the mod's act manifests, and those rows
+    # crashed live matches as phantom violations (llm-minimax2-002).
+    # Tolerated ONLY for the driven seat's own units' movement-class
+    # rows; everything else — foreign rows, non-movement attrs — stays
+    # strict. The durable fix is mod-side act manifests; this flag is
+    # the live-lane bridge until then.
+    declare_own_endpath_drift: bool = False
 
 
 @dataclass
@@ -108,6 +125,7 @@ class Referee:
         self.recall = recall
         self._lease: TurnLease | None = None
         self._ls = _LeaseState()
+        self._completeness_bounced: set[tuple[int, int]] = set()
         self.violations_total = 0
         self.violations_by_agent: dict[str, int] = {}
 
@@ -205,8 +223,32 @@ class Referee:
                             {"status": "rejected", "rejection": reason.value})
             return {"status": "rejected", "rejection": reason.value}
         turn = ctx.lease.turn
+        # TURN-COMPLETENESS GATE: one structured bounce per (player, turn)
+        # when own units still have movement and no standing order — the
+        # agent gets the ids and can move/fortify/sleep each, then re-end.
+        # The second attempt always passes (no deadlock on a stubborn or
+        # scripted agent).
+        if (self.cfg.completeness_gate
+                and (ctx.player_id, turn) not in self._completeness_bounced):
+            unmoved = await self._unmoved_units(ctx)
+            if unmoved:
+                self._completeness_bounced.add((ctx.player_id, turn))
+                doc = {"status": "rejected", "rejection": "unmoved_units",
+                       "unmoved_units": unmoved,
+                       "note": "these units still have movement and no "
+                               "standing order — move each, or fortify/"
+                               "sleep it, then call end_turn again"}
+                self._emit_pair(ctx, phase, "end_turn", {}, None, doc)
+                self.telemetry.note_call(
+                    ctx.agent_id, "end_turn",
+                    int((time.perf_counter() - t0) * 1000), ok=False)
+                return doc
         await self._sweep(ctx.player_id, ctx.agent_id, turn, final=True)
         await self.adapter.end_phase(ctx.player_id, turn)
+        # SANCTIONED END-PATH DECLARATION — live-hotseat configs only
+        # (see RefereeConfig.declare_own_endpath_drift)
+        if self.cfg.declare_own_endpath_drift:
+            await self._declare_own_endpath_drift(ctx)
         ctx.lease.release()
         self.log.write(
             "LEASE_RELEASE",
@@ -237,6 +279,40 @@ class Referee:
         return {"status": "accepted", "turn": turn}
 
     # -------------------------------------------------------------- diary
+    async def _declare_own_endpath_drift(self, ctx: SessionCtx) -> None:
+        """Acknowledge the just-driven seat's own-entity MOVEMENT-class
+        rows currently in the journal (see end_turn). NON-destructive —
+        the rows stay in the journal for the post-phase sweep; the
+        acknowledgment marks them declared. Ownership resolves via the
+        omni pid fields; anything foreign, unknown, or non-movement
+        stays strict."""
+        omni_units = await self.adapter.observe(
+            ObserveRequest(kind=ObserveKind.UNITS, player_id=ctx.player_id))
+        units = omni_units if isinstance(omni_units, list) \
+            else list(omni_units.values())
+        owner_of = {u.get("unit_id"): u.get("owner") for u in units}
+        journal = getattr(self.adapter, "_journal", None)
+        for m in list(journal or []):
+            eid = getattr(m, "entity_id", None)
+            if (owner_of.get(eid) == ctx.player_id
+                    and getattr(m, "attr", None) in ("moves", "movement",
+                                                     "pos", "q", "r")):
+                self._ls.acknowledged.append(m)
+
+    async def _unmoved_units(self, ctx: SessionCtx) -> list[str]:
+        """Own units with movement remaining and no standing order (the
+        units_read exposes `fortified` via GetFortifyTurns — fortify AND
+        civilian sleep both accumulate fortify turns engine-side). Owner
+        comparison mirrors legality.ownership_reason (referee scope, the
+        omniscient peek — own units are always visible to themselves)."""
+        omni = await self.adapter.observe(
+            ObserveRequest(kind=ObserveKind.UNITS, player_id=ctx.player_id))
+        units = omni if isinstance(omni, list) else list(omni.values())
+        return [u["unit_id"] for u in units
+                if u.get("owner") == ctx.player_id
+                and int(u.get("movement") or 0) > 0
+                and not u.get("fortified")]
+
     async def write_diary(self, ctx: SessionCtx, text: str) -> dict[str, Any]:
         """Store this player's cross-turn note. Validated like every tool
         (lease, then shape) and logged as a TOOL_CALL/TOOL_RESULT pair — but

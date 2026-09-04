@@ -70,13 +70,17 @@ async def run_policy(runtime: Any, facade: Any) -> None:
             await facade.set_research(pick)
             break
 
-    # cities: keep production going, occasionally purchase
+    # cities: keep production going, occasionally purchase. ALWAYS set the
+    # doctrine pick (idempotent — the read-back wants cur == item.Hash):
+    # lease-start housekeeping fills empty queues BEFORE the policy runs,
+    # and conditioning on an empty queue stopped this tool from ever
+    # rehearsing (test_dispatch_rehearsal_end_to_end, regression from the
+    # B2 housekeeping order — found 2026-09-03).
     for city in cities:
-        if not city.get("production_queue"):
-            opts = await facade.get_available_production(city["city_id"])
-            item = _pick_build(opts, doctrine, len(cities))
-            if item:
-                await facade.set_city_production(city["city_id"], item)
+        opts = await facade.get_available_production(city["city_id"])
+        item = _pick_build(opts, doctrine, len(cities))
+        if item:
+            await facade.set_city_production(city["city_id"], item)
         if turn % 3 == 0 and overview["you"]["gold"] >= 120:
             opts = await facade.get_available_production(city["city_id"])
             item = _pick_purchase(opts, doctrine)
@@ -107,7 +111,14 @@ async def run_policy(runtime: Any, facade: Any) -> None:
             corner = _CORNERS[rng.randint(0, len(_CORNERS) - 1)]
             await _march(facade, unit, corner)
 
-    await facade.end_turn()
+    # TURN-COMPLETENESS GATE contract: on the structured unmoved_units
+    # bounce, put a standing order on each listed unit and re-end — the
+    # rehearsal exercises the same loop the LLM seats run live.
+    res = await facade.end_turn()
+    if isinstance(res, dict) and res.get("rejection") == "unmoved_units":
+        for uid in res.get("unmoved_units") or []:
+            await facade.fortify(uid)
+        await facade.end_turn()
     _ = settled
 
 

@@ -12,6 +12,8 @@ match:
   adapter: firetuner
   watchdog_mode: flag_and_continue
   violation_limit: 10
+  completeness_gate: true
+  declare_own_endpath_drift: true
 
 agents:
   - agent_id: hotseat-planner

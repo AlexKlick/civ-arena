@@ -116,7 +116,10 @@ class LiveDriver:
             adapter, VisibilityPolicy(), self.log, self.telemetry,
             spec.match_id, game_instance_id,
             RefereeConfig(watchdog_mode=spec.watchdog_mode,
-                          violation_limit=spec.violation_limit),
+                          violation_limit=spec.violation_limit,
+                          completeness_gate=spec.completeness_gate,
+                          declare_own_endpath_drift=(
+                              spec.declare_own_endpath_drift)),
             diary=DiaryStore(), strategy=StrategyStore(),
         )
 
@@ -513,18 +516,35 @@ async def phase_dispatch_hotseat(
     # player's hook — every seat must be puppeted or its turn is skipped
     for pid in seats:
         await adapter.read_raw(lua_translator.set_puppet(pid, True))
+    # seed the digest BEFORE match_start (its state_hash needs one): on a
+    # freshly-attached game the mod is injected only just now, so setup()'s
+    # own seeding no-opped — the runner's smoke step used to hide this by
+    # injecting first (salvage-path dispatch exposed it, 2026-09-03)
+    await adapter.refresh_digest()
+    await driver.match_start()
     per_turn: list[dict[str, Any]] = []
     driven_rounds = 0
     seat_pid: int = -1
-    await driver.match_start()
+    between_wait_s = 0.0
     try:
         while driven_rounds < rounds:
             status = await adapter.poll_status()
             seat_pid = status.get("LEASE_PLAYER", -1)
             if seat_pid not in seats:
                 if per_turn:
-                    # engine processing between seats (or pre-first-hook)
+                    # engine processing between seats (or pre-first-hook).
+                    # Live-proven 2026-09-03 (llm-minimax2-003): a seat's
+                    # turn-close popup (Ur production choice at the t3
+                    # hand-off) holds the rollover open indefinitely —
+                    # after ~15s of no-seat processing, sweep the modal
+                    # keys; the engine then rolls and the next hook fires.
+                    if between_wait_s >= 15.0:
+                        await _dismiss_popups(
+                            int(status.get("TURN", 0)),
+                            ("Return", "Escape", "Escape"))
+                        between_wait_s = 0.0
                     await asyncio.sleep(1.0)
+                    between_wait_s += 1.0
                     continue
                 # COLD START: no seat has engaged yet. The lease only
                 # appears once a begin_phase fires the seat's hook
@@ -538,22 +558,47 @@ async def phase_dispatch_hotseat(
                     _last_deact_turn(await adapter.read_trace()))
             else:
                 turn = int(status.get("LEASE_TURN", status.get("TURN", 0)))
+            between_wait_s = 0.0
             seat = seats[seat_pid]
             agent = seat["agent"]
             adapter.expect_turn(turn)
-            lease = driver.referee.grant_lease(
-                agent.player_id, agent.agent_id, turn)
+            # A3-smoke live lesson (2026-09-03): grant the lease only
+            # AFTER begin_turn engages — a begin that times out and
+            # recovers into the other seat's slice must not leave a
+            # dangling LEASE_GRANT in the trust root.
             try:
                 await driver.referee.begin_turn(
                     agent.player_id, agent.agent_id, turn)
             except RuntimeError as e:
+                if "cannot begin turn" in str(e):
+                    # the engine has not closed the PREVIOUS seat's phase
+                    # yet (a turn-close popup held the t3 hand-off open,
+                    # live 2026-09-03) — sweep the modals and re-target
+                    # from a fresh poll
+                    await _dismiss_popups(
+                        turn, ("Return", "Escape", "Escape"))
+                    await asyncio.sleep(5)
+                    continue
                 if "lease to engage" not in str(e):
                     raise
                 await _recover_stall(adapter, agent.player_id, turn,
                                      keys=("Return", "Escape", "Escape"))
+                # HOTSEAT: the recovery's ended parked turn hands the
+                # NEXT slice to the OTHER seat (proven live: p0@2 timed
+                # out while the engine sat in p1's turn-1 slice with the
+                # mod's lease engaged for p1) — retrying our own
+                # (seat, turn) deadlocks. Re-poll: if another seat's
+                # lease engaged, let the loop drive it; retry inline
+                # only when OUR seat engaged (the SP shape).
+                status = await adapter.poll_status()
+                engaged = status.get("LEASE_PLAYER", -1)
+                if engaged in seats and engaged != agent.player_id:
+                    continue
                 adapter.expect_turn(turn)
                 await driver.referee.begin_turn(
                     agent.player_id, agent.agent_id, turn)
+            lease = driver.referee.grant_lease(
+                agent.player_id, agent.agent_id, turn)
             # A2 (live-proven A1): on the NONE-load path the engine waits
             # on a re-flagged human seat WITHOUT making it local — switch
             # the local player to the lease-holder so every
@@ -578,7 +623,17 @@ async def phase_dispatch_hotseat(
             begin_hook = getattr(seat["runtime"], "begin_turn", None)
             if begin_hook is not None:
                 begin_hook(turn)
-            await seat["session"].take_turn(lease, seat["runtime"])
+            # M18 both-seats (live-proven 2026-09-03): end this seat's
+            # turn with local ALREADY switched to the NEXT seat in order —
+            # a local seat's slice only holds when local is that seat at
+            # the boundary (p0 auto-passed turns 2-3 with local=p1).
+            order = sorted(seats)
+            nxt = order[(order.index(seat_pid) + 1) % len(order)]
+            adapter.set_pre_end_switch(nxt)
+            try:
+                await seat["session"].take_turn(lease, seat["runtime"])
+            finally:
+                adapter.set_pre_end_switch(None)
             digest_close = adapter.state_hash()
             allowed = driver.referee._ls.allowed[allowed_open:]  # noqa: SLF001
             row = {

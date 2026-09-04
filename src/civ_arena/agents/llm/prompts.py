@@ -39,6 +39,11 @@ How to play a turn:
    takeaways. Ask it a few times in your first turns and act on what comes
    back; it is read-only cross-match memory, not this match's state.
 4. Finish: call end_turn. You have a bounded number of tool rounds per turn.
+   THE TURN HAS A COMPLETENESS CHECK: end_turn is REJECTED once while any
+   of your units still has movement and no standing order — the rejection
+   names the unit ids. Give each one an order (move it somewhere useful,
+   or fortify/sleep it) and call end_turn again. Never leave a unit idle
+   by accident; idling by choice is fine (fortify it to say so).
 
 Facts about the world:
 - Vision is fog-of-war: you see your own entities and what your units

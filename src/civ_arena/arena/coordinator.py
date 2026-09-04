@@ -114,7 +114,10 @@ class Arena:
             self.adapter, VisibilityPolicy(), self.log, self.telemetry,
             spec.match_id, self.game_instance_id,
             RefereeConfig(watchdog_mode=spec.watchdog_mode,
-                          violation_limit=spec.violation_limit),
+                          violation_limit=spec.violation_limit,
+                          completeness_gate=spec.completeness_gate,
+                          declare_own_endpath_drift=(
+                              spec.declare_own_endpath_drift)),
             diary=self.diary,
             strategy=self.strategy,
             recall=self.recall,

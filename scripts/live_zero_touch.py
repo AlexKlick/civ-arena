@@ -102,67 +102,111 @@ def launch() -> None:
 
 
 def port_up() -> bool:
-    """The tuner binds 4318 unless it lingers from a dying instance, in
-    which case the game silently takes 4319 (live-learned game five).
-    Accept either; the actual port is re-resolved before dispatch."""
+    """The tuner binds 4318 — and ONLY 4318. 4319 is NOT a tuner fallback
+    (the old docstring's game-five theory is wrong, M18-live disproven):
+    it is the EOS/net service, up from boot, and sending it FireTuner
+    handshakes correlates with game-process death within ~2 min (twice
+    reproduced). Accepting 4319 here let boot gates pass on EOS alone."""
     out = run(["ss", "-tln"]).stdout
-    return ":4318" in out or ":4319" in out
+    return "127.0.0.1:4318" in out
 
 
 def tuner_port() -> int:
-    out = run(["ss", "-tln"]).stdout
-    for port in (4318, 4319):
-        if f":{port}" in out:
-            return port
     return 4318
 
 
 def civ6_window_geometry() -> tuple[int, int, int, int]:
-    """Absolute x, y, w, h of the Civ6 window on :1."""
+    """Absolute x, y, w, h of the Civ6 window on :1. Attempt-7 lesson:
+    the client list's LAST window is not always Civ6 (Steam overlay
+    windows come and go mid-boot, and Civ6's placement varies per boot —
+    (961,554) one boot, (1798,253) the next), and xwininfo on the wrong
+    id returns no geometry lines at all, which killed the banner loop
+    AND the gate screenshots. Scan EVERY client, keep the largest
+    geometry that parses."""
     out = run(["bash", "-c",
-               "xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*' "
-               "| tail -1"]).stdout.strip()
-    info = run(["xwininfo", "-id", out]).stdout
-    geo: dict[str, int] = {}
-    for line in info.splitlines():
-        for key in ("Absolute upper-left X", "Absolute upper-left Y",
-                    "Width", "Height"):
-            if line.strip().startswith(key):
-                geo[key] = int(line.split(":")[1])
-    return (geo["Absolute upper-left X"], geo["Absolute upper-left Y"],
-            geo["Width"], geo["Height"])
+               "xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*'"]).stdout
+    best: tuple[int, int, int, int] | None = None
+    for wid in out.split():
+        info = run(["xwininfo", "-id", wid]).stdout
+        geo: dict[str, int] = {}
+        for line in info.splitlines():
+            for key in ("Absolute upper-left X", "Absolute upper-left Y",
+                        "Width", "Height"):
+                if line.strip().startswith(key):
+                    geo[key] = int(line.split(":")[1])
+        if len(geo) == 4:
+            cand = (geo["Absolute upper-left X"], geo["Absolute upper-left Y"],
+                    geo["Width"], geo["Height"])
+            if best is None or cand[2] * cand[3] > best[2] * best[3]:
+                best = cand
+    if best is None:
+        raise RuntimeError("no window geometry parsed from _NET_CLIENT_LIST")
+    return best
 
 
 def find_teal_banner(png: bytes) -> tuple[float, float] | None:
-    """The BEGIN GAME banner by pixel color (teal: blue+green high, red
-    low). VL said 'bottom center'; the banner is at x~0.28 — locate UI by
-    pixels, not by a vision model's guess."""
+    """The BEGIN GAME / CONTINUE GAME ribbon by pixel color (teal: blue+
+    green high, red low) — locate UI by pixels, not by a vision model's
+    guess. Attempt-6 lesson (live, 2026-09-03): return the DENSEST teal
+    cluster, never the bbox of every hit — ocean water passes the same
+    filter, and the diluted bbox center clicked open water beside the
+    ribbon. The load-path intro ribbon sits at window y~0.93; scan the
+    whole lower half."""
     sys.path.insert(0, str(REPO / "scripts"))
     from screen_triage import _decode_rgb
     w, h, rows = _decode_rgb(png)
-    hits = []
-    for y in range(int(h * 0.75), h):
+    grid = 32
+    counts: dict[tuple[int, int], int] = {}
+    for y in range(int(h * 0.50), h, 2):
         for x in range(0, w, 2):
             r, g, b = rows[y][x]
             if b > 120 and g > 110 and r < 90 and (b - r) > 60:
-                hits.append((x, y))
-    if not hits:
+                cell = (x // grid, y // grid)
+                counts[cell] = counts.get(cell, 0) + 1
+    if not counts:
         return None
-    xs = [p[0] for p in hits]
-    ys = [p[1] for p in hits]
-    return ((min(xs) + max(xs)) / 2 / w, (min(ys) + max(ys)) / 2 / h)
+
+    def hood(cx: int, cy: int) -> int:
+        return sum(counts.get((cx + dx, cy + dy), 0)
+                   for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+
+    bx, by = max(counts, key=lambda c: hood(*c))
+    sx = sy = tot = 0
+    for (cx, cy), n in counts.items():
+        if abs(cx - bx) <= 1 and abs(cy - by) <= 1:
+            sx += (cx + 0.5) * grid * n
+            sy += (cy + 0.5) * grid * n
+            tot += n
+    return (sx / tot / w, sy / tot / h)
 
 
 def capture_window() -> bytes:
     import tempfile
-    wx, wy, ww, wh = civ6_window_geometry()
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
         path = fh.name
-    run(["bash", "-c",
-         f"DISPLAY={DISPLAY} scrot -a {wx},{wy},{ww},{wh} -o {path}"])
+    try:
+        wx, wy, ww, wh = civ6_window_geometry()
+        cap = f"DISPLAY={DISPLAY} scrot -a {wx},{wy},{ww},{wh} -o {path}"
+    except Exception:
+        # never lose the frame to a geometry hiccup — the whole screen
+        # contains the window (attempt-7: the failed dump left the
+        # ingame-2 timeout undiagnosable)
+        cap = f"DISPLAY={DISPLAY} scrot -o {path}"
+    run(["bash", "-c", f"{cap}"])
     data = Path(path).read_bytes()
     Path(path).unlink(missing_ok=True)
     return data
+
+
+def dump_screen(label: str) -> None:
+    """Attempt-6 lesson: a gate timeout without a screenshot is a guess.
+    Dump the window at every failure for off-line diagnosis."""
+    try:
+        Path(f"/tmp/arch1-{label}-{time.strftime('%H%M%S')}.png") \
+            .write_bytes(capture_window())
+        print(f"[screen] /tmp/arch1-{label}-{time.strftime('%H%M%S')}.png")
+    except Exception as exc:            # never let a dump kill the ladder
+        print(f"[screen] dump failed: {exc}")
 
 
 def click(fx: float, fy: float) -> None:
@@ -251,7 +295,7 @@ async def run_arch1_session(opts) -> int:
     async def menu_up() -> bool:
         return "StagingRoom" in await tuner_states()
 
-    if not await wait_for(menu_up, COLD_BOOT_S, "menu"):
+    if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu"):
         return 22
     key("Escape")               # skip the intro movie if it is still up
     await asyncio.sleep(8)
@@ -284,7 +328,7 @@ async def run_arch1_session(opts) -> int:
         except OSError:
             return False
 
-    clicked_banner = False
+    clicked_banner = 0
     for _ in range(24):         # ~8 min of banner/panel alternation
         await asyncio.sleep(20)
         if turn1_autosaved():
@@ -294,13 +338,16 @@ async def run_arch1_session(opts) -> int:
             banner = find_teal_banner(capture_window())
         except Exception:
             banner = None
-        if banner and not clicked_banner:
+        if banner and clicked_banner < 3:
             click(*banner)
-            clicked_banner = True
+            clicked_banner += 1
+            print(f"[enter] banner click #{clicked_banner} "
+                  f"({banner[0]:.3f}, {banner[1]:.3f})")
         else:
             key("Return")       # empty-password hand-off panel auto-OK
     if not turn1_autosaved():
         print("[enter] turn-1 autosave never appeared")
+        dump_screen("no-autosave")
         return 24
     # 3. UI quicksave at turn 1 (the tuner is dead inside the hotseat
     #    session's game by design — the save must go through the menu).
@@ -323,6 +370,7 @@ async def run_arch1_session(opts) -> int:
             pass
     if not quicksaved:
         print("[quicksave] file did not land (or is stale)")
+        dump_screen("no-quicksave")
         return 25
     if not swap_save_into_load_slot():
         return 26
@@ -331,7 +379,7 @@ async def run_arch1_session(opts) -> int:
     launch()
     if not await wait_for(port_up, 240, "tuner-bind-2", 10.0):
         return 27
-    if not await wait_for(menu_up, COLD_BOOT_S, "menu-2"):
+    if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu-2"):
         return 28
     key("Escape")
     await asyncio.sleep(8)
@@ -342,10 +390,15 @@ async def run_arch1_session(opts) -> int:
     r = phase(["live_hotseat_launch.py", "--load",
                "--port", str(tuner_port())], settle=25)
     if "loadgame-returned|true" not in r.stdout:
+        dump_screen("load-failed")
         return 29
-    # the loaded game opens on the leader intro; the tuner binds only at
-    # the map transition — click the banner through, then wait GameCore
-    intro_clicked = False
+    await asyncio.sleep(15)     # settle: the map begins forming before
+    # the intro panel is drawn — poll only after the engine settles.
+    # The loaded game opens on the civ-intro screen (attempt 6: ribbon
+    # at window (0.22, 0.935), pixel-located); the tuner binds only at
+    # the map transition after CONTINUE GAME — click the banner through
+    # (RETRY: one water-diluted click missed it live), then wait GameCore
+    intro_clicks = 0
     for _ in range(20):
         if await ingame_up():
             break
@@ -353,13 +406,18 @@ async def run_arch1_session(opts) -> int:
             banner = find_teal_banner(capture_window())
         except Exception:
             banner = None
-        if banner and not intro_clicked:
+        if banner and intro_clicks < 3:
             click(*banner)
-            intro_clicked = True
+            intro_clicks += 1
+            print(f"[intro-2] click #{intro_clicks} "
+                  f"({banner[0]:.3f}, {banner[1]:.3f})")
         else:
             key("Return")
         await asyncio.sleep(15)
-    if not await wait_for(ingame_up, MAP_LOAD_S, "ingame-2", 15.0):
+    # attempt-7 lesson: this boot's tuner registered ~15-17 min after the
+    # load (600s missed it by <=2 min) — "binds late or never" skews LATE
+    if not await wait_for(ingame_up, MAP_LOAD_S * 4, "ingame-2", 15.0):
+        dump_screen("ingame-2")
         return 30
     # 5. census the demote, re-flag, gate the flip. Codex r1 P2-9: the
     #    gate requires BOTH the re-flag's own read-back (slot + cfg-human)
@@ -372,6 +430,7 @@ async def run_arch1_session(opts) -> int:
     if "REFLAG_SLOT|1|3" not in r.stdout \
             or "REFLAG_CFGHUMAN|1|true" not in r.stdout:
         print("[gate] re-flag read-back mismatch — refusing to dispatch")
+        dump_screen("reflag-gate")
         return 31
     time.sleep(5)
     r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
@@ -380,6 +439,7 @@ async def run_arch1_session(opts) -> int:
     if not any(ln.startswith("P1|human=true|") and "|slot=3|" in ln
                for ln in r.stdout.splitlines()):
         print("[gate] census did not confirm P1 human slot=3 — refusing")
+        dump_screen("census-gate")
         return 31
     if not opts.no_smoke:
         smoke = run([sys.executable,
