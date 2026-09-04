@@ -25,6 +25,7 @@ import contextlib
 import json
 import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import AgentSpec, MatchSpec, load_config
 from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
-from civ_arena.game.civ6 import lua_translator, response_parser
+from civ_arena.game.civ6 import lua_translator, response_parser, ui_control
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.vendor.connection import GameConnection
@@ -921,73 +922,14 @@ async def _ensure_research(adapter: FireTunerAdapter, player_id: int,
     print(f"housekeep[{turn}]: research empty -> STUDY {pick}: {res.status}")
 
 
-async def _dismiss_popups(turn: int, keys: tuple[str, ...] = ("Escape",
-                                                              "Escape"),
-                          ) -> None:
-    """Dismiss a front-end MODAL that froze the engine's between-turn
-    processing (2026-09-01 live game, turn 16: an advisor popup held the
-    cycle after a clean turn 15 — the lease then never engaged). TWO
-    Escapes, spaced: the first closes a modal if one is up; if none was,
-    it OPENS the game menu, which the second closes. Bounded and
-    self-undoing — only invoked from the already-stalled path, where the
-    alternative is the run aborting.
-
-    A2: the hotseat path passes Return FIRST — on the hotseat PlayerChange
-    panel an Escape OPENS the options menu (harmful), while Return runs
-    the engine's own empty-password auto-OK (playerchange.lua
-    OnKeyUp_Return). The wire-side unpause_local() covers the same panel
-    non-interactively; this sweep is the input-path insurance."""
-    import subprocess
-    import sys as _sys
-    from pathlib import Path as _Path
-    repo = _Path(__file__).resolve().parents[3]
-    for k in keys:
-        subprocess.run(
-            [_sys.executable, str(repo / "scripts" / "x_click.py"),
-             "--key", k],
-            capture_output=True, timeout=15)
-        await asyncio.sleep(2.0)
-    print(f"modal-sweep[{turn}]: popup dismissal sent ({' '.join(keys)})")
-    # CLICK-CLASS modal (operator's visual-responder idea, live-forced
-    # 2026-09-04 llm-minimax2-004/005: some panels ignore keys entirely
-    # and held the t7/t8 boundary for hours). Locate the Civ-style teal
-    # ribbon button by pixel cluster — the runner's proven locator — and
-    # CLICK it. Degrades silently without a display (rehearsals).
-    await _click_banner_button(turn)
-
-
-async def _click_banner_button(turn: int) -> None:
-    """Find a teal ribbon button on the Civ6 window and click it.
-
-    Reuses scripts/live_zero_touch's cluster locator via a subprocess
-    probe (imports inside the function; any failure — no display, no
-    window, no banner — is logged and swallowed: this is best-effort
-    UI triage from the stalled path only."""
-    import contextlib
-    import subprocess
-    import sys as _sys
-    from pathlib import Path as _Path
-    repo = _Path(__file__).resolve().parents[3]
-    with contextlib.suppress(Exception):
-        probe = subprocess.run(
-            [_sys.executable, "-c",
-             "import sys; sys.path.insert(0, "
-             f"{str(repo / 'scripts')!r}); "
-             "import live_zero_touch as z; "
-             "b = z.find_teal_banner(z.capture_window()); "
-             "print('BANNER|none' if b is None "
-             "else f'BANNER|{b[0]}|{b[1]}')"],
-            capture_output=True, text=True, timeout=60, cwd=str(repo))
-        out = (probe.stdout or "").strip().splitlines()
-        if out and out[-1].startswith("BANNER|") \
-                and out[-1] != "BANNER|none":
-            fx, fy = out[-1].split("|")[1:3]
-            subprocess.run(
-                [_sys.executable, str(repo / "scripts" / "x_click.py"),
-                 "--at", f"{float(fx):.4f},{float(fy):.4f}"],
-                capture_output=True, timeout=15)
-            print(f"modal-click[{turn}]: banner clicked "
-                  f"({float(fx):.3f}, {float(fy):.3f})")
+async def _dismiss_popups(turn: int, keys: tuple[str, ...] = ("Escape", "Escape"),
+                          controller=None) -> list[dict[str, Any]]:
+    controller = controller or ui_control.Controller()
+    results = []
+    for key in keys:
+        results.append(asdict(await controller.action(key=key)))
+    results.append(asdict(await controller.action(banner=True)))
+    return results
 
 
 async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
@@ -1011,7 +953,9 @@ async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
               f"{status['TURN']}")
         await adapter.write_raw(lua_translator.request_end_turn(player_id))
         return
-    await _dismiss_popups(turn, keys)
+    await _dismiss_popups(
+        turn, keys, ui_control.FakeController()
+        if adapter._simulate is not None else ui_control.Controller())
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,
