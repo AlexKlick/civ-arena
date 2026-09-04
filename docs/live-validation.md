@@ -806,3 +806,25 @@ launch handling and readiness, then establish a visible Civ6 window and
 The launcher command and stop-and-preserve procedure above are reproducible;
 use a fresh run ID for any future attempt. No automatic save restore or
 further launch attempt was performed after the failed gate.
+
+## 2026-09-04 — parallel strategy kickoff and display diagnosis
+
+The [startup follow-up](live-startup-followup-20260904.md) identifies a current
+host blocker: the gaming service selected local-display mode while XRandR and
+Steam's bundled SDL reported no usable display. Steam logged a login-window
+creation failure. This does not establish the sole cause of the earlier failed
+launch or prove that display repair will restore authentication and gameplay.
+
+Local commit `e232b4b` adds a bounded display guard before X/game actions and
+after X restart. The follow-up retains 17 passing focused tests, host evidence,
+and the unsuccessful but reverted virtual-monitor probe. No fresh game launch
+or provider request was made. The 22 previous save backups remain preserved.
+
+The installed `/home/alexk/.local/bin/gaming-mode` helper requires host sudo
+privileges unavailable to this session. After it restores a usable display,
+recheck Steam readiness and single-client custody before restarting the staged
+validation sequence above. Acceptance remains 0/2 runs started.
+
+The [parallel kickoff](strategy-program-kickoff.md) records independent simulator
+evaluation work and the [capability/experiment inventory](strategy-next-experiment.md).
+Those tracks cannot satisfy this live gate or the separate CAR-M1 V2 gates.

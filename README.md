@@ -5,21 +5,27 @@ arena process owns the single game connection, referees turn leases and action
 legality, enforces per-player visibility (fog of war), logs every action with
 before/after state, checkpoints, and replays.
 
-**The spike control plane is complete**: under adversarial injection it proves
-exclusive control, visibility isolation, idempotency, crash-resume, and replay
-with deterministic scripted policies. **The LLM lane is live**: a
-model-driven agent (`policy: llm`) plays through the same 15-tool surface
-against the scripted bots, with a bounded per-turn diary as its only
-cross-turn memory — see `docs/llm-lane.md` for the proven wire facts and the
-MiniMax setup. The live Civ VI (FireTuner) leg remains a skeleton plus a
-manual validation protocol (`docs/live-validation.md`).
+The simulator control plane supports exclusive turn leases, visibility
+isolation, idempotency, crash-resume, and deterministic replay. Scripted,
+planner, and LLM agents share the referee-controlled tool surface. The LLM
+lane includes diary, strategy, and recall services; see
+[`docs/llm-lane.md`](docs/llm-lane.md) for recorded provider evidence.
+
+The Civ VI FireTuner implementation includes bounded hotseat recovery and
+terminal run auditing. Two consecutive live 30-round matches remain unproven;
+the latest startup attempt did not produce a game window or tuner. See
+[`docs/live-validation.md`](docs/live-validation.md) for the evidence boundary
+and [`docs/strategy-program-kickoff.md`](docs/strategy-program-kickoff.md) for
+the parallel reliability, evaluation, and strategy work. A separate CAR-M1
+worktree contains the V2 turn-control candidate; it is not integrated here.
 
 ## Layout
 
 - `src/civ_arena/arena/` — coordinator, referee, watchdog, leases, event log,
   checkpoints, idempotency, diary, telemetry, visibility scopes.
 - `src/civ_arena/game/` — the `GameAdapter` seam; `sim/` deterministic
-  simulator; `civ6/` FireTuner adapter skeleton over a vendored wire layer.
+  simulator; `civ6/` FireTuner adapter, hotseat driver, UI control, and run audit
+  over a vendored wire layer.
 - `src/civ_arena/agents/` — `AgentRuntime` protocol, scripted bots, and
   `llm/` (Messages client, prompts, tool schemas, `LLMAgentRuntime`).
 - `src/civ_arena/session/` — the agent-visible tool surface (15 tools; no
