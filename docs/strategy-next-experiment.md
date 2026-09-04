@@ -35,10 +35,10 @@ turtler, and a learned value head failing its improvement hypothesis. Those
 are historical results with specific opponents, horizons and seeds.
 
 Read-only artifact discovery found the original checkout's
-`runs/league-m20a/league-results.json`,
-`runs/league-m20a-probe/league-results.json`,
-`runs/exp19b/exp19b-results.json`, and
-`runs/exp19b-b4/exp19b-results.json`. Their underlying match collections were
+[/home/alexk/documents/civ-arena/runs/league-m20a/league-results.json](/home/alexk/documents/civ-arena/runs/league-m20a/league-results.json),
+[/home/alexk/documents/civ-arena/runs/league-m20a-probe/league-results.json](/home/alexk/documents/civ-arena/runs/league-m20a-probe/league-results.json),
+[/home/alexk/documents/civ-arena/runs/exp19b/exp19b-results.json](/home/alexk/documents/civ-arena/runs/exp19b/exp19b-results.json), and
+[/home/alexk/documents/civ-arena/runs/exp19b-b4/exp19b-results.json](/home/alexk/documents/civ-arena/runs/exp19b-b4/exp19b-results.json). Their underlying match collections were
 not independently revalidated here. The retained
 `/home/alexk/documents/civ-arena/runs/exp20c-prod/exp20c-results.json` hashes to
 `6e6c7ea477960e68afaeb4bdfc81631201b70826c11629ab33bf5edb8880a23a`, matching the

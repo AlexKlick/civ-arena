@@ -83,8 +83,47 @@ A code change resets the two-consecutive-acceptance requirement.
 At kickoff, the reliability worktree was clean at `5a8611e`. The separate
 CAR-M1 worktree was clean at `c4a467f`. Their source and validation records were
 read to establish scope; prior suite and provider results are historical.
-Current deliverables and their captured results will be recorded below after
-the parallel workers finish.
+
+| Deliverable | Current result | Evidence |
+|---|---|---|
+| Display readiness guard | Implemented in `e232b4b`; 17 focused tests passed | [Host diagnosis and tests](live-startup-followup-20260904.md) |
+| Paired diagnostic runner | Implemented in `952c72d`; 16 focused tests passed | [Runner, protocol and captured pilot](strategy-benchmark-pilot.md) |
+| Development pilot | FAIL under the declared strict diagnostic gate: 1/12 matches, zero complete pairs, 11 scripted rejections, zero watchdog violations | [Complete output](../runs/strategy-kickoff-20260904T222910Z/benchmark-development.log), [results](../runs/strategy-kickoff-20260904T222910Z/benchmark-development/results.json) |
+| Strategy/full-game inventory | Source-backed capability matrix and S-01 preregistration; no treatment implemented or executed | [Next experiment](strategy-next-experiment.md) |
+| Source custody | Original checkout patch/HEAD and CAR-M1 HEAD/clean state unchanged | [Captured check](../runs/strategy-kickoff-20260904T222910Z/custody-check.log) |
+
+The pilot ran at clean `1ad8119`, with unchanged source hashes at completion.
+Held-out seeds were not executed. The benchmark received a separate read-only
+review with no confirmed blocker within its immediate-execution scope; this
+does not supply an independent CAR-M1 review or any live-engine proof.
+The [retained-byte check](../runs/strategy-kickoff-20260904T222910Z/benchmark-custody-check.log)
+verified 110 match/source hashes plus the manifest, with zero mismatches, and
+equal before/after state hashes on all 11 rejections. This is custody evidence,
+not simulator or live replay.
+
+### Combined repository gate
+
+The full suite ran once with source, tests and configuration from `1ad8119`:
+**600 passed, 0 failed, 1 skipped** in 503.94 seconds. Ruff also passed. No
+rerun or flaky-test plugin was requested. Only documentation changed while the
+suite ran and in the final reporting commit; implementation/test/configuration
+bytes were unchanged. The result supersedes historical suite counts for this
+kickoff's implementation, and does not supply live or strategy-strength proof.
+
+- [Full pytest log](../runs/strategy-kickoff-20260904T222910Z/pytest-release.log)
+- [Full Ruff log](../runs/strategy-kickoff-20260904T222910Z/ruff-release.log)
+- [Gate identities and outcome](../runs/strategy-kickoff-20260904T222910Z/release-outcome.json)
+
+Reproduction from this worktree, using its source with the existing project
+interpreter:
+
+```bash
+PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m pytest -q > /tmp/civ-strategy-release.log 2>&1
+/home/alexk/documents/civ-arena/.venv/bin/python -m ruff check . > /tmp/civ-strategy-ruff.log 2>&1
+```
+
+Keep a new complete capture when checking changed source. Read these retained
+logs for follow-up questions about this gate; do not rerun to rediscover counts.
 
 ## Follow-up probes
 
@@ -93,6 +132,21 @@ source/artifact identities; review the capability matrix and experiment's
 causal hypothesis. Inventory the overlap between V2 and the reliability
 driver before scheduling a port.
 
+The pilot's first exclusion names the next evaluation task: explicitly decide
+whether to create a new legal-action-aware scripted baseline or preregister
+rejection eligibility categories. Repeated already-selected research, attempted
+occupied settlement, and unaffordable purchase are recorded separately. Keep
+the failed pilot immutable; a protocol change cannot retroactively validate it.
+Any changed opponent is a new baseline with a new source identity. Re-establish
+development validity before exposing held-out results.
+
+Read-only branch comparison found 12 overlapping changed paths, including
+`config.py`, `firetuner.py`, `live_driver.py`, `lua_translator.py`, and `replay.py`.
+This is an overlap inventory, not a merge-conflict resolution or proof of V2
+compatibility. Port the window helper first, then recovery/termination semantics,
+and validate V2 receipts and executor authority on every policy path before
+scheduling V2 live gates.
+
 ## Blocked checks
 
 The previous live attempt completed zero seat turns because no Civ6 process,
@@ -100,8 +154,24 @@ window, or tuner appeared. Neither 30-round acceptance run has started.
 The separate CAR-M1 record also lacks its mandatory provider and four V2 live
 gates. This kickoff does not relabel those requirements as complete.
 
+Current live status is **BLOCKED** by the unusable gaming display. The existing
+`/home/alexk/.local/bin/gaming-mode` helper needs sudo privileges unavailable to
+this session. No fresh live match or provider request was attempted during this
+kickoff. Restored display readiness must be followed by Steam authentication,
+game-window and tuner checks; the display repair alone cannot pass the gate.
+
 ## Evidence gaps
 
 There is no current proof of full-game victory, live engine replay, or general
 strategic superiority. Simulator observations, repository tests, provider
 round trips, and live engine execution will be reported separately.
+
+The [normalization scan](../runs/strategy-kickoff-20260904T222910Z/qa-normalize-final.log)
+covered 11 documents and raised six prompts. Three concern historical documents:
+the old relative M20c artifact path resolves only in the original checkout,
+and older date/blocker wording is not refreshed by this kickoff. The actual
+M20c path and byte check are explicit in the capability inventory. The other
+three flag provider wording: the prior live record links its captured provider
+response, while the two new documents explicitly record no provider execution
+or proof. These heuristic warnings do not establish new provider failures or
+readiness. Local links in the updated deliverables were checked separately.

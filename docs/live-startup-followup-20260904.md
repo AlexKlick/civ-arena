@@ -1,6 +1,6 @@
 # Live startup follow-up — 2026-09-04
 
-The current gaming display is a verified startup blocker. This follow-up
+Live gate status: **BLOCKED**. The current gaming display is a verified startup blocker. This follow-up
 does not establish the sole cause of the earlier failed launch, successful
 Steam authentication, or any completed live seat turn. No fresh game was
 launched; the deterministic rehearsal, MiniMax smoke, and both 30-round
