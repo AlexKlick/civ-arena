@@ -60,7 +60,7 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.7",
+        version: str = "0.3.8",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
@@ -454,6 +454,7 @@ class FakeMod:
                 f"SUPPORTS_LEDGER|{str(self.supports_ledger).lower()}",
                 "SUPPORTS_DIGEST|true",
                 "SUPPORTS_GUARDED_HANDOFF|true",
+                "SUPPORTS_REWARD_RECEIPTS|true",
                 f"SUPPORTS_COMMAND_DIFF|{str(self.has_command_diff).lower()}",
             ]
         if "Puppeteer.Status" in code and not self.injected:
@@ -545,6 +546,19 @@ class FakeMod:
             # the mod v0.3.1 hook ring (minimal model: the turn-start /
             # lease / deactivate events the driver's targeting reads)
             return ["\n".join(self.trace)] if self.trace else ["---END---"]
+        match = re.search(r"Puppeteer.BeginRewardCommand\(\d+, \d+, \d+, '([0-9a-f]{64})'", code)
+        if match:
+            return [f"REWARD_BEGIN|{match[1]}|accepted"]
+        match = re.search(r"Puppeteer.CancelRewardCommand\('([0-9a-f]{64})'\)", code)
+        if match:
+            return [f"REWARD_CANCEL|{match[1]}"]
+        match = re.search(
+            r"Puppeteer.FinishRewardCommand\('([0-9a-f]{64})', '([^']*)', (\d+)\)", code)
+        if match:
+            nonce, attrs, seq = match.groups()
+            rows = self.respond(f"Puppeteer.DiffSinceLast('{attrs}', {seq})")
+            return [f"REWARD_FINISH|{nonce}|{seq}",
+                    f"REWARD_OBSERVATION|{nonce}|0|0|0|no_matching_event", *rows]
         if "Puppeteer.DiffSinceLast" in code:
             if not self.has_command_diff:
                 return ["MOD_DIFF|unavailable"]

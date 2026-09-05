@@ -413,12 +413,14 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
-        if doc["mod_version"] != "0.3.7":
+        if doc["mod_version"] != "0.3.8":
             raise RuntimeError(
-                "PuppeteerMod 0.3.7 required for guarded handoff, owner-qualified IDs "
+                "PuppeteerMod 0.3.8 required for guarded handoff, owner-qualified IDs "
                 "checked restore completion, and silent native lease hooks")
         if doc.get("supports_guarded_handoff") is not True:
             raise RuntimeError("PuppeteerMod guarded_handoff capability required")
+        if doc.get("supports_reward_receipts") is not True:
+            raise RuntimeError("PuppeteerMod native reward_receipts capability required")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
@@ -711,12 +713,25 @@ class FireTunerAdapter:
                                     rejection=rejection,
                                     error="entity owner differs from acting seat")
         unit_id = cmd.args.get("unit_id")
+        diff_seq = self._next_diff_seq()
+        reward_nonce = None
+        if cmd.tool == "move_unit":
+            reward_nonce = _sha({"lease": cmd.lease_id, "key": cmd.idempotency_key,
+                                 "turn": self._turn_mirror, "seq": diff_seq})
         try:
+            if reward_nonce is not None:
+                rows = await self._conn.execute_read(lua_translator.begin_reward_command(
+                    cmd.player_id, self._turn_mirror, unit_id, reward_nonce,
+                    cmd.args["dest"], diff_seq))
+                response_parser.parse_reward_begin(rows, reward_nonce)
             if cmd.tool in _UNIT_TOOLS:
                 lines = await self._conn.execute_read(lua_translator.restore_unit(unit_id))
                 restored = response_parser.parse_restore_receipt(lines, unit_id)
                 if restored == "unknown_entity":
                     await self._conn.execute_read(lua_translator.freeze_unit(unit_id))
+                    if reward_nonce is not None:
+                        await self._conn.execute_read(
+                            lua_translator.cancel_reward_command(reward_nonce))
                     return ActionResult(status="rejected", result=None, mutations=(),
                                         rejection="unknown_entity", error=unit_id)
             lua, ingame = builder(cmd.player_id, cmd.args)
@@ -724,6 +739,10 @@ class FireTunerAdapter:
                            else self._conn.execute_read(lua))
             verdict = response_parser.parse_act(lines)
         except BaseException:
+            if reward_nonce is not None:
+                with contextlib.suppress(Exception):
+                    await self._conn.execute_read(
+                        lua_translator.cancel_reward_command(reward_nonce))
             # Codex P1-7: a Lua error after the restore must not leak
             # restored movement into the release diff — freeze it back,
             # then let the failure propagate (the driver aborts the run)
@@ -733,6 +752,9 @@ class FireTunerAdapter:
                         lua_translator.freeze_unit(unit_id))
             raise
         if verdict["status"] == "rejected":
+            if reward_nonce is not None:
+                await self._conn.execute_read(
+                        lua_translator.cancel_reward_command(reward_nonce))
             if cmd.tool in _UNIT_TOOLS:
                 # undo the restore: re-freeze so the restored-but-unused
                 # movement never books as undeclared drift at release
@@ -749,10 +771,18 @@ class FireTunerAdapter:
         # — otherwise execute()'s post-hash is the PRE-command digest and the
         # log's hash trail goes stale mid-lease.
         await self._refresh_digest()
+        causal_receipts = []
+        reward_lines = None
+        if reward_nonce is not None:
+            rows = await self._conn.execute_read(
+                lua_translator.finish_reward_command(reward_nonce, diff_seq))
+            reward_lines, causal_receipts = response_parser.parse_reward_finish(
+                rows, reward_nonce, diff_seq, cmd.player_id, self._turn_mirror, unit_id)
         muts = await self._drain_command_diff(
-            cmd.player_id, _TOOL_ATTRS.get(cmd.tool, ""),
-            self._next_diff_seq())
+            cmd.player_id, _TOOL_ATTRS.get(cmd.tool, ""), diff_seq, lines=reward_lines)
         result = {"tool": cmd.tool, "detail": verdict["detail"]}
+        if causal_receipts:
+            result["causal_receipts"] = causal_receipts
         if production_hash is not None:
             result.update(production_hash=production_hash,
                           verification="subsequent_ingame_read")
@@ -767,15 +797,17 @@ class FireTunerAdapter:
 
     async def _drain_command_diff(self, player_id: int,
                                   attrs: str = "",
-                                  seq: int = 0) -> list[MutationRecord]:
+                                  seq: int = 0, *,
+                                  lines: list[str] | None = None) -> list[MutationRecord]:
         """The commanded-effects seam (mod v0.3): journal DiffSinceLast's
         rows as BOTH the command's mutations (allowed, via the returned
         records) and actuals (via the journal the referee drains) — the
         exact-key multiset diff then reconciles them. Rows the diff never
         covers (production, promotions — declared recorder limitations)
         simply book nothing, on both sides."""
-        lines = await self._conn.execute_read(
-            lua_translator.diff_since_last(attrs, seq))
+        if lines is None:
+            lines = await self._conn.execute_read(
+                lua_translator.diff_since_last(attrs, seq))
         if any(ln.startswith("MOD_DIFF|unavailable") for ln in lines):
             raise RuntimeError(
                 "mod has no DiffSinceLast (need >= 0.3) — commanded effects "

@@ -41,7 +41,7 @@ async def test_mod_handshake_gate_passes():
         await adapter.setup({})
         doc = await adapter.require_mod()
         assert doc["present"] is True
-        assert doc["mod_version"] == "0.3.7"
+        assert doc["mod_version"] == "0.3.8"
         assert doc["supports_freeze"] and doc["supports_ledger"]
         assert doc["supports_command_diff"], "M14d: DiffSinceLast required"
         await adapter.teardown()
@@ -108,7 +108,8 @@ def test_parse_handshake_fail_closed():
     assert doc == {"present": False, "mod_version": None,
                    "supports_freeze": False, "supports_ledger": False,
                    "supports_digest": False,
-                   "supports_command_diff": False, "supports_guarded_handoff": False}
+                   "supports_command_diff": False, "supports_guarded_handoff": False,
+                   "supports_reward_receipts": False}
     # MOD_PRESENT true but a capability merely missing => still False
     doc = parse_handshake(["MOD_PRESENT|true", "MOD_VERSION|0.3.0",
                            "SUPPORTS_FREEZE|true"])

@@ -17,6 +17,8 @@ VMs share no globals, so nothing may call across.
 
 from __future__ import annotations
 
+import re
+
 from civ_arena.game.civ6.entity_ids import decode
 
 # ---------------------------------------------------------------------------
@@ -922,3 +924,35 @@ print('---END---')"""
 
 
 _ = lua_error_probe  # exported for tests
+
+
+def reward_command_nonce(nonce: str) -> str:
+    if not isinstance(nonce, str) or re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
+        raise ValueError("invalid reward command nonce")
+    return nonce
+
+
+def begin_reward_command(player: int, turn: int, unit_id: str, nonce: str,
+                         dest: str, seq: int) -> str:
+    owner, raw = decode(unit_id, "u")
+    if type(player) is not int or owner != player:
+        raise ValueError("reward command owner mismatch")
+    if any(type(v) is not int or not 0 < v < 2**53 for v in (turn, seq)):
+        raise ValueError("invalid reward command turn or sequence")
+    q, r = map(int, dest.split(","))
+    x, y = axial_to_xy(q, r)
+    if min(x, y) < 0 or max(x, y) >= 2**53:
+        raise ValueError("invalid reward destination")
+    return (f"Puppeteer.BeginRewardCommand({player}, {turn}, {raw}, "
+            f"'{reward_command_nonce(nonce)}', {x}, {y}, {seq})")
+
+
+def finish_reward_command(nonce: str, seq: int) -> str:
+    if type(seq) is not int or not 0 < seq < 2**53:
+        raise ValueError("invalid reward command sequence")
+    return (f"Puppeteer.FinishRewardCommand('{reward_command_nonce(nonce)}', "
+            f"'pos,moves,damage,exists', {seq})")
+
+
+def cancel_reward_command(nonce: str) -> str:
+    return f"Puppeteer.CancelRewardCommand('{reward_command_nonce(nonce)}')"
