@@ -969,3 +969,92 @@ previous 640-pass/1-skip full gate belongs to the earlier source documented
 above. The corrected launch has not been executed on the live engine, so
 actual resizing and subsequent input remain follow-up probes. The preserved
 failed run remains bound to `225eb9e`, not this correction.
+
+## Connected-monitor launch — 2026-09-05 00:04 UTC
+
+The operator requested a direct launch on the connected monitor and confirmed
+seeing Civ6 launch. Run `minimax-watch-20260905T000405Z` used clean commit
+`c707e7f55ac3c6dc707467ea02e1bd03f5fc2480`, containing the `ca7bb19`
+resolution fix. No rehearsal or repeated provider probe was run. The display
+was the local DP-2 monitor, 3440x1440 on X `:1`; X was not restarted.
+
+### Verified findings
+
+- Startup PASS for this attempt: fresh map, fresh quicksave, run-specific load
+  slot backup, required Civ6 restart, accepted load, both configured seats
+  human after reflag, and live smoke completion. The full pipeline reached
+  agent dispatch. [Launcher log](../runs/launch-evidence-20260905T000405Z/launcher.log),
+  [startup summary](../runs/minimax-watch-20260905T000405Z-startup/summary.json).
+  This startup status does not establish the intended two-major roster or
+  successful agent play.
+- Window normalization PASS on the live engine at both menu stages: Options
+  returned successful apply/readback and the same window measured 1024x768.
+  [First menu](../runs/minimax-watch-20260905T000405Z-startup/window-normalization-031d8c6849914ab3809890c0260d31b5.json),
+  [second menu](../runs/minimax-watch-20260905T000405Z-startup/window-normalization-dfd83a371f114dd680c4aff72a20fe6d.json).
+  The second process already reported 1024x768 before normalization. The code
+  does not call SaveOptions, but these observations do not prove that Civ6
+  leaves persisted preferences unchanged across its own shutdown/startup.
+- Pure two-major setup FAIL: the post-load census contained four alive majors:
+  P0 Cleopatra and P1 Gilgamesh human, plus P2 Saladin and P3 Victoria AI.
+  City-states and barbarians are separate rows. The current launcher checks
+  P0/P1 but does not reject these extra majors. Pre-host `AI=0` does not
+  establish the post-load roster. [Full census](../runs/launch-evidence-20260905T000405Z/census-2.txt).
+- First-turn engagement FAIL: the driver repeatedly targeted P0 turn 2 while
+  the engine stayed on active turn 1 with no lease. Recovery expired after
+  three sweeps under its 180-second deadline; dispatch including cleanup
+  lasted 182.386 seconds. Zero completed turns, zero completed rounds and
+  zero provider requests. [Events](../runs/minimax-watch-20260905T000405Z/events.jsonl),
+  [summary](../runs/minimax-watch-20260905T000405Z/summary.json),
+  [wire](../runs/minimax-watch-20260905T000405Z/wire.jsonl).
+- Controlled termination PASS for this failure: exactly one MATCH_START and
+  MATCH_END in each startup/dispatch log, each terminal summary matches its
+  file, cleanup completed without errors, and the tuner disconnected. Civ6
+  remained open. Twenty-two save files were retained again after stopping.
+  [Terminal audit](../runs/launch-evidence-20260905T000405Z/terminal-audit.log),
+  [outcome](../runs/launch-evidence-20260905T000405Z/outcome.json),
+  [save inventory](../runs/launch-evidence-20260905T000405Z/saves-after.json).
+- Popup monitoring ran three checks and sent zero close requests; no popup
+  dismissal during agent play is proven. The configured own-unit movement
+  allowance remained enabled, with zero admitted rows because no turns ran.
+
+### Follow-up probes
+
+The initial-attachment gap is supported by source and live events:
+`_target_turn` chooses current turn plus one when the local turn is active
+without a lease; hotseat setup arms future puppet hooks, but has no operation
+to acquire an already-active initial turn. `SetPuppet` only sets the armed
+flag; lease acquisition occurs in the mod's turn-start handler. All captured
+hook-trace polls were empty, so the exact earlier hook delivery is unknown.
+
+A correction must acquire the expected current seat/turn under explicit engine
+identity and movement checks, preserving remaining movement and normal turn
+order. Copying the single-seat end-turn bootstrap would skip P0's first turn
+and expose P1 first. Do not manually fire global turn events or assume that a
+partially played turn has full movement. This correction is not implemented.
+
+Reject unexpected alive major-player IDs before dispatch, then correct the
+post-host/post-load roster formation. Require the engine's alive major IDs to
+be exactly `{0,1}` for a clean MiniMax-versus-MiniMax acceptance match. The
+current run is preserved as failed diagnostic evidence, not an acceptance run.
+
+### Blocked checks
+
+Visible MiniMax play, accepted model game actions, completed seat handoffs,
+popup dismissal during play, and both 30-round acceptance matches remain
+BLOCKED by initial-turn acquisition. Pure two-major setup also remains
+BLOCKED by the demonstrated roster defect. No code was changed during this
+live attempt, and no second controller or supplemental recovery input was
+used. The sequence stopped after the controlled recovery failure.
+
+### Evidence gaps
+
+No model action, completed turn, or live replay proof exists for this attempt.
+A running Civ6 process, successfully loaded map, or clean startup summary must
+not be described as a playing AI match. The parent inspected screenshots and
+read logs; the application itself handled all startup/recovery input.
+
+[Custody and limits](../runs/launch-evidence-20260905T000405Z/custody.json)
+record the source/config hashes, physical-monitor target and unchanged caps.
+The preceding direct-launch command is reproducible with a new run ID, but
+will not solve the recorded first-turn or roster defects. Preserve this run
+and save inventory; do not reuse either run ID or automatically restore saves.
