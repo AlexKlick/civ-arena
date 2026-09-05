@@ -18,6 +18,17 @@ _ID = {"type": "string", "minLength": 1, "maxLength": 96,
        "pattern": r"^[A-Za-z0-9_:.-]+$"}
 _PREFERENCE = {"type": "array", "maxItems": 16, "uniqueItems": True,
                "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"}}
+_DEST = {"type": "string", "maxLength": 15,
+         "pattern": r"^(?:0|-?[1-9][0-9]{0,5}),(?:0|-?[1-9][0-9]{0,5})$"}
+_TACTICAL_CASES = []
+for _action in ("hold", "move", "attack", "found_city"):
+    _properties = {"unit_id": _ID, "action": {"type": "string", "enum": [_action]}}
+    if _action == "move":
+        _properties["dest"] = _DEST
+    elif _action == "attack":
+        _properties["target_id"] = _ID
+    _TACTICAL_CASES.append({"type": "object", "additionalProperties": False,
+                           "required": list(_properties), "properties": _properties})
 DIRECTIVE_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
@@ -40,12 +51,7 @@ DIRECTIVE_SCHEMA = {
         "production_preferences": _PREFERENCE,
         "tactical_overrides": {
             "type": "array", "maxItems": 8,
-            "items": {"type": "object", "additionalProperties": False,
-                      "required": ["unit_id", "action"],
-                      "properties": {"unit_id": _ID, "target_id": _ID,
-                                     "dest": {"type": "string", "maxLength": 15},
-                                     "action": {"type": "string", "enum": [
-                                         "hold", "move", "attack", "found_city"]}}},
+            "items": {"type": "object", "oneOf": _TACTICAL_CASES},
         },
     },
 }
@@ -85,7 +91,9 @@ def validate_directive(value: Any, *, player_id: int, owned_unit_ids: set[str]) 
     doc = _object(value, set(DEFAULT_DIRECTIVE), "directive")
     out = copy.deepcopy(DEFAULT_DIRECTIVE)
     version = doc.get("version", 1)
-    if type(version) is not int or version != 1:
+    # JSON Schema integer accepts mathematically integral JSON numbers such as
+    # 1.0. Normalize that equivalent wire spelling; booleans remain forbidden.
+    if type(version) not in (int, float) or version != 1:
         raise ValueError("unsupported directive version")
     scout = _object(doc.get("scouting", {}), set(out["scouting"]), "scouting")
     for key, allowed in (("policy", {"cautious", "balanced", "explore"}),
