@@ -53,7 +53,7 @@ async def main() -> int:
         if line.startswith("LOCAL|"):
             local = int(line.split("|", 1)[1])
     cities = response_parser.parse_cities(
-        await conn.execute_read(lua_translator.cities_read()))
+        await conn.execute_read(lua_translator.cities_read()), qualified=True)
     mine = [c for c in cities if c["owner"] == local
             and not c["production_queue"]]
     if not mine:
@@ -65,10 +65,9 @@ async def main() -> int:
 
     resolved = 0
     for city in mine:
-        cid = int(city["city_id"][1:]) % 65536
         items = response_parser.parse_available_production(
             await conn.execute_write(
-                lua_translator.available_production_read(cid)))
+                lua_translator.available_production_read(city["city_id"])))
         by_id = {i["item_id"]: i for i in items}
         pick = next((p for p in PREFERENCE if p in by_id), None)
         if pick is None:

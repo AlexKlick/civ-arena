@@ -373,6 +373,61 @@ async def test_second_launch_normalization_precedes_load_menu_inputs(tmp_path, m
     key.assert_awaited_once_with('Escape')  # quicksave menu, no second-menu Escape
 
 
+@pytest.mark.parametrize('smoke_rc', [0, 10])
+async def test_arch1_waits_between_each_final_tuner_client(smoke_rc, tmp_path, monkeypatch):
+    saves = tmp_path / 'saves'
+    for name in ('Hotseat/auto/AutoSave_0001.Civ6Save', 'Hotseat/quick/quicksave.Civ6Save'):
+        path = saves / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'fixture')
+    monkeypatch.setattr(z, 'SAVES', saves)
+    monkeypatch.setattr(z.time, 'time', lambda: 0)
+    # A distinct value proves every reconnect follows the configured discipline.
+    monkeypatch.setattr(z, 'TUNER_COOLDOWN_S', 11)
+    actions = []
+
+    async def sleep(seconds):
+        actions.append(('sleep', seconds))
+
+    async def run(args, **kwargs):
+        script = Path(args[1]).name
+        actions.append(('client', script, tuple(args[2:])))
+        if '--full' in args:
+            output = ('InSession|true\nP0PW|\nP1PW|\n'
+                      'UI_START_READY|posthost_roster_verified\n')
+        elif '--load' in args:
+            output = 'loadgame-returned|true'
+        elif '--reflag' in args:
+            output = 'REFLAG_SLOT|1|3\nREFLAG_CFGHUMAN|1|true'
+        elif script == 'live_seat_check.py':
+            output = ('P0|human=true|major=true|alive=true|slot=3|cfghuman=true\n'
+                      'P1|human=true|major=true|alive=true|slot=3|cfghuman=true\n'
+                      'CENSUS_END|2\n')
+        else:
+            assert script == 'firetuner_smoke.py'
+            output = 'SMOKE OK' if smoke_rc == 0 else 'SMOKE FAILED'
+        return SimpleNamespace(stdout=output, stderr='',
+                               returncode=smoke_rc if script == 'firetuner_smoke.py' else 0)
+
+    monkeypatch.setattr(z.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(z, 'run', run)
+    for method in ('require_active_display', 'normalize_game_window', 'kill_game', 'key', 'click'):
+        monkeypatch.setattr(z, method, AsyncMock())
+    monkeypatch.setattr(z, 'wait_for', AsyncMock(return_value=True))
+    monkeypatch.setattr(z, 'tuner_states', AsyncMock(return_value=['GameCore_Tuner']))
+    monkeypatch.setattr(z, 'launch', lambda *_: None)
+    monkeypatch.setattr(z, 'swap_save_into_load_slot', lambda *_: True)
+    opts = SimpleNamespace(artifacts=tmp_path, fresh_x=False, kill_first=False,
+                           no_smoke=False, config='unused')
+    assert await z.run_arch1_session(opts) == (0 if smoke_rc == 0 else 32)
+    clients = [(i, row) for i, row in enumerate(actions) if row[0] == 'client']
+    assert [row[1] for _, row in clients[-4:]] == [
+        'live_seat_check.py', 'live_hotseat_launch.py',
+        'live_seat_check.py', 'firetuner_smoke.py']
+    for i, _ in clients[-4:]:
+        assert actions[i - 1] == ('sleep', 11)
+
+
 @pytest.mark.parametrize('variant, expected', [
     ('success', 'ok'), ('false_apply', 'apply_failed'), ('missing_api', 'missing_options_api'),
 ])

@@ -379,7 +379,7 @@ async def key(k: str) -> None:
 async def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
     """Run a live-lane phase script with the single-client cooldown
     discipline baked in (the tuner refuses rapid reconnects)."""
-    await asyncio.sleep(8)
+    await asyncio.sleep(TUNER_COOLDOWN_S)
     r = await run([sys.executable, str(REPO / "scripts" / args[0]), *args[1:]])
     out = (r.stdout.strip() or r.stderr.strip())
     print(f"[phase {args[0]} {' '.join(args[1:])}] rc={r.returncode}")
@@ -609,7 +609,7 @@ async def run_arch1_session(opts) -> int:
     # census-1 needs the tuner reconnect cooldown too (the pivot run
     # died here: the census ran right after the ingame-2 poll's
     # connection closed and the single-client refusal returned EMPTY)
-    await asyncio.sleep(8)
+    await asyncio.sleep(TUNER_COOLDOWN_S)
     r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-1]", r.stdout.strip())
@@ -620,7 +620,7 @@ async def run_arch1_session(opts) -> int:
         print("[gate] re-flag read-back mismatch — refusing to dispatch")
         dump_screen("reflag-gate")
         return 31
-    await asyncio.sleep(5)
+    await asyncio.sleep(TUNER_COOLDOWN_S)
     r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-2]", r.stdout.strip())
@@ -634,9 +634,8 @@ async def run_arch1_session(opts) -> int:
         dump_screen("census-gate")
         return 31
     if not opts.no_smoke:
-        smoke = await run([sys.executable,
-                     str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
-                     "--port", str(tuner_port())])
+        smoke = await phase(["firetuner_smoke.py", "--live",
+                             "--port", str(tuner_port())])
         last = (smoke.stdout.strip().splitlines() or ["<none>"])[-1]
         print("[smoke]", last)
         if smoke.returncode != 0:
