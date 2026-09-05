@@ -40,6 +40,7 @@ import uuid
 from pathlib import Path
 
 from civ_arena.game.civ6 import ui_control
+from civ_arena.game.civ6.vendor.connection import GameConnection
 
 REPO = Path(__file__).resolve().parents[1]
 DISPLAY = ":1"
@@ -53,6 +54,145 @@ WARM_BOOT_S = 420        # relaunch: states register in ~4-7 min
 INTRO_SETTLE_S = 300     # host -> BEGIN GAME clickable (varies 80-300s)
 TUNER_COOLDOWN_S = 8
 MAP_LOAD_S = 300         # BEGIN GAME -> GameCore_Tuner
+WINDOW_NORMALIZE_S = 45.0  # includes single-client cooldown and engine/window verification
+WINDOW_RESIZE_S = 8.0
+WINDOW_DISCONNECT_S = 3.0
+
+
+def window_resolution_lua(token: str) -> str:
+    """Use installed Options.lua's setters/apply; never persist user settings.
+
+    MainMenu.xml eagerly loads the Options context. Windowed is enum zero;
+    Options.ApplyGraphicsOptions changes runtime values without SaveOptions.
+    """
+    return f"""
+do
+  local function emit(value) print('RESOLUTION|{token}|' .. value) end
+  local function normalize()
+    if ContextPtr:GetID() ~= 'Options' then return 'wrong_context' end
+    if Options == nil or type(Options.GetAppOption) ~= 'function' or
+       type(Options.SetAppOption) ~= 'function' or
+       type(Options.GetAvailableDisplayModes) ~= 'function' or
+       type(Options.ApplyGraphicsOptions) ~= 'function' then
+      return 'missing_options_api'
+    end
+    local function observe(label)
+      emit(label .. '|' .. tostring(Options.GetAppOption('Video', 'RenderWidth')) ..
+        '|' .. tostring(Options.GetAppOption('Video', 'RenderHeight')) ..
+        '|' .. tostring(Options.GetAppOption('Video', 'FullScreen')))
+    end
+    observe('before')
+    local supported = false
+    for _, mode in ipairs(Options.GetAvailableDisplayModes()) do
+      if mode.Width == 1024 and mode.Height == 768 then supported = true break end
+    end
+    if not supported then return 'unsupported_resolution' end
+    Options.SetAppOption('Video', 'FullScreen', 0)
+    Options.SetAppOption('Video', 'RenderWidth', 1024)
+    Options.SetAppOption('Video', 'RenderHeight', 768)
+    local applied = Options.ApplyGraphicsOptions()
+    emit('applied|' .. tostring(applied))
+    observe('after')
+    return applied == true and 'ok' or 'apply_failed'
+  end
+  local ok, result = pcall(normalize)
+  emit('result|' .. (ok and result or 'runtime_error'))
+end
+print('RESOLUTION_END|{token}')
+print('---END---')
+"""
+
+
+def parse_window_resolution(lines: list[str], token: str) -> dict:
+    prefix = f"RESOLUTION|{token}|"
+    result = {}
+    for line in lines:
+        if not line.startswith(prefix):
+            continue
+        row = line[len(prefix):].split('|')
+        if not row or row[0] in result:
+            raise RuntimeError('duplicate resolution response')
+        if row[0] in ('before', 'after') and len(row) == 4:
+            if not all(re.fullmatch(r'\d{1,6}', value) for value in row[1:]):
+                raise RuntimeError('invalid resolution readback')
+            result[row[0]] = [int(value) for value in row[1:]]
+        elif row[0] in ('applied', 'result') and len(row) == 2:
+            result[row[0]] = row[1]
+        else:
+            raise RuntimeError('invalid resolution response')
+    if lines.count(f"RESOLUTION_END|{token}") != 1 or 'result' not in result:
+        raise RuntimeError('incomplete resolution response')
+    known = {'ok', 'wrong_context', 'missing_options_api', 'unsupported_resolution',
+             'apply_failed', 'runtime_error'}
+    if result['result'] not in known:
+        raise RuntimeError('unrecognized resolution outcome')
+    return result
+
+
+async def normalize_game_window(artifacts: Path) -> None:
+    """Require the coordinate-calibrated game resolution before menu actions.
+
+    One tuner connection, at most 45s of work plus 3s disconnect. Settings stay
+    in memory; existing persisted preferences and the X session are unchanged.
+    No input is issued on a missing/ambiguous UI context or failed readback.
+    """
+    token = uuid.uuid4().hex
+    diagnostic = {'target': [1024, 768, 0], 'status': 'failed', 'cleanup': 'not_started'}
+    conn = GameConnection('127.0.0.1', tuner_port())
+    failure = None
+    try:
+        async with asyncio.timeout(WINDOW_NORMALIZE_S):
+            # menu_up's transient client has just disconnected.
+            await asyncio.sleep(TUNER_COOLDOWN_S)
+            before = await asyncio.to_thread(ui_control.select_window, DISPLAY)
+            diagnostic['window_before'] = {'id': before.window_id,
+                                           'geometry': list(before.geometry)}
+            await conn.connect()
+            states = [index for index, name in conn.lua_states.items() if name == 'Options']
+            if len(states) != 1:
+                raise RuntimeError('missing or ambiguous Options context')
+            # Applying settings must be issued once, without automatic reconnect/retry.
+            async with conn._lock:
+                if not conn.is_connected or conn.lua_states.get(states[0]) != 'Options':
+                    raise RuntimeError('Options connection unavailable')
+                lines = await conn._locked_execute(states[0], window_resolution_lua(token), 8.0)
+            observed = parse_window_resolution(lines, token)
+            diagnostic['options'] = observed
+            if observed.get('result') != 'ok' or observed.get('applied') != 'true':
+                raise RuntimeError(f"resolution apply failed: {observed['result']}")
+            if observed.get('after') != [1024, 768, 0] or 'before' not in observed:
+                raise RuntimeError('resolution readback does not match 1024x768 windowed')
+            async with asyncio.timeout(WINDOW_RESIZE_S):
+                while True:
+                    window = await asyncio.to_thread(ui_control.select_window, DISPLAY)
+                    diagnostic['window_after'] = {'id': window.window_id,
+                                                  'geometry': list(window.geometry)}
+                    if window.window_id != before.window_id:
+                        raise RuntimeError('Civ6 window changed during resolution normalization')
+                    if window.geometry[2:] == (1024, 768):
+                        break
+                    await asyncio.sleep(0.25)
+            diagnostic['status'] = 'verified'
+    except (Exception, asyncio.CancelledError) as exc:
+        failure = exc
+        diagnostic['error'] = ui_control.redact(f'{type(exc).__name__}: {exc}')
+    finally:
+        try:
+            async with asyncio.timeout(WINDOW_DISCONNECT_S):
+                await conn.disconnect()
+            diagnostic['cleanup'] = 'disconnected'
+        except (Exception, asyncio.CancelledError) as exc:
+            diagnostic['cleanup'] = type(exc).__name__
+            if failure is None:
+                failure = exc
+                diagnostic['status'] = 'failed'
+        (artifacts / f'window-normalization-{token}.json').write_text(
+            json.dumps(diagnostic, sort_keys=True) + '\n')
+    if isinstance(failure, asyncio.CancelledError):
+        raise failure
+    if failure is not None:
+        raise RuntimeError(f'window normalization failed: {diagnostic.get("error", "cleanup")}')
+    print('[window] verified 1024x768 windowed; runtime settings only', flush=True)
 
 
 async def bounce_x() -> bool:
@@ -290,6 +430,7 @@ async def run_arch1_session(opts) -> int:
 
     if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu"):
         return 22
+    await normalize_game_window(opts.artifacts)
     if kill_first:
         await key("Escape")           # skip the intro movie on a fresh launch
         await asyncio.sleep(8)
@@ -375,6 +516,7 @@ async def run_arch1_session(opts) -> int:
         return 27
     if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu-2"):
         return 28
+    await normalize_game_window(opts.artifacts)
     await key("Escape")
     await asyncio.sleep(8)
     await click(0.459, 0.404)         # Single Player

@@ -1,8 +1,12 @@
 import asyncio
 import importlib.util
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -204,15 +208,18 @@ async def test_arch1_from_menu_preserves_process_and_skips_intro_key(tmp_path, m
         calls.append('host-configure')
         # Stop before hosting completes; no live save/UI operations in this test.
         return SimpleNamespace(stdout='', returncode=1)
+    async def normalize(*args):
+        calls.append('normalize')
     monkeypatch.setattr(z, 'require_active_display', display)
     monkeypatch.setattr(z, 'kill_game', no_kill)
     monkeypatch.setattr(z, 'launch', lambda *a: pytest.fail('must not relaunch'))
     monkeypatch.setattr(z, 'key', no_key)
     monkeypatch.setattr(z, 'wait_for', ready)
     monkeypatch.setattr(z, 'phase', phase)
+    monkeypatch.setattr(z, 'normalize_game_window', normalize)
     opts = SimpleNamespace(artifacts=tmp_path, fresh_x=False, kill_first=False)
     assert await z.run_arch1_session(opts) == 23
-    assert calls == ['display', 'tuner-bind', 'menu', 'host-configure']
+    assert calls == ['display', 'tuner-bind', 'menu', 'normalize', 'host-configure']
 
 
 async def test_from_menu_refuses_x_restart_before_bounce(tmp_path, monkeypatch):
@@ -225,3 +232,175 @@ async def test_from_menu_refuses_x_restart_before_bounce(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='cannot restart X'):
         await z.run_arch1_session(SimpleNamespace(
             artifacts=tmp_path, fresh_x=True, kill_first=False))
+
+
+def resolution_reply(lua, *, result='ok', applied='true', after='1024|768|0'):
+    token = re.search(r"RESOLUTION\|([a-f0-9]+)\|", lua)[1]
+    return [f'RESOLUTION|{token}|before|2881|1788|0',
+            f'RESOLUTION|{token}|applied|{applied}',
+            f'RESOLUTION|{token}|after|{after}',
+            f'RESOLUTION|{token}|result|{result}', f'RESOLUTION_END|{token}']
+
+
+@pytest.fixture
+def resolution_fixture(monkeypatch):
+    original = z.ui_control.Window(':1', 10, (0, 0, 2881, 1788))
+    resized = z.ui_control.Window(':1', 10, (0, 0, 1024, 768))
+    windows = iter([original, resized])
+    monkeypatch.setattr(z.ui_control, 'select_window', lambda _display: next(windows))
+    monkeypatch.setattr(z, 'TUNER_COOLDOWN_S', 0)
+    monkeypatch.setattr(z, 'WINDOW_RESIZE_S', 0.02)
+    conn = SimpleNamespace(
+        connect=AsyncMock(), disconnect=AsyncMock(), _lock=asyncio.Lock(), is_connected=True,
+        lua_states={4: 'Options'},
+        _locked_execute=AsyncMock(side_effect=lambda _i, lua, _t: resolution_reply(lua)))
+    monkeypatch.setattr(z, 'GameConnection', lambda *args: conn)
+    return conn
+
+
+async def test_runtime_resolution_apply_and_geometry_are_verified_without_saving(
+        resolution_fixture, tmp_path):
+    conn = resolution_fixture
+    await z.normalize_game_window(tmp_path)
+    conn.connect.assert_awaited_once()
+    conn.disconnect.assert_awaited_once()
+    conn._locked_execute.assert_awaited_once()
+    state, lua, timeout = conn._locked_execute.await_args.args
+    assert state == 4 and timeout == 8.0
+    assert "ContextPtr:GetID() ~= 'Options'" in lua
+    assert "Options.SetAppOption('Video', 'FullScreen', 0)" in lua
+    assert 'SaveOptions' not in lua and 'OnConfirm' not in lua
+    record = json.loads(next(tmp_path.glob('window-normalization-*.json')).read_text())
+    assert record['status'] == 'verified' and record['cleanup'] == 'disconnected'
+    assert record['options']['after'] == [1024, 768, 0]
+    assert record['window_after']['geometry'][2:] == [1024, 768]
+
+
+@pytest.mark.parametrize('failure', [
+    'missing_options', 'apply_false', 'wrong_readback', 'wrong_geometry', 'wrong_window',
+    'missing_state', 'ambiguous_state', 'disconnected', 'incomplete',
+])
+async def test_resolution_failure_stops_before_first_menu_input_or_host(
+        failure, resolution_fixture, tmp_path, monkeypatch):
+    conn = resolution_fixture
+    if failure == 'missing_options':
+        conn._locked_execute.side_effect = lambda _i, lua, _t: resolution_reply(
+            lua, result='missing_options_api')
+    elif failure == 'apply_false':
+        conn._locked_execute.side_effect = lambda _i, lua, _t: resolution_reply(
+            lua, result='apply_failed', applied='false')
+    elif failure == 'wrong_readback':
+        conn._locked_execute.side_effect = lambda _i, lua, _t: resolution_reply(
+            lua, after='2881|1788|0')
+    elif failure == 'wrong_geometry':
+        monkeypatch.setattr(z.ui_control, 'select_window', lambda _: z.ui_control.Window(
+            ':1', 10, (0, 0, 2881, 1788)))
+    elif failure == 'wrong_window':
+        windows = iter([z.ui_control.Window(':1', 10, (0, 0, 2881, 1788)),
+                        z.ui_control.Window(':1', 11, (0, 0, 1024, 768))])
+        monkeypatch.setattr(z.ui_control, 'select_window', lambda _: next(windows))
+    elif failure == 'missing_state':
+        conn.lua_states = {}
+    elif failure == 'ambiguous_state':
+        conn.lua_states[5] = 'Options'
+    elif failure == 'disconnected':
+        conn.is_connected = False
+    else:
+        conn._locked_execute.side_effect = lambda _i, lua, _t: resolution_reply(lua)[:-1]
+    monkeypatch.setattr(z, 'require_active_display', AsyncMock())
+    monkeypatch.setattr(z, 'wait_for', AsyncMock(return_value=True))
+    host, key, click = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(z, 'phase', host)
+    monkeypatch.setattr(z, 'key', key)
+    monkeypatch.setattr(z, 'click', click)
+    opts = SimpleNamespace(artifacts=tmp_path, fresh_x=False, kill_first=False)
+    with pytest.raises(RuntimeError, match='window normalization failed'):
+        await z.run_arch1_session(opts)
+    host.assert_not_awaited()
+    key.assert_not_awaited()
+    click.assert_not_awaited()
+    conn.disconnect.assert_awaited_once()
+    record = json.loads(next(tmp_path.glob('window-normalization-*.json')).read_text())
+    assert record['status'] == 'failed'
+
+
+@pytest.mark.parametrize('stage', ['connect', 'apply', 'disconnect'])
+async def test_resolution_timeout_closes_connection_and_preserves_failed_diagnostic(
+        stage, resolution_fixture, tmp_path, monkeypatch):
+    conn = resolution_fixture
+    monkeypatch.setattr(z, 'WINDOW_NORMALIZE_S', 0.02)
+    monkeypatch.setattr(z, 'WINDOW_DISCONNECT_S', 0.02)
+    async def stall(*args):
+        await asyncio.Event().wait()
+    getattr(conn, {'connect': 'connect', 'apply': '_locked_execute',
+                   'disconnect': 'disconnect'}[stage]).side_effect = stall
+    with pytest.raises(RuntimeError, match='window normalization failed'):
+        await z.normalize_game_window(tmp_path)
+    conn.disconnect.assert_awaited_once()
+    record = json.loads(next(tmp_path.glob('window-normalization-*.json')).read_text())
+    assert record['status'] == 'failed'
+    assert 'TimeoutError' in str(record)
+
+
+async def test_second_launch_normalization_precedes_load_menu_inputs(tmp_path, monkeypatch):
+    saves = tmp_path / 'saves'
+    for name in ('Hotseat/auto/AutoSave_0001.Civ6Save', 'Hotseat/quick/quicksave.Civ6Save'):
+        path = saves / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'fixture')
+    monkeypatch.setattr(z, 'SAVES', saves)
+    monkeypatch.setattr(z.time, 'time', lambda: 0)
+    monkeypatch.setattr(z.asyncio, 'sleep', AsyncMock())
+    monkeypatch.setattr(z, 'require_active_display', AsyncMock())
+    monkeypatch.setattr(z, 'wait_for', AsyncMock(return_value=True))
+    normalize = AsyncMock(side_effect=[None, RuntimeError('normalization failed second menu')])
+    monkeypatch.setattr(z, 'normalize_game_window', normalize)
+    monkeypatch.setattr(z, 'phase', AsyncMock(return_value=SimpleNamespace(
+        stdout='InSession|true\nP0PW|\nP1PW|\n', returncode=11)))
+    monkeypatch.setattr(z, 'swap_save_into_load_slot', lambda *_: True)
+    kill, key, click = AsyncMock(), AsyncMock(), AsyncMock()
+    monkeypatch.setattr(z, 'kill_game', kill)
+    monkeypatch.setattr(z, 'launch', lambda *_: None)
+    monkeypatch.setattr(z, 'key', key)
+    monkeypatch.setattr(z, 'click', click)
+    with pytest.raises(RuntimeError, match='second menu'):
+        await z.run_arch1_session(SimpleNamespace(
+            artifacts=tmp_path, fresh_x=False, kill_first=False))
+    assert normalize.await_count == 2
+    kill.assert_awaited_once()  # only the required A1 save/load restart
+    assert [call.args for call in click.await_args_list] == [(0.50, 0.888), (0.50, 0.383)]
+    key.assert_awaited_once_with('Escape')  # quicksave menu, no second-menu Escape
+
+
+@pytest.mark.parametrize('variant, expected', [
+    ('success', 'ok'), ('false_apply', 'apply_failed'), ('missing_api', 'missing_options_api'),
+])
+def test_resolution_lua_executes_game_owned_api_without_saving(variant, expected, tmp_path):
+    executable = shutil.which('texlua')
+    if executable is None:
+        pytest.skip('texlua unavailable for executable Options fixture')
+    source = """
+local values = {RenderWidth=2881, RenderHeight=1788, FullScreen=2}
+ContextPtr = {GetID=function() return 'Options' end}
+Options = {
+  GetAppOption=function(_, name) return values[name] end,
+  SetAppOption=function(_, name, value) values[name]=value end,
+  GetAvailableDisplayModes=function() return {{Width=1024, Height=768}} end,
+  ApplyGraphicsOptions=function() return true end,
+  SaveOptions=function() error('must not persist settings') end
+}
+"""
+    if variant == 'false_apply':
+        source += 'Options.ApplyGraphicsOptions=function() return false end\n'
+    elif variant == 'missing_api':
+        source += 'Options=nil\n'
+    path = tmp_path / 'resolution.lua'
+    path.write_text(source + z.window_resolution_lua('abc'))
+    result = subprocess.run([executable, str(path)], capture_output=True, text=True,
+                            timeout=5, check=True)
+    observed = z.parse_window_resolution(result.stdout.splitlines(), 'abc')
+    assert observed['result'] == expected
+    if variant == 'success':
+        assert observed['before'] == [2881, 1788, 2]
+        assert observed['after'] == [1024, 768, 0]
+        assert observed['applied'] == 'true'
