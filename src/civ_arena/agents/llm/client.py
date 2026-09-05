@@ -74,7 +74,8 @@ def tool_uses(reply: ModelReply) -> list[dict[str, Any]]:
 
 class ModelClient(Protocol):
     async def create(self, *, system: str, messages: list[dict[str, Any]],
-                     tools: list[dict[str, Any]]) -> ModelReply: ...
+                     tools: list[dict[str, Any]],
+                     tool_choice: dict[str, Any] | None = None) -> ModelReply: ...
 
     async def aclose(self) -> None: ...
 
@@ -148,7 +149,8 @@ class MiniMaxMessagesClient:
         )
 
     async def create(self, *, system: str, messages: list[dict[str, Any]],
-                     tools: list[dict[str, Any]]) -> ModelReply:
+                     tools: list[dict[str, Any]],
+                     tool_choice: dict[str, Any] | None = None) -> ModelReply:
         url = self.spec.base_url.rstrip("/") + "/messages"
         body = {
             "model": self.spec.model_id,
@@ -157,6 +159,8 @@ class MiniMaxMessagesClient:
             "messages": messages,
             "tools": tools,
         }
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
         if self._http is None:
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.spec.request_timeout_s))
