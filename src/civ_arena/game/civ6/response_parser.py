@@ -475,6 +475,8 @@ def parse_reward_finish(lines: list[str], nonce: str, seq: int, player: int,
     pop = [r for r in ledger if r.split("|")[1:3] == ["city.growth", "city"]]
     if len(pop) != len(provenance):
         raise RuntimeError("unmatched commanded population row")
+    if obs[5] == "missing_consumption_event":
+        raise RuntimeError("consumed village lacked native event; reward attribution quarantined")
     provenance.append({"event": "GoodyHutReward", "command_nonce": nonce,
                        "observation": obs[5], "event_count": event_count,
                        "native_reward_type": reward_type, "native_reward_subtype": reward_subtype})
