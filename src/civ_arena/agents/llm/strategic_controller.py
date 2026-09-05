@@ -16,7 +16,7 @@ from typing import Any
 from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
-from civ_arena.agents.scouting import run_scouting
+from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
 from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
 from civ_arena.arena.referee import MatchAborted
 
@@ -55,6 +55,7 @@ class StrategicController:
     _last_decision: int = field(default=0, init=False)
     _previous: dict | None = field(default=None, init=False)
     _failed: bool = field(default=False, init=False)
+    _scouting_feedback: ScoutingFeedback = field(default_factory=ScoutingFeedback, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.match_id, str) or not self.match_id:
@@ -127,6 +128,9 @@ class StrategicController:
             await curator.refresh()
             frozen_ids = ({u['unit_id'] for u in curator.own('get_units')}
                           if self.opening_units_frozen else set())
+            feedback = self._scouting_feedback.begin_turn(
+                curator.state, player_id=runtime.profile.player_id, turn=turn,
+                completed_turn=self._last_turn)
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
             if reasons:
@@ -149,7 +153,8 @@ class StrategicController:
                 curator.state, directive=directive, player_id=runtime.profile.player_id,
                 match_id=self.match_id, agent_id=runtime.profile.agent_id, turn=turn,
                 execute=curator.execute, refresh=refresh, seed=runtime.profile.seed,
-                frozen_unit_ids=frozen_ids)
+                frozen_unit_ids=frozen_ids, nonprogress=feedback["suppressed"])
+            graph["nonprogress_feedback"] = feedback
             self._emit(runtime, 'strategy_graph', source='autopilot', graph=graph,
                        probability_meaning='seeded action selection; not calibrated success')
             await self._economy(runtime, curator, directive)
@@ -159,7 +164,9 @@ class StrategicController:
             await runtime._close_turn(facade)
             self._previous = self._facts(curator)
             self._last_turn = turn
-            self._emit(runtime, 'strategy_turn_closed', source='controller')
+            pending = self._scouting_feedback.remember_completed(graph, turn=turn)
+            self._emit(runtime, 'strategy_turn_closed', source='controller',
+                       scouting_pending_confirmation=pending)
             self._failed = False
         except ModelUnavailable as exc:
             self._emit(runtime, 'strategy_failed', reason='model_unavailable')

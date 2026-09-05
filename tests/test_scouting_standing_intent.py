@@ -78,9 +78,17 @@ async def test_assigned_scout_resumes_after_closure_or_expired_hold_without_mode
     second_calls = facade.calls[len(first_calls):]
     assert model.posts_sent - before_posts == 0
     assert model.posts_sent == 1
-    assert ("move_unit", "u0:1", "1,0") in second_calls
-    assert facade.units[0]["coord"] == "1,0"
-    assert facade.units[0]["fortified"] is False
+    moves = [call for call in second_calls if isinstance(call, tuple) and call[0] == "move_unit"]
+    if first_override == "move":
+        # This fixture knows only one adjacent tile. Its accepted first-turn
+        # request never arrived, so next-turn confirmation temporarily excludes
+        # it. Reactivation still occurs, then safely holds without blind replay.
+        assert not moves
+        assert facade.units[0]["coord"] == "0,0"
+    else:
+        assert moves == [("move_unit", "u0:1", "1,0")]
+        assert facade.units[0]["coord"] == "1,0"
+        assert facade.units[0]["fortified"] is False
     assert second_calls[-1] == "end_turn"
     second_graph = next(row["graph"] for row in audit
                         if row["audit"] == "strategy_graph" and row["turn"] == 2)
@@ -89,7 +97,7 @@ async def test_assigned_scout_resumes_after_closure_or_expired_hold_without_mode
     execution = second_graph["execution"][0]
     assert execution["before"]["fortified"] is True  # no fabricated observation
     assert execution["before"]["movement"] == 0
-    assert execution["after"]["coord"] == "1,0"
+    assert execution["after"]["coord"] == ("0,0" if first_override == "move" else "1,0")
 
 
 def test_unassigned_fortified_unit_keeps_existing_standing_order():
