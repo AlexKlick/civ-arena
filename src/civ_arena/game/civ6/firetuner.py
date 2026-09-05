@@ -752,14 +752,14 @@ class FireTunerAdapter:
                         lua_translator.freeze_unit(unit_id))
             raise
         if verdict["status"] == "rejected":
-            if reward_nonce is not None:
-                await self._conn.execute_read(
-                        lua_translator.cancel_reward_command(reward_nonce))
             if cmd.tool in _UNIT_TOOLS:
                 # undo the restore: re-freeze so the restored-but-unused
                 # movement never books as undeclared drift at release
                 await self._conn.execute_read(
                     lua_translator.freeze_unit(unit_id))
+            if reward_nonce is not None:
+                await self._conn.execute_read(
+                    lua_translator.cancel_reward_command(reward_nonce))
             return ActionResult(
                 status="rejected", result=verdict, mutations=(),
                 rejection=_rejection_value(verdict["rejection"]),

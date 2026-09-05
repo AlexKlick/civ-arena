@@ -282,3 +282,32 @@ async def test_final_move_missing_reward_event_cannot_reach_clean_end_phase():
         await adapter.end_phase(0, 60)
     adapter.end_phase.assert_not_awaited()
     assert adapter._phase_open == 0
+
+
+async def test_rejected_move_is_refrozen_even_when_reward_cancellation_fails():
+    adapter = FireTunerAdapter()
+    adapter._phase_open, adapter._turn_mirror = 0, 1
+    moves = 0
+
+    async def read(lua):
+        nonlocal moves
+        if 'BeginRewardCommand' in lua:
+            return [f"REWARD_BEGIN|{lua.split(chr(39))[1]}|accepted"]
+        if 'RestoreUnit' in lua:
+            moves = 2
+            return ['RESTORE_UNIT|0|10|restored']
+        if 'FreezeUnit' in lua:
+            moves = 0
+            return ['FROZEN|10']
+        if 'CancelRewardCommand' in lua:
+            assert moves == 0
+            raise TimeoutError('cancel failed')
+        raise AssertionError(lua)
+
+    adapter._conn = AsyncMock()
+    adapter._conn.execute_read.side_effect = read
+    adapter._conn.execute_write.return_value = ['ACT|move_unit|ERR|ILLEGAL_MOVE|blocked']
+    with pytest.raises(TimeoutError, match='cancel failed'):
+        await adapter.act(ActionCommand('move_unit', {'unit_id': 'u0:10', 'dest': '1,0'},
+                                       0, 'rejected', 'lease'))
+    assert moves == 0
