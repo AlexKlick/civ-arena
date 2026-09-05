@@ -382,3 +382,15 @@ def parse_act(lines: list[str]) -> dict[str, Any]:
     if row is None:
         raise ValueError(f"no ACT row in act response: {lines!r}")
     return row
+
+
+def parse_restore_receipt(lines: list[str], unit_id: str) -> str:
+    """Require one owner/full-ID-bound completion, including idempotent restore."""
+    owner, raw = entity_ids.decode(unit_id, "u")
+    rows = [line.strip() for line in _split_lines(lines)
+            if line.strip() and line.strip() != "---END---"]
+    prefix = f"RESTORE_UNIT|{owner}|{raw}|"
+    if len(rows) != 1 or rows[0] not in (
+            prefix + "restored", prefix + "already_restored", prefix + "unknown_entity"):
+        raise RuntimeError(f"invalid restore completion receipt for {unit_id}: {rows!r}")
+    return rows[0].removeprefix(prefix)

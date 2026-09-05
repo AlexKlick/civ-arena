@@ -45,7 +45,7 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.4"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.5"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and Puppeteer.supports_freeze and Puppeteer.supports_ledger
     and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
@@ -53,7 +53,7 @@ if type(Puppeteer) == "table" and Puppeteer.version == "0.3.4"
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.4"
+Puppeteer.version = "0.3.5"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -406,18 +406,20 @@ end
 -- turn. The once-only bound keeps each unit to its natural allowance.
 function Puppeteer.RestoreUnit(unitId, expectedPlayer)
     if lease == nil or lease.playerID ~= expectedPlayer then
-        return
+        return "wrong_lease"
     end
     if lease.restored == nil then lease.restored = {} end
     if lease.restored[unitId] then
-        return
+        return "already_restored"
     end
     local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
-    if unit ~= nil and unit:GetID() == unitId then
-        UnitManager.RestoreMovement(unit)
-        if not lease.preserve_attacks then UnitManager.RestoreUnitAttacks(unit) end
-        lease.restored[unitId] = true
+    if unit == nil or unit:GetID() ~= unitId then
+        return "unknown_entity"
     end
+    UnitManager.RestoreMovement(unit)
+    if not lease.preserve_attacks then UnitManager.RestoreUnitAttacks(unit) end
+    lease.restored[unitId] = true
+    return "restored"
 end
 
 -- v0.3: the undo for RestoreUnit when the command that followed was

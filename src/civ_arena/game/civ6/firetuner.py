@@ -413,8 +413,10 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
-        if doc["mod_version"] != "0.3.4":
-            raise RuntimeError("PuppeteerMod 0.3.4 required for owner-qualified entity IDs")
+        if doc["mod_version"] != "0.3.5":
+            raise RuntimeError(
+                "PuppeteerMod 0.3.5 required for owner-qualified IDs "
+                "and checked restore completion")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
@@ -711,13 +713,14 @@ class FireTunerAdapter:
                                     rejection=rejection,
                                     error="entity owner differs from acting seat")
         unit_id = cmd.args.get("unit_id")
-        if cmd.tool in _UNIT_TOOLS:
-            # unfreeze exactly this unit (the lease froze all of them at
-            # engagement; NEVER bulk-restore; once per unit per lease —
-            # mod-side, Codex P1-1)
-            await self._conn.execute_read(
-                lua_translator.restore_unit(unit_id))
         try:
+            if cmd.tool in _UNIT_TOOLS:
+                lines = await self._conn.execute_read(lua_translator.restore_unit(unit_id))
+                restored = response_parser.parse_restore_receipt(lines, unit_id)
+                if restored == "unknown_entity":
+                    await self._conn.execute_read(lua_translator.freeze_unit(unit_id))
+                    return ActionResult(status="rejected", result=None, mutations=(),
+                                        rejection="unknown_entity", error=unit_id)
             lua, ingame = builder(cmd.player_id, cmd.args)
             lines = await (self._conn.execute_write(lua) if ingame
                            else self._conn.execute_read(lua))
