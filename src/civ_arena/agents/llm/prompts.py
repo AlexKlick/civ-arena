@@ -71,3 +71,33 @@ def turn_header(turn: int, diary: str, memory: str = "") -> str:
         "Observe with your tools, act, keep goals and diary current, then "
         "call end_turn."
     )
+
+
+PACED_TURN_PROMPT = """Efficient live-turn play:
+- A fresh visible briefing is supplied before your first response. Use it to
+  choose useful accepted game actions immediately. Do not repeat its reads
+  unless information was omitted or an action changed the relevant state.
+- Put independent tool calls in one response; they execute in the listed order.
+  Batch orders for different known units/cities, but wait for results before
+  issuing actions that depend on a changed position, treasury, city, or research.
+- Reuse active goals and standing orders. Record only new or materially changed
+  goals; leave goal_id empty when creating a goal, and use returned ids to update.
+  Do not spend a separate model round restating the strategy header or diary.
+- Recall is optional: query only when it is available and an unresolved decision
+  needs earlier-match evidence. Never retry an unavailable recall tool.
+- Keep the selected research and production unless you have a reason to change
+  them. Use actual returned ids and coordinates; do not guess replacements.
+- Read rejection reasons and change the relevant plan; repeating the identical
+  failed request without new information will not fix it.
+- The live turn controller freezes units before observations. Zero movement in
+  the opening briefing can therefore be the controller's freeze, not movement
+  you already spent. Your first command for a unit may restore its normal
+  allowance once. Give useful orders and inspect results; do not assume every
+  zero-movement opening unit must idle, or that later actions refill it again.
+- Prioritize useful exploration, settlement, production, research, and combat.
+  Use fortify for deliberate defense or completeness, not as a substitute for
+  useful play. Complete the turn after orders and a short diary update.
+- The briefing and tools contain only your visible observations. Available
+  research/production lists are options, not proof that every action will pass
+  all execution-time checks. Missing map detail is not evidence of an empty tile.
+"""

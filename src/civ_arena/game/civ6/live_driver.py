@@ -659,7 +659,7 @@ async def _attach_initial_hotseat_turn(adapter, player: int, audit) -> None:
 async def phase_dispatch_hotseat(
     spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
     rounds: int, strategy: str, mod_lua: str, *,
-    limits: HotseatLimits | None = None, controller=None,
+    limits: HotseatLimits | None = None, controller=None, pace_llm_turns: bool = True,
 ) -> int:
     """Drive and account for two ordered, completed seats per engine turn."""
     _refuse_rerun(run_dir / "events.jsonl")
@@ -786,6 +786,7 @@ async def phase_dispatch_hotseat(
         identity = implementation_identity(spec, mod_lua)
         audit("run_identity", identity=identity, limits=asdict(limits),
               fake=adapter._simulate is not None,
+              llm_turn_pacing="visible_briefing_v1" if pace_llm_turns else "standard",
               movement_allowance=spec.declare_own_endpath_drift)
         if rounds <= 0:
             raise ValueError("rounds must be positive")
@@ -806,6 +807,12 @@ async def phase_dispatch_hotseat(
                     bind(**kwargs)
                 if hasattr(runtime, "telemetry"):
                     runtime.telemetry = driver.telemetry
+                configure_pacing = getattr(runtime, "configure_turn_pacing", None)
+                if pace_llm_turns and agent.policy == "llm" and configure_pacing is not None:
+                    recall_available = driver.referee.recall is not None
+                    configure_pacing(recall_available=recall_available)
+                    audit("turn_pacing", agent=agent.agent_id, mode="visible_briefing_v1",
+                          recall_available=recall_available)
                 client = getattr(runtime, "client", None)
                 if client is not None and hasattr(client, "on_post"):
                     client.on_post = lambda client=client, aid=agent.agent_id: audit(
@@ -904,6 +911,10 @@ async def phase_dispatch_hotseat(
             "informational_popups": popups.summary(),
             "limits": asdict(limits), "elapsed_s": time.monotonic() - began,
             "identity": identity, "movement_allowance": spec.declare_own_endpath_drift,
+            "turn_pacing": {s["agent"].agent_id: {
+                "enabled": bool(getattr(s["runtime"], "paced_turns", False)),
+                "recall_available": getattr(s["runtime"], "recall_available", None),
+            } for s in seats.values()},
             "request_usage": {s["agent"].agent_id: getattr(
                 getattr(s["runtime"], "client", None), "posts_sent", None)
                 for s in seats.values()},
@@ -1199,6 +1210,8 @@ def main() -> None:
     ap.add_argument("--agent-turn-timeout", type=float, default=600)
     ap.add_argument("--recovery-timeout", type=float, default=180)
     ap.add_argument("--recovery-sweeps", type=int, default=8)
+    ap.add_argument("--no-turn-pacing", action="store_true",
+                    help="use the standard LLM loop without the initial visible briefing")
     opts = ap.parse_args()
     spec = load_config(opts.config)
     mod_lua = opts.mod_path.read_text(encoding="utf-8")
@@ -1242,6 +1255,7 @@ async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
     if opts.phase == "dispatch-hotseat":
         return await phase_dispatch_hotseat(
             spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,
+            pace_llm_turns=not getattr(opts, "no_turn_pacing", False),
             limits=HotseatLimits(startup=opts.startup_timeout, match=opts.match_timeout,
                                  agent_turn=opts.agent_turn_timeout,
                                  recovery=opts.recovery_timeout, sweeps=opts.recovery_sweeps),
