@@ -130,6 +130,52 @@ post-load engine census remains the authority. Sixty-one focused checks passed,
 including deferred refresh, refused closure and repeated roster reset.
 [Roster regression checks](../runs/sixty-round-development-20260905/roster-focused.log).
 
+## Second live attempt and remaining blockers
+
+`minimax60-20260905T022327Z` at `e57c3e1` passed fresh startup in667.60seconds:
+the actual generated game had exactly two majors, both human after reflag,
+and mod0.3.4 passed the live capability check. Both MiniMax-M3 agents performed
+accepted actions. The run completed12 ordered seat turns (six rounds), then
+stopped in turn7 recovery after eight sweeps. Cleanup completed without errors;
+one MATCH_END matches summary, with the unreleased P0/turn7 lease explicit.
+Zero watchdog violations were recorded. Eight exact movement rows were admitted
+under the unchanged allowance. This is a failed60-round attempt.
+[Startup census](../runs/minimax60-20260905T022327Z-startup/major-census.json),
+[Event/summary analysis](../runs/sixty-round-live-20260905T022327Z/analysis.json).
+
+Completed turns averaged56.28seconds (median55.70), using86 requests; total
+usage including the unfinished turn was98 requests. First accepted actions
+averaged18.02seconds. The historical aborted six-seat run averaged51.99seconds
+per turn and21.91seconds to first action. Different game states and unequal
+samples prevent a controlled speedup claim; overall turns were not faster in
+this attempt. One boost popup was automatically observed hidden afterward.
+
+The turn7 screenshot showed a blocking scout-advice popup. The native seat
+switch was intentional; it did not establish a prematurely ended lease.
+This release build has no TutorialContinue action and ignores Return for that
+advisor, so the new handler targets the observed first OK button with pinned
+window identity and geometry, then checks visibility. A one-click diagnostic after MATCH_END observed the panel become hidden and
+the engine lease change fromP0/turn7inactive toP1/turn7active. The stopped run
+remains failed; this is separate host proof of the blocker and dismissal.
+[Postmortem dismissal and engine transition](../runs/sixty-round-live-20260905T022327Z/advisor-postmortem-close.json).
+[Blocking panel](../runs/sixty-round-live-20260905T022327Z/turn-seven-recovery.png),
+[Native advisor probes](../runs/sixty-round-live-20260905T022327Z/advisor-native-probe.log).
+
+Production requests were also being labeled rejected before the engine applied
+them, and GameCore queue reads falsely appeared empty. Subsequent InGame reads
+now confirm the requested hash before acceptance and expose actual city queues.
+A read-only host probe returned Egypt'sSLINGER and Sumeria'sSCOUT correctly.
+The standalone resolver uses the same bounded verifier and disconnects on error.
+[Actual queue read](../runs/sixty-round-live-20260905T022327Z/corrected-city-queue-read.log).
+
+The unit-restore helper had waited for missing output on every call. The next
+mod0.3.5 protocol emits checked owner/full-ID receipts plus a completion marker.
+It preserves once-per-turn restoration and refuses older mod versions before
+play. This removes a known wait path; its live speed effect remains unmeasured.
+Movement action receipts can still show the pre-operation position; truthful
+post-move projection remains a follow-up.
+[Restore evidence](../runs/sixty-round-development-20260905/restore-speed-evidence/).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
