@@ -7,13 +7,15 @@ reproduction inputs but are not a checkpoint restore implementation.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from civ_arena.agents.llm.client import ModelUnavailable, tool_uses
+from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
+from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.scouting import run_scouting
 from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
 from civ_arena.arena.referee import MatchAborted
@@ -166,57 +168,127 @@ class StrategicController:
             self._emit(runtime, 'strategy_failed', reason=type(exc).__name__)
             raise
 
+    @staticmethod
+    def _response_shape(reply: Any) -> tuple[dict, list[dict]]:
+        """Only bounded categorical metadata; never copy model prose, thinking, or args."""
+        known_tools = {tool['name'] for tool in TOOL_SCHEMAS} | {'submit_directive'}
+        known_blocks = {'text', 'thinking', 'redacted_thinking', 'tool_use'}
+        known_stops = {'end_turn', 'max_tokens', 'tool_use', 'stop_sequence',
+                       'pause_turn', 'refusal'}
+        blocks = reply.content if isinstance(reply.content, list) else []
+        counts: dict[str, int] = {}
+        uses = []
+        text_chars = 0
+        for block in blocks:
+            kind = block.get('type') if isinstance(block, dict) else None
+            kind = kind if isinstance(kind, str) and kind in known_blocks else 'other'
+            counts[kind] = counts.get(kind, 0) + 1
+            if kind == 'tool_use':
+                uses.append(block)
+            elif kind == 'text' and isinstance(block.get('text'), str):
+                text_chars += len(block['text'])
+        names = [use.get('name') if isinstance(use.get('name'), str)
+                 and use['name'] in known_tools else 'other' for use in uses[:16]]
+        stop = reply.stop_reason
+        return {'stop_reason': stop if isinstance(stop, str) and stop in known_stops else 'other',
+                'content_is_list': isinstance(reply.content, list), 'block_count': len(blocks),
+                'block_types': counts, 'tool_count': len(uses), 'tool_names': names,
+                'tool_names_omitted': max(0, len(uses) - len(names)),
+                'text_blocks': counts.get('text', 0), 'text_chars': text_chars}, uses
+
     async def _decide(self, runtime: Any, curator: ContextCurator,
                       reasons: list[str]) -> dict:
-        posts = getattr(runtime.client, 'posts_sent', 0)
-        if posts >= runtime.llm.max_requests_per_match or runtime.llm.max_tool_rounds < 1:
-            raise MatchAborted('strategic model request budget exhausted')
-        metadata = _encode({'turn': runtime._turn, 'player_id': runtime.profile.player_id,
-                            'reasons': reasons, 'previous_directive': self.directive,
-                            'movement_authority': {
-                                'opening_units_frozen': self.opening_units_frozen,
-                                'untouched_owned_unit_ids': sorted(
-                                    u['unit_id'] for u in curator.own('get_units'))
-                                    if self.opening_units_frozen else [],
-                                'natural_allowance': 'unobserved' if self.opening_units_frozen
-                                    else 'use_projected_movement',
-                                'legality': 'engine_checked_not_proven_by_this_metadata'}})
-        # The ENTIRE user content, including metadata and separators, shares the
-        # existing character cap. Never silently trim IDs or leave invalid JSON.
-        curator.budget = runtime.llm.max_result_chars - len(metadata) - 1
-        if curator.budget < 1:
-            raise MatchAborted('strategic metadata exceeds context budget')
-        context = metadata + '\n' + curator.render()
+        initial_posts = getattr(runtime.client, 'posts_sent', 0)
+        metadata = {'turn': runtime._turn, 'player_id': runtime.profile.player_id,
+                    'reasons': reasons, 'previous_directive': self.directive,
+                    'movement_authority': {
+                        'opening_units_frozen': self.opening_units_frozen,
+                        'untouched_owned_unit_ids': sorted(
+                            u['unit_id'] for u in curator.own('get_units'))
+                            if self.opening_units_frozen else [],
+                        'natural_allowance': 'unobserved' if self.opening_units_frozen
+                            else 'use_projected_movement',
+                        'legality': 'engine_checked_not_proven_by_this_metadata'}}
         schema = {'name': 'submit_directive',
                   'description': 'Submit one strategy; tactical overrides expire this turn.',
                   'input_schema': DIRECTIVE_SCHEMA}
-        reply = await runtime.client.create(system=SYSTEM,
-                                            messages=[{'role': 'user', 'content': context}],
-                                            tools=[schema])
-        runtime._report_usage(reply)
-        uses = tool_uses(reply)
-        if (reply.stop_reason == 'max_tokens' or len(uses) != 1
-                or any(block.get('type') == 'text'
-                       and (not isinstance(block.get('text', ''), str)
-                            or block.get('text', '').strip())
-                       for block in reply.content)
-                or uses[0].get('name') != 'submit_directive'):
-            raise MatchAborted('model must submit exactly one complete strategic directive')
-        value = uses[0].get('input')
-        try:
-            if len(_encode(value)) > runtime.llm.max_result_chars:
-                raise ValueError('directive exceeds result budget')
-            directive = validate_directive(
-                value, player_id=runtime.profile.player_id,
-                owned_unit_ids={u['unit_id'] for u in curator.own('get_units')})
-        except (ValueError, TypeError) as exc:
-            raise MatchAborted(f'invalid strategic directive: {exc}') from exc
-        self._emit(runtime, 'strategy_decision', source='model', reasons=reasons,
-                   directive=directive, model=reply.model,
-                   input_tokens=reply.input_tokens, output_tokens=reply.output_tokens,
-                   context_chars=len(context),
-                   posts_attempted=getattr(runtime.client, 'posts_sent', posts) - posts)
-        return directive
+        # One normal attempt plus at most one format repair, both charged to the
+        # existing turn/request caps. Client transport retries still count every POST.
+        limit = min(2, runtime.llm.max_tool_rounds)
+        if limit < 1:
+            raise MatchAborted('strategic model request budget exhausted')
+        usage_in = usage_out = 0
+        for attempt in range(1, limit + 1):
+            posts = getattr(runtime.client, 'posts_sent', 0)
+            if posts >= runtime.llm.max_requests_per_match:
+                raise MatchAborted('strategic model request budget exhausted before format attempt')
+            encoded_metadata = _encode(metadata)
+            # Re-budget the complete fresh request INCLUDING repair metadata.
+            # Invalid assistant content is discarded, never echoed or interpreted.
+            curator.budget = runtime.llm.max_result_chars - len(encoded_metadata) - 1
+            if curator.budget < 1:
+                raise MatchAborted('strategic metadata exceeds context budget')
+            context = encoded_metadata + '\n' + curator.render()
+            self._emit(runtime, 'strategy_request', attempt=attempt,
+                       named_tool='submit_directive', user_context=context,
+                       context_sha256=hashlib.sha256(context.encode('utf-8')).hexdigest(),
+                       context_chars=len(context))
+            reply = await runtime.client.create(
+                system=SYSTEM, messages=[{'role': 'user', 'content': context}], tools=[schema],
+                tool_choice={'type': 'tool', 'name': 'submit_directive'})
+            runtime._report_usage(reply)
+            usage_in += reply.input_tokens
+            usage_out += reply.output_tokens
+            shape, uses = self._response_shape(reply)
+            category, reason = 'invalid_shape', 'tool_count'
+            directive = None
+            if reply.stop_reason == 'max_tokens':
+                reason = 'truncated'
+            elif len(uses) == 1:
+                if uses[0].get('name') != 'submit_directive':
+                    reason = 'wrong_tool'
+                else:
+                    category, reason = 'invalid_args', 'schema_or_ownership'
+                    value = uses[0].get('input')
+                    try:
+                        if len(_encode(value)) > runtime.llm.max_result_chars:
+                            reason = 'arguments_oversized'
+                        else:
+                            directive = validate_directive(
+                                value, player_id=runtime.profile.player_id,
+                                owned_unit_ids={u['unit_id'] for u in curator.own('get_units')})
+                    except (ValueError, TypeError, OverflowError, RecursionError):
+                        # Validation exceptions may contain model values. Use only
+                        # fixed categories in durable diagnostics and repair prompts.
+                        reason = 'schema_or_ownership'
+                    if directive is not None:
+                        category, reason = 'valid', 'complete_directive'
+            repair_available = (directive is None and attempt < limit
+                                and getattr(runtime.client, 'posts_sent', 0)
+                                < runtime.llm.max_requests_per_match)
+            self._emit(runtime, 'strategy_response_shape', attempt=attempt, category=category,
+                       reason=reason, shape=shape, input_tokens=reply.input_tokens,
+                       output_tokens=reply.output_tokens, context_chars=len(context),
+                       posts_attempted=getattr(runtime.client, 'posts_sent', posts) - posts,
+                       repair_available=repair_available)
+            if directive is not None:
+                self._emit(runtime, 'strategy_decision', source='model', reasons=reasons,
+                           directive=directive, model=reply.model,
+                           input_tokens=usage_in, output_tokens=usage_out,
+                           context_chars=len(context), format_attempts=attempt,
+                           posts_attempted=getattr(runtime.client, 'posts_sent', initial_posts)
+                           - initial_posts)
+                return directive
+            if not repair_available:
+                raise MatchAborted(f'strategic directive rejected: {category}/{reason}; '
+                                   'no format repair budget remains')
+            metadata['format_repair'] = {
+                'attempt': 2, 'previous_category': category, 'previous_reason': reason,
+                'instruction': 'Return exactly one complete submit_directive tool call '
+                               'matching its schema and the currently owned IDs. '
+                               'No game action has been executed. '
+                               'This is the final format attempt.'}
+        raise MatchAborted('strategic directive format attempts exhausted')
 
     async def _economy(self, runtime: Any, curator: ContextCurator, directive: dict) -> None:
         """One attempt per empty queue; preferences never replace an active build."""

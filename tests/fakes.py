@@ -32,12 +32,14 @@ class FakeModel:
     on_post: Any = None  # mirrors the real client's durable-spend hook
 
     async def create(self, *, system: str, messages: list[dict],
-                     tools: list[dict]) -> ModelReply:
+                     tools: list[dict], tool_choice: dict | None = None) -> ModelReply:
         self.requests.append({
             "system": system,
             "messages": [dict(m) for m in messages],
             "tools": tools,
         })
+        if tool_choice is not None:
+            self.requests[-1]['tool_choice'] = dict(tool_choice)
         self.posts_sent += 1
         if self.on_post is not None:
             self.on_post()

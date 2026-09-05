@@ -1,6 +1,8 @@
 """Controller request cadence, fresh-only custody, and honest closure; no network."""
 import copy
+import hashlib
 import json
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -138,7 +140,7 @@ async def test_owned_override_one_turn_only_foreign_override_before_action(setup
     assert not scout.await_args.kwargs['directive']['tactical_overrides']
     model.script = [[use('submit_directive', {'tactical_overrides': [
         {'unit_id': 'u1:1', 'action': 'hold'}]})]]
-    with pytest.raises(MatchAborted, match='currently owned'):
+    with pytest.raises(MatchAborted, match='invalid_args/schema_or_ownership'):
         await advance(controller, runtime, facade, 3, tactical_requested=True)
     assert scout.await_count == 2
     assert facade.calls.count('end_turn') == 2
@@ -146,20 +148,19 @@ async def test_owned_override_one_turn_only_foreign_override_before_action(setup
 
 @pytest.mark.parametrize('blocks', [[text('done')], [use('get_units')],
                                   [use('submit_directive'), use('submit_directive')],
-                                  [use('submit_directive', {'unknown': 1})],
-                                  [text('narration'), use('submit_directive')]])
+                                  [use('submit_directive', {'unknown': 1})]])
 async def test_invalid_model_response_bounded_no_actions_or_closure(setup, blocks):
     controller, runtime, model, facade, records, scout = setup
     model.script = [blocks]
     with pytest.raises(MatchAborted):
         await advance(controller, runtime, facade, 1)
-    assert model.posts_sent == 1
+    assert model.posts_sent == 2
     assert scout.await_count == 0
     assert 'end_turn' not in facade.calls
     assert records[-1]['audit'] == 'strategy_failed'
     with pytest.raises(MatchAborted, match='previously failed'):
         await advance(controller, runtime, facade, 1)
-    assert model.posts_sent == 1
+    assert model.posts_sent == 2
 
 
 async def test_request_budget_no_post(setup):
@@ -184,9 +185,10 @@ async def test_truncated_tool_response_rejected(setup):
     controller, runtime, model, facade, records, scout = setup
     model.create = AsyncMock(return_value=ModelReply([use('submit_directive')],
                                                     'max_tokens', 'fake', 10, 10))
-    with pytest.raises(MatchAborted, match='complete strategic directive'):
+    with pytest.raises(MatchAborted, match='invalid_shape/truncated'):
         await advance(controller, runtime, facade, 1)
     assert not scout.await_count
+    assert model.create.await_count == 2
 
 
 async def test_closure_repair_once_and_repeated_failure_honest(setup):
@@ -295,12 +297,171 @@ async def test_frozen_opening_authority_is_truthful_and_shares_whole_context_cap
     assert 'ordinary zero remains observed spent movement' in request['system']
 
 
-@pytest.mark.parametrize('malformed', [None, False, {}, 42])
-async def test_malformed_text_block_is_bounded_match_abort(setup, malformed):
+@pytest.mark.parametrize('auxiliary', [text('I will execute the strategy now.'),
+    {'type': 'thinking', 'thinking': 'private reasoning'},
+    {'type': 'redacted_thinking', 'data': 'private'}, {'type': 'text', 'text': None}])
+async def test_valid_directive_discards_auxiliary_content_without_repair(setup, auxiliary):
     controller, runtime, model, facade, records, scout = setup
-    model.script = [[{'type': 'text', 'text': malformed}, use('submit_directive')]]
-    with pytest.raises(MatchAborted, match='one complete strategic directive'):
-        await advance(controller, runtime, facade, 1)
+    model.script = [[auxiliary, use('submit_directive')]]
+    await advance(controller, runtime, facade, 1)
     assert model.posts_sent == 1
-    assert not scout.await_count
-    assert 'end_turn' not in facade.calls
+    assert scout.await_count == 1
+    assert facade.calls[-1] == 'end_turn'
+    shape = next(r for r in records if r['audit'] == 'strategy_response_shape')
+    assert shape['category'] == 'valid' and shape['attempt'] == 1
+
+
+@pytest.mark.parametrize('bad,stop,category,reason', [
+    ([text('I am done')], 'end_turn', 'invalid_shape', 'tool_count'),
+    ([use('submit_directive'), use('submit_directive')], 'tool_use', 'invalid_shape', 'tool_count'),
+    ([use('move_unit', {'unit_id': 'u0:1', 'dest': '1,0'})], 'tool_use',
+     'invalid_shape', 'wrong_tool'),
+    ([use('submit_directive')], 'max_tokens', 'invalid_shape', 'truncated'),
+    ([use('submit_directive', {'wrong_key': 'private argument'})], 'tool_use',
+     'invalid_args', 'schema_or_ownership'),
+    ([use('submit_directive', {'tactical_overrides': [{'unit_id': 'u1:9', 'action': 'hold'}]})],
+     'tool_use', 'invalid_args', 'schema_or_ownership'),
+])
+async def test_one_fresh_format_repair_before_any_game_action(setup, bad, stop, category, reason):
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [bad, [use('submit_directive', {'version': 1})]]
+    create = model.create
+    async def checked_create(**kwargs):
+        assert not scout.await_count
+        assert 'end_turn' not in facade.calls
+        assert not any(isinstance(c, tuple) for c in facade.calls)
+        reply = await create(**kwargs)
+        return replace(reply, stop_reason=stop) if model.posts_sent == 1 else reply
+    model.create = checked_create
+    await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2 and scout.await_count == 1
+    assert all(req['tool_choice'] == {'type': 'tool', 'name': 'submit_directive'}
+               for req in model.requests)
+    assert all(len(req['messages']) == 1 and req['messages'][0]['role'] == 'user'
+               for req in model.requests)
+    shapes = [r for r in records if r['audit'] == 'strategy_response_shape']
+    assert [(r['attempt'], r['category']) for r in shapes] == [(1, category), (2, 'valid')]
+    assert shapes[0]['reason'] == reason and shapes[0]['repair_available']
+    metadata = json.loads(model.requests[1]['messages'][0]['content'].split('\n', 1)[0])
+    assert metadata['format_repair']['previous_category'] == category
+    assert metadata['format_repair']['attempt'] == 2
+    assert 'private argument' not in json.dumps(model.requests[1])
+    decision = next(r for r in records if r['audit'] == 'strategy_decision')
+    assert decision['format_attempts'] == decision['posts_attempted'] == 2
+    assert decision['input_tokens'] == 20 and decision['output_tokens'] == 40
+
+
+@pytest.mark.parametrize('cap', ['turn', 'posts'])
+async def test_repair_respects_turn_and_global_post_limits(setup, cap):
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [[text('no directive')]]
+    runtime.llm = replace(runtime.llm, **({'max_tool_rounds': 1} if cap == 'turn'
+                                        else {'max_requests_per_match': 1}))
+    with pytest.raises(MatchAborted, match='no format repair budget remains'):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 1 and not scout.await_count
+    shape = next(r for r in records if r['audit'] == 'strategy_response_shape')
+    assert not shape['repair_available']
+
+
+async def test_retry_posts_are_spent_before_repair_budget_check(setup):
+    controller, runtime, model, facade, records, scout = setup
+    runtime.llm = replace(runtime.llm, max_requests_per_match=3)
+    async def client_retried(**kwargs):
+        model.posts_sent += 3
+        return ModelReply([text('no directive')], 'end_turn', 'fake', 10, 10)
+    model.create = AsyncMock(side_effect=client_retried)
+    with pytest.raises(MatchAborted, match='no format repair budget remains'):
+        await advance(controller, runtime, facade, 1)
+    assert model.create.await_count == 1 and model.posts_sent == 3
+    shape = next(r for r in records if r['audit'] == 'strategy_response_shape')
+    assert shape['posts_attempted'] == 3 and not scout.await_count
+
+
+async def test_both_fresh_contexts_cap_includes_repair_metadata(setup):
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [[text('x' * 12000)], [use('submit_directive')]]
+    await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2
+    for req in model.requests:
+        content = req['messages'][0]['content']
+        assert len(content) <= runtime.llm.max_result_chars
+        metadata, state = content.split('\n', 1)
+        assert json.loads(metadata)['turn'] == 1
+        assert '"own_units"' in state
+        assert 'x' * 100 not in content
+    assert 'format_repair' not in model.requests[0]['messages'][0]['content']
+    assert 'format_repair' in model.requests[1]['messages'][0]['content']
+
+
+async def test_shape_audit_is_durable_canonical_and_never_copies_model_secrets(setup, tmp_path):
+    from civ_arena.agents.runtime import strategy_audit_event
+    from civ_arena.arena.events import EventLog
+    from civ_arena.canonical import log_prefix_hash
+    from civ_arena.game.civ6.live_driver import LiveDriver
+    controller, runtime, model, facade, records, scout = setup
+    secret = 'private-response-secret'
+    model.script = [[text(secret), {'type': 'thinking', 'thinking': secret},
+                     use(secret, {'password': secret})]]
+    original = model.create
+    async def secret_stop(**kwargs):
+        return replace(await original(**kwargs), stop_reason=secret)
+    model.create = secret_stop
+    log = EventLog(tmp_path / 'events.jsonl')
+    driver = object.__new__(LiveDriver)
+    driver.spec = type('Spec', (), {'match_id': 'm'})()
+    driver.game_instance_id = 'i'
+    driver.log = log
+    # Use the same durable canonical-safe wrapper as both coordinator lanes.
+    from civ_arena.game.civ6.live_driver import _strategic_audit
+    def audit(payload):
+        records.append(payload)
+        _strategic_audit(driver, payload)
+    controller.audit = audit
+    with pytest.raises(MatchAborted, match='invalid_shape/wrong_tool'):
+        await advance(controller, runtime, facade, 1)
+    log.close()
+    rows = log.records()
+    assert len(log_prefix_hash(rows)) == 64
+    assert secret not in (tmp_path / 'events.jsonl').read_text()
+    assert secret not in json.dumps(model.requests[1])
+    shapes = [r for r in records if r['audit'] == 'strategy_response_shape']
+    assert len(shapes) == 2
+    assert shapes[0]['shape']['tool_names'] == ['other']
+    assert shapes[0]['shape']['stop_reason'] == 'other'
+    assert shapes[0]['shape']['text_chars'] == len(secret)
+    assert shapes[0]['shape']['block_types'] == {'text': 1, 'thinking': 1, 'tool_use': 1}
+    assert 'strategy_payload_json' in strategy_audit_event(shapes[0])
+    assert not scout.await_count and 'end_turn' not in facade.calls
+
+
+async def test_oversized_invalid_args_are_categorized_without_copying(setup):
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [[use('submit_directive', {'unexpected': 'x' * 9000})]]
+    with pytest.raises(MatchAborted, match='invalid_args/arguments_oversized'):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2
+    assert all(r['reason'] == 'arguments_oversized' for r in records
+               if r['audit'] == 'strategy_response_shape')
+    assert 'x' * 100 not in json.dumps(records)
+
+
+@pytest.mark.parametrize('repair', [False, True])
+async def test_exact_projected_request_is_audited_before_each_model_call(setup, repair):
+    controller, runtime, model, facade, records, scout = setup
+    model.script = ([[text('repair needed')]] if repair else []) + [[use('submit_directive')]]
+    original = model.create
+    async def checked_create(**kwargs):
+        request = records[-1]
+        assert request['audit'] == 'strategy_request'
+        assert request['attempt'] == model.posts_sent + 1
+        context = kwargs['messages'][0]['content']
+        assert request['user_context'] == context
+        assert request['context_chars'] == len(context) <= runtime.llm.max_result_chars
+        assert request['context_sha256'] == hashlib.sha256(context.encode('utf-8')).hexdigest()
+        assert request['named_tool'] == kwargs['tool_choice']['name'] == 'submit_directive'
+        assert '"own_units"' in context and '"unit_id":"u0:1"' in context
+        return await original(**kwargs)
+    model.create = checked_create
+    await advance(controller, runtime, facade, 1)
+    assert len([r for r in records if r['audit'] == 'strategy_request']) == (2 if repair else 1)
