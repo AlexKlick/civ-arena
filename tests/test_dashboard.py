@@ -236,7 +236,8 @@ def test_malformed_run_payload_does_not_poison_healthy_inventory(tmp_path, confi
     assert 'healthy' in inventory
 
 
-def test_strategy_audit_keeps_seats_distinct_and_does_not_count_plans_as_actions(tmp_path, monkeypatch):
+def test_strategy_audit_keeps_seats_distinct_and_does_not_count_plans_as_actions(
+        tmp_path, monkeypatch):
     monkeypatch.setenv('EXAMPLE_API_KEY', 'strategy-private-value')
     graph = {'decisions': [{'unit_id': 'u0:7', 'candidates': [
         {'dest': {'q': 1, 'r': 2}, 'probability': 0.75, 'score': 3.5}],
