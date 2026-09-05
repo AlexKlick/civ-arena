@@ -193,10 +193,12 @@ def test_native_handoff_emits_no_unsolicited_rows_into_ledger_reply(run_mod):
 Puppeteer.SetPuppet(0,true)
 Puppeteer.SetPuppet(1,true)
 Puppeteer.AttachCurrentTurn(0,1)
-Puppeteer.Release(0,1)
 print('RESPONSE_BEGIN')
+hooks.deactivated(0)
+assert(string.find(Puppeteer.Status(), 'PUPPET_ACTIVE|false', 1, true))
 -- Reproduce the live handoff race: the native hook fires after Release
--- and before DumpLedger. Only the requested ledger terminator may print.
+-- and before DumpLedger. Deactivation must also be silent. Only the
+-- requested ledger terminator may print.
 currentTurn=2
 hooks.activated(1,true)
 hooks.start(1)

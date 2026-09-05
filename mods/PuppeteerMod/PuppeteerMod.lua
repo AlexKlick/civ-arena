@@ -393,10 +393,12 @@ function Puppeteer.AttachCurrentTurn(expectedPlayer, expectedTurn)
     report("accepted", "acquired")
 end
 
+local release_lease  -- shared silent transition; explicit RPC wrapper prints its receipt
+
 local function OnPlayerTurnDeactivated(playerID)
     trace("HOOK_DEACT|" .. tostring(playerID))
     if PUPPET_PLAYERS[playerID] then
-        Puppeteer.Release(playerID, Game.GetCurrentGameTurn())
+        release_lease(playerID, Game.GetCurrentGameTurn())
     end
 end
 
@@ -500,7 +502,7 @@ function Puppeteer.DiffSinceLast(attrCsv, seq)
     return diff_cache
 end
 
-function Puppeteer.Release(playerID, turn)
+release_lease = function(playerID, turn)
     -- Re-diff from the ROLLING baseline (v0.3): anything no command ever
     -- covered lands in the command ledger as an undeclared actual — the
     -- watchdog flags it.
@@ -516,6 +518,10 @@ function Puppeteer.Release(playerID, turn)
         lease = nil
         diff_cache = nil
     end
+end
+
+function Puppeteer.Release(playerID, turn)
+    release_lease(playerID, turn)
     print("PUPPET_ACTIVE|" .. boolstr(lease ~= nil))
     print("---END---")
 end
