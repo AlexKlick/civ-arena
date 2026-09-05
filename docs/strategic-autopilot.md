@@ -175,6 +175,10 @@ after a failed controller turn are refused. An audit graph is not a checkpoint.
 
 ## Next concrete milestones
 
+The [installed-source survey and first extraction slice](dependency-catalog-next-step.md)
+binds actual source files, hashes and unresolved prerequisite semantics. It is
+an implementation-ready next step, not an effective-ruleset export or forecast.
+
 The existing [event-derived graph](../src/civ_arena/graph/projection.py) stores
 claims, observations, references, and outcomes. The existing
 [option planner](../src/civ_arena/planner/search.py) performs short searches in

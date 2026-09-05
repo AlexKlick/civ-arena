@@ -392,6 +392,48 @@ that configuration and `--rounds 30`, with distinct run IDs and the same reviewe
 implementation. Both must independently satisfy the structural and live gates;
 one longer run cannot substitute for two fresh starts.
 
+## Third strategic live attempt: unaccounted population change
+
+Fresh run `minimax60-20260905T052156Z` used clean commit `503478c` and mod
+0.3.7. It completed 42 correctly ordered, released seat turns: 21 rounds.
+Fourteen MiniMax-M3 requests were recorded, seven per seat. The new response
+boundary handled one valid directive with auxiliary prose and three text-only
+responses that each succeeded on the single format retry. All fourteen saved
+request contexts match their SHA256 and character counts; the largest was
+5,471 characters. Nine informational popups were observed dismissed in 132
+checks. There were no recovery input attempts.
+[Independent final audit](../runs/60-round-live-20260905T052156Z/final-independent-audit.json).
+
+The run failed with one watchdog violation: city `c1:65536` grew from population
+three to four. Although reported during final turn accounting and labeled
+`recovery`, the growth was already visible during the active player-one turn
+21, immediately after scout `u1:327683` moved and before any handoff. The
+single `MATCH_END` matches the failed summary, the coordinator lease is closed,
+and cleanup completed without errors. A later read-only postmortem observed
+the engine's next player-zero turn-22 lease; this does not change the summary's
+explicitly cached final observation or make the failed match complete.
+[Exact chronology](../runs/60-round-live-20260905T052156Z/growth-boundary-summary.log).
+
+The installed rules include a tribal-village reward that adds one population to
+the nearest city. The engine exposes a reward event identifying player, unit,
+reward type and subtype. That is a plausible explanation for this move's growth,
+but the failed run did not retain the causal event. An exact command-scoped
+reward receipt is required before treating such growth as a commanded effect;
+there is no new population or gold drift allowance.
+[Installed source evidence](../runs/60-round-live-20260905T052156Z/goody-native-source.log),
+[read-only event capability probe](../runs/60-round-live-20260905T052156Z/poststop-reward-capabilities.json).
+
+The existing own-unit movement allowance admitted 90 exact `unit.moves` rows,
+34 for player zero and 56 for player one, across all 42 completed-turn audits.
+The unmatched population row remains a violation. Accepted gameplay submissions
+were 51 and 104 respectively; these counts are not proof of movement or useful
+strategy. Browser proof captured both directives and quiet-turn candidate graphs
+at six completed seats, including an observed player-one movement and an
+unchanged player-zero position. The scouting follow-up now distinguishes those
+outcomes and temporarily avoids confirmed ineffective destinations.
+[Scouting feedback contract](scouting-nonprogress-feedback.md),
+[actual browser evidence](../runs/60-round-live-20260905T052156Z/browser-proof/).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
