@@ -74,6 +74,28 @@ async def test_fake_never_spawns(monkeypatch):
     assert (await ui.FakeController().action(key='Return')).status == 'skipped_fake'
 
 
+@pytest.mark.parametrize('changed', [
+    ui.Window(':1', 17, (10,20,800,600)), ui.Window(':1',16,(15,20,800,600)),
+    ui.Window(':1',16,(10,20,1024,768)),
+])
+def test_ui_geometry_target_never_rebases_after_frame_change(monkeypatch, changed):
+    expected=ui.Window(':1',16,(10,20,800,600))
+    monkeypatch.setattr(ui,'select_window',lambda _:changed)
+    monkeypatch.setattr(ui,'capture',lambda _:pytest.fail('wrong frame capture'))
+    monkeypatch.setattr(ui,'send',lambda *a,**kw:pytest.fail('stale coordinates clicked'))
+    assert ui.perform(at=(0.5,0.5),expected_window=expected).status=='failed'
+
+
+def test_ui_geometry_target_refuses_resize_during_capture(monkeypatch):
+    expected=ui.Window(':1',16,(10,20,800,600))
+    frames=iter([expected,expected,replace(expected,geometry=(10,20,1024,768)),
+                 replace(expected,geometry=(10,20,1024,768))])
+    monkeypatch.setattr(ui,'select_window',lambda _:next(frames))
+    monkeypatch.setattr(ui,'capture',lambda _:b'pixels')
+    monkeypatch.setattr(ui,'send',lambda *a,**kw:pytest.fail('stale coordinates clicked'))
+    assert ui.perform(at=(0.5,0.5),expected_window=expected).status=='failed'
+
+
 async def test_missing_display():
     result = await ui.Controller('').action(key='Return')
     assert result.status == 'failed'

@@ -29,6 +29,12 @@ class PopupMonitor:
         async with self.lock:
             pass
 
+    def _record_check(self, result):
+        self.checks += 1
+        if result["status"] == "sent" or result.get("input", {}).get("status") == "sent":
+            self.sent += 1
+        self.audit("popup_check", result=result)
+
     async def check(self, active=lambda: True):
         async with self.lock:
             if not active():
@@ -41,14 +47,19 @@ class PopupMonitor:
             remaining = (self.timeout if self.started is None else
                          self.timeout - (time.monotonic() - self.started))
             checked_at = time.monotonic()
-            async with asyncio.timeout(min(10.0, remaining)):
-                result = await ui_popups.dismiss_one(self.adapter)
-            self.checks += 1
-            self.audit("popup_check", result=result)
+            try:
+                async with asyncio.timeout(min(10.0, remaining)):
+                    result = await ui_popups.dismiss_one(self.adapter, controller=self.controller)
+            except (asyncio.CancelledError, TimeoutError) as exc:
+                receipt = (getattr(exc, "popup_outcome", None)
+                           or getattr(exc.__cause__, "popup_outcome", None))
+                if receipt is not None:
+                    self._record_check(receipt)
+                raise
+            self._record_check(result)
             if result["status"] == "failed":
                 raise RuntimeError(f"informational popup helper failed: {result['diagnostics']}")
             if result["status"] == "sent":
-                self.sent += 1
                 popup = result["popup"]
                 if popup != self.pending:
                     self.pending, self.started, self.attempts = popup, checked_at, 0

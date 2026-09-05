@@ -10,7 +10,8 @@ from civ_arena.game.civ6.ui_control import FakeController
 
 def monitor(monkeypatch, result, **kwargs):
     calls = []
-    async def dismiss(adapter):
+    async def dismiss(adapter, *, controller):
+        assert isinstance(controller, FakeController)
         calls.append(adapter)
         return result
     monkeypatch.setattr(spectator.ui_popups, 'dismiss_one', dismiss)
@@ -53,7 +54,7 @@ async def test_helper_failure_and_deadline_abort(monkeypatch):
     with pytest.raises(RuntimeError, match='bad UI response'):
         await m.check()
     entered = asyncio.Event()
-    async def stalled(adapter):
+    async def stalled(adapter, *, controller):
         entered.set()
         await asyncio.Event().wait()
     monkeypatch.setattr(spectator.ui_popups, 'dismiss_one', stalled)
@@ -79,7 +80,7 @@ async def test_monitor_closes_during_agent_wait_and_stops_when_cancelled(monkeyp
 async def test_recovery_input_and_popup_close_are_serialized(monkeypatch):
     m, _ = monitor(monkeypatch, sent())
     started, release = asyncio.Event(), asyncio.Event()
-    async def dismiss(adapter):
+    async def dismiss(adapter, *, controller):
         started.set()
         await release.wait()
         return sent(hidden=True)

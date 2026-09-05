@@ -163,11 +163,15 @@ def send(window: Window, *, key: str | None = None,
 
 def perform(*, display: str = ":1", key: str | None = None,
             at: tuple[float, float] | None = None, banner: bool = False,
-            evidence: Path | None = None) -> Outcome:
+            evidence: Path | None = None, expected_window: Window | None = None) -> Outcome:
     try:
         original = select_window(display)
+        if expected_window is not None and original != expected_window:
+            raise FrameChanged("target frame changed since UI geometry observation")
         for _ in range(3):
             window = select_window(display)
+            if expected_window is not None and window != expected_window:
+                raise FrameChanged("target frame changed since UI geometry observation")
             if window.window_id != original.window_id:
                 raise RuntimeError("target window identity changed")
             png = capture(window)
@@ -199,7 +203,8 @@ class Controller:
 
     async def action(self, *, key: str | None = None, banner: bool = False,
                      at: tuple[float, float] | None = None,
-                     timeout: float = 15, evidence: Path | None = None) -> Outcome:
+                     timeout: float = 15, evidence: Path | None = None,
+                     expected_window: Window | None = None) -> Outcome:
         args = [sys.executable, "-m", "civ_arena.game.civ6.ui_control",
                 "--display", self.display]
         if key is not None:
@@ -210,6 +215,8 @@ class Controller:
             args += ["--at", ",".join(map(str, at))]
         if evidence is not None:
             args += ["--evidence", str(evidence)]
+        if expected_window is not None:
+            args += ["--expected-window", json.dumps(asdict(expected_window))]
         proc = None
         try:
             async with asyncio.timeout(timeout):
@@ -341,10 +348,15 @@ def main() -> int:
     group.add_argument("--at")
     group.add_argument("--banner", action="store_true")
     ap.add_argument("--evidence", type=Path)
+    ap.add_argument("--expected-window", help="JSON identity/geometry from the UI target read")
     opts = ap.parse_args()
+    expected = None
+    if opts.expected_window:
+        record = json.loads(opts.expected_window)
+        expected = Window(record['display'], record['window_id'], tuple(record['geometry']))
     result = perform(display=opts.display, key=opts.key, banner=opts.banner,
                      at=tuple(map(float, opts.at.split(","))) if opts.at else None,
-                     evidence=opts.evidence)
+                     evidence=opts.evidence, expected_window=expected)
     print(json.dumps(asdict(result)))
     return 1 if result.status == "failed" else 0
 
