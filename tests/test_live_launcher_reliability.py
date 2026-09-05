@@ -356,7 +356,8 @@ async def test_second_launch_normalization_precedes_load_menu_inputs(tmp_path, m
     normalize = AsyncMock(side_effect=[None, RuntimeError('normalization failed second menu')])
     monkeypatch.setattr(z, 'normalize_game_window', normalize)
     monkeypatch.setattr(z, 'phase', AsyncMock(return_value=SimpleNamespace(
-        stdout='InSession|true\nP0PW|\nP1PW|\n', returncode=11)))
+        stdout='InSession|true\nP0PW|\nP1PW|\nUI_START_READY|posthost_roster_verified\n',
+        returncode=0)))
     monkeypatch.setattr(z, 'swap_save_into_load_slot', lambda *_: True)
     kill, key, click = AsyncMock(), AsyncMock(), AsyncMock()
     monkeypatch.setattr(z, 'kill_game', kill)

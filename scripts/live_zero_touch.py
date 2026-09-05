@@ -408,6 +408,53 @@ def swap_save_into_load_slot(backup_dir: Path) -> bool:
     return True
 
 
+def verify_two_major_census(output: str) -> dict:
+    """Require the complete engine census to contain exactly two live majors.
+
+    GameCore's IsHuman is authoritative here. Some builds do not expose the
+    configuration IsHuman method; that field may be '?' after the independent
+    InGame reflag readback has confirmed it.
+    """
+    rows = {}
+    trailers = []
+    for line in output.splitlines():
+        if line.startswith('CENSUS_END|'):
+            trailers.append(line)
+            continue
+        if not re.match(r'^P\d+\|', line):
+            continue
+        if trailers:
+            raise RuntimeError('census player appeared after completion')
+        fields = line.split('|')
+        pid = int(fields[0][1:])
+        if pid in rows:
+            raise RuntimeError(f'duplicate census player {pid}')
+        row = {}
+        for field in fields[1:]:
+            if '=' not in field:
+                raise RuntimeError('malformed census field')
+            key, value = field.split('=', 1)
+            if key in row:
+                raise RuntimeError('duplicate census field')
+            row[key] = value
+        if any(row.get(key) not in ('true', 'false') for key in ('major', 'alive', 'human')):
+            raise RuntimeError('incomplete census flags')
+        rows[pid] = row
+    if trailers != [f'CENSUS_END|{len(rows)}']:
+        raise RuntimeError('incomplete census row count')
+    majors = sorted(pid for pid, row in rows.items()
+                    if row['major'] == 'true' and row['alive'] == 'true')
+    if majors != [0, 1]:
+        raise RuntimeError(f'live major roster must be [0, 1], observed {majors}')
+    for pid in majors:
+        row = rows[pid]
+        if row['human'] != 'true' or row.get('slot') != '3':
+            raise RuntimeError(f'major seat {pid} is not human slot 3')
+        if row.get('cfghuman') not in ('true', '?'):
+            raise RuntimeError(f'major seat {pid} configuration human readback failed')
+    return {'alive_major_ids': majors, 'players': rows}
+
+
 async def run_arch1_session(opts) -> int:
     """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
     failed gate. Exit codes continue the ladder's scheme from 20."""
@@ -438,13 +485,14 @@ async def run_arch1_session(opts) -> int:
     async def ingame_up() -> bool:
         return "GameCore_Tuner" in await tuner_states()
 
-    # 1. hotseat create, EMPTY passwords (the launch's transition poll is
-    #    expected to fail — rc 11 — the config+host have applied by then).
+    # 1. hotseat create, EMPTY passwords, with an explicit post-host roster
+    #    receipt. UI start avoids waiting for this hotseat session's dead tuner.
     #    Codex r1 P2-8: the password gate demands the EXACT empty rows —
     #    "P1PW|arena" or "P1PW|nil" must refuse (Return auto-OK needs "")
-    r = await phase(["live_hotseat_launch.py", "--full", "--empty",
+    r = await phase(["live_hotseat_launch.py", "--full", "--empty", "--ui-start",
                "--port", str(tuner_port())])
-    if "InSession|true" not in r.stdout \
+    if r.returncode != 0 or "UI_START_READY|posthost_roster_verified" not in r.stdout \
+            or "InSession|true" not in r.stdout \
             or "\nP0PW|\n" not in f"\n{r.stdout}\n" \
             or "\nP1PW|\n" not in f"\n{r.stdout}\n":
         return 23
@@ -576,10 +624,13 @@ async def run_arch1_session(opts) -> int:
     r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-2]", r.stdout.strip())
-    if r.returncode or not all(any(ln.startswith(f"P{pid}|human=true|")
-                                      and "|slot=3|" in ln
-                                      for ln in r.stdout.splitlines()) for pid in (0, 1)):
-        print("[gate] census did not confirm both human seats slot=3 — refusing")
+    try:
+        if r.returncode:
+            raise RuntimeError(f'census helper failed: exit {r.returncode}')
+        census = verify_two_major_census(r.stdout)
+        (opts.artifacts / 'major-census.json').write_text(json.dumps(census, sort_keys=True) + '\n')
+    except RuntimeError as exc:
+        print("[gate]", str(exc))
         dump_screen("census-gate")
         return 31
     if not opts.no_smoke:
