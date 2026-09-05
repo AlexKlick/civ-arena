@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from civ_arena.agents.runtime import AgentProfile, build_runtime
+from civ_arena.agents.runtime import AgentProfile, build_runtime, strategy_audit_event
 from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
 from civ_arena.arena.referee import MatchAborted, Referee, RefereeConfig
@@ -285,9 +285,11 @@ async def phase_dispatch(
     run_dir.mkdir(parents=True, exist_ok=True)
     agent = spec.agents[0]
     profile = _agent_profile(agent)
-    runtime = build_runtime(profile)
     driver = LiveDriver(spec, adapter, run_dir,
                         f"{spec.match_id}-i{os.getpid()}")
+    runtime = build_runtime(profile, match_id=spec.match_id,
+                            audit=lambda payload: _strategic_audit(driver, payload),
+                            opening_units_frozen=adapter._simulate is None)
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
     # Arena-owned services reach the runtime exactly as the coordinator
     # wires them (LLM runtimes read diary/strategy at turn start; without
@@ -380,7 +382,9 @@ async def phase_dispatch(
                 await driver.referee.begin_turn(
                     agent.player_id, agent.agent_id, turn)
             digest_open = await adapter.refresh_digest()
-            await _resolve_blockers(adapter, agent.player_id, turn)
+            await _resolve_blockers(
+                adapter, agent.player_id, turn,
+                defer_economy=agent.decision_mode == "strategic_autopilot")
             # Housekeeping mutations are DRIVER-commanded, not
             # agent-commanded — they must not read as uncommanded drift in
             # the session's watchdog window. The civic/policy resolutions
@@ -475,6 +479,12 @@ _BUILD_PREFERENCE = ["MONUMENT", "WALLS", "WARRIOR", "GRANARY", "SETTLER",
                      "SCOUT", "SLINGER", "BARRACKS"]
 
 
+def _strategic_audit(driver: LiveDriver, payload: dict) -> None:
+    doc = strategy_audit_event(payload)
+    doc.pop("match_id")  # LiveDriver binds its own match identity.
+    driver._write("HEARTBEAT", **doc)
+
+
 def _agent_profile(agent: AgentSpec) -> AgentProfile:
     """The ONE AgentSpec -> AgentProfile mapping for every live dispatch
     path (M14d single-seat and M18 hotseat). Both paths MUST go through
@@ -486,7 +496,7 @@ def _agent_profile(agent: AgentSpec) -> AgentProfile:
         agent_id=agent.agent_id, player_id=agent.player_id,
         policy=agent.policy, seed=agent.seed, model=agent.model,
         llm=agent.llm, proposer=agent.proposer,
-        case_base=agent.case_base)
+        case_base=agent.case_base, decision_mode=agent.decision_mode)
 
 
 @dataclass(frozen=True)
@@ -792,7 +802,12 @@ async def phase_dispatch_hotseat(
             raise ValueError("rounds must be positive")
         async with asyncio.timeout(limits.startup):
             for agent in spec.agents:
-                runtime = build_runtime(_agent_profile(agent))
+                runtime = build_runtime(
+                    _agent_profile(agent), match_id=spec.match_id,
+                    audit=lambda payload: _strategic_audit(driver, payload),
+                    opening_units_frozen=adapter._simulate is None)
+                audit("decision_mode", agent=agent.agent_id, mode=agent.decision_mode,
+                      opening_units_frozen=adapter._simulate is None)
                 seats[agent.player_id] = {
                     "agent": agent, "runtime": runtime,
                     "session": PlayerSession(driver.referee, agent.player_id, agent.agent_id),
@@ -844,7 +859,9 @@ async def phase_dispatch_hotseat(
                             raise RuntimeError("local-player switch did not take")
                         await adapter.read_raw(lua_translator.unpause_local())
                         digest_open = await adapter.refresh_digest()
-                        await _resolve_blockers(adapter, agent.player_id, turn)
+                        await _resolve_blockers(
+                            adapter, agent.player_id, turn,
+                            defer_economy=agent.decision_mode == "strategic_autopilot")
                         housekept = adapter.drain_mutations()
                         driver.referee._ls.acknowledged.extend(housekept)
                         allowed_open = len(driver.referee._ls.allowed)
@@ -998,7 +1015,7 @@ def _target_turn(status: dict[str, Any], player_id: int,
 
 
 async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
-                             turn: int) -> None:
+                             turn: int, *, defer_economy: bool = False) -> None:
     """Turn-blocker housekeeping at LEASE START (inside our own turn, where
     civic/policy changes are legal): a completed civic parks 'Choose a
     Civic' + 'Fill Policy Slot' on the local player, and a forced end-turn
@@ -1024,12 +1041,14 @@ async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
             # the empty-queue city: set production for EVERY own city with
             # an empty queue (the agent may have missed one; the blocker
             # fires at turn END, when resolution freezes the cycle)
-            await _fill_empty_queues(adapter, player_id, turn)
+            if not defer_economy:
+                await _fill_empty_queues(adapter, player_id, turn)
         elif "RESEARCH" in b:
             # completed research with no follow-up parks 'Choose a
             # Technology' on the local player — game four froze the whole
             # engine cycle here at the turn-17 transition
-            await _ensure_research(adapter, player_id, turn)
+            if not defer_economy:
+                await _ensure_research(adapter, player_id, turn)
         else:
             # unknown blocker: report it loudly — the run must not freeze
             # silently on something this housekeeping does not cover
@@ -1039,7 +1058,10 @@ async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
     # blocker only ever lists at turn end, when the wire can no longer
     # resolve it (glm-g1 turn 12's freeze); pre-filling makes the class
     # unreachable
-    await _fill_empty_queues(adapter, player_id, turn)
+    if not defer_economy:
+        await _fill_empty_queues(adapter, player_id, turn)
+    # Strategic control owns empty production and research through the audited
+    # facade. Civic/policy housekeeping and turn completeness still apply.
     # Research is deliberately NOT pre-filled: the blocker notification
     # DOES list at lease start (game four, turn 11 — unlike production),
     # so the reactive branch above resolves it in time, and pre-filling

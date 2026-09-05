@@ -26,7 +26,8 @@ async def test_driver_records_effective_pacing_before_first_request(tmp_path, mo
     spec = load_config(ld.MOD_DEFAULT.parents[2] / "configs/live-hotseat-llm-minimax2-060.yaml")
     models = []
 
-    def build(profile):
+    def build(profile, **context):
+        assert context["opening_units_frozen"] is False
         model = FakeModel([[use("end_turn")]])
         models.append(model)
         return LLMAgentRuntime.build(profile, client=model)
@@ -58,4 +59,4 @@ async def test_driver_records_effective_pacing_before_first_request(tmp_path, mo
         tools = {tool["name"] for tool in model.requests[0]["tools"]}
         assert ("recall_lessons" not in tools) == paced
         opening = str(model.requests[0]["messages"])
-        assert ("Fresh visible turn briefing" in opening) == paced
+        assert ("Controller context" in opening) == paced

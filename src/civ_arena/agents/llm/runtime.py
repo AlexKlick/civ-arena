@@ -38,7 +38,13 @@ from civ_arena.agents.llm.client import (
     ModelUnavailable,
     tool_uses,
 )
-from civ_arena.agents.llm.prompts import PACED_TURN_PROMPT, SYSTEM_PROMPT, turn_header
+from civ_arena.agents.llm.context_curator import (
+    BASIC_READS,
+    DETAIL_SCHEMA,
+    ContextCurator,
+    replace_context,
+)
+from civ_arena.agents.llm.prompts import CURATED_SYSTEM_PROMPT, SYSTEM_PROMPT, turn_header
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.runtime import AgentProfile
 from civ_arena.arena.referee import MatchAborted
@@ -46,8 +52,6 @@ from civ_arena.config import LLMSpec
 from civ_arena.strategy.view import render_memory
 
 _SCHEMA_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
-_READ_TOOLS = frozenset({"get_overview", "get_units", "get_cities", "get_visible_map",
-                         "get_available_research", "get_available_production", "get_strategy"})
 _GAME_ACTIONS = frozenset({"move_unit", "attack", "fortify", "found_city", "set_research",
                            "set_city_production", "purchase"})
 
@@ -64,6 +68,7 @@ class LLMAgentRuntime:
     _turn: int = field(default=0, init=False)
     paced_turns: bool = False
     recall_available: bool | None = None
+    strategic_controller: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.rng is None:
@@ -110,6 +115,11 @@ class LLMAgentRuntime:
         self.paced_turns = True
         self.recall_available = recall_available
 
+    def configure_strategic_controller(self, controller: Any) -> None:
+        if not callable(getattr(controller, "take_turn", None)):
+            raise ValueError("strategic controller must implement take_turn")
+        self.strategic_controller = controller
+
     async def aclose(self) -> None:
         await self.client.aclose()
 
@@ -120,6 +130,11 @@ class LLMAgentRuntime:
                 "begin_turn(turn) must be called before take_turn "
                 "(the coordinator does this; direct callers must too)"
             )
+        if self.strategic_controller is not None:
+            await self.strategic_controller.take_turn(self, facade)
+            return
+        if self.profile.decision_mode == "strategic_autopilot":
+            raise MatchAborted("strategic_autopilot runtime was not bound by the factory")
         diary_text = (self.diary.get(self.profile.player_id)
                       if self.diary is not None else "")
         memory = (render_memory(self.strategy, self.profile.player_id,
@@ -129,9 +144,17 @@ class LLMAgentRuntime:
             {"role": "user",
              "content": turn_header(self._turn, diary_text, memory)}
         ]
+        curator = None
         try:
             if self.paced_turns:
-                messages.append({"role": "user", "content": await self._turn_briefing(facade)})
+                messages[0]["content"] = messages[0]["content"].replace(
+                    "Observe with your tools", "Use the supplied controller context")
+                curator = ContextCurator(facade, self.profile.player_id,
+                                         self.llm.max_result_chars, memory)
+                await curator.refresh()
+                opening: list[dict[str, Any]] = []
+                replace_context(messages, opening, curator.render())
+                messages.append({"role": "user", "content": opening})
             accepted_actions = 0
             for _round in range(self.llm.max_tool_rounds):
                 reply = await self._create(messages)
@@ -145,25 +168,11 @@ class LLMAgentRuntime:
                     await self._close_turn(facade)
                     return
                 results: list[dict[str, Any]] = []
-                # Only identical reads in this one returned batch share a result.
-                # Never retain observations across provider waits or mutation attempts.
-                batch_reads: dict[str, tuple[bool, str]] = {}
                 for i, use in enumerate(uses):
                     tool_use_id = use.get("id") or \
                         f"toolu_{self._turn}_{_round}_{i}"
                     name, args = use.get("name"), use.get("input")
-                    cache_key = None
-                    if self.paced_turns and isinstance(name, str) and name in _READ_TOOLS:
-                        if isinstance(args, dict):
-                            cache_key = json.dumps([name, args], sort_keys=True)
-                    else:
-                        batch_reads.clear()
-                    if cache_key is not None and cache_key in batch_reads:
-                        ok, payload = batch_reads[cache_key]
-                    else:
-                        ok, payload = await self._call_tool(facade, name, args)
-                        if cache_key is not None and ok:
-                            batch_reads[cache_key] = (ok, payload)
+                    ok, payload = await self._call_tool(facade, name, args, curator=curator)
                     if ok and isinstance(name, str) and name in _GAME_ACTIONS:
                         accepted_actions += 1
                     results.append({
@@ -187,8 +196,10 @@ class LLMAgentRuntime:
                         hint += ("Finish useful unit orders, update your diary briefly, "
                                  "and call end_turn.")
                     else:
-                        hint += ("Group independent actions; refresh only observations "
-                                 "affected by actions.")
+                        hint += "Group independent actions; the controller gathers updated state."
+                    if curator is not None:
+                        await curator.refresh()
+                        replace_context(messages, results, curator.render())
                     results.append({"type": "text", "text": hint})
                 messages.append({"role": "user", "content": results})
             # round cap exhausted without end_turn — the runtime closes the
@@ -200,95 +211,9 @@ class LLMAgentRuntime:
 
     # ------------------------------------------------------------ helpers
     async def _turn_briefing(self, facade: Any) -> str:
-        """One bounded, observation-only opening through the existing audited facade.
-
-        The text is a partial visible snapshot, not a global legal-action oracle.
-        Its per-section previews share the existing max_result_chars bound.
-        Errors propagate; a failed observation cannot become a plausible empty view.
-        """
-        snapshots = {}
-        # FireTuner's visibility projection uses its map cache: refresh sight
-        # before fetching entities, otherwise previous-turn sight could leak them.
-        for name in ("get_visible_map", "get_units", "get_cities", "get_overview",
-                     "get_available_research"):
-            result = await getattr(facade, name)()
-            if isinstance(result, dict) and result.get("status") == "rejected":
-                raise MatchAborted(f"turn briefing {name} rejected: {result.get('rejection')}")
-            snapshots[name] = result
-        cities = snapshots["get_cities"]
-        if not isinstance(cities, list):
-            raise MatchAborted("turn briefing requires a projected city list")
-        own_cities = [city for city in cities if isinstance(city, dict)
-                      and city.get("owner") == self.profile.player_id]
-        production = {}
-        for city in own_cities[:4]:
-            city_id = city.get("city_id")
-            if not isinstance(city_id, str):
-                raise MatchAborted("turn briefing city id is unavailable")
-            result = await facade.get_available_production(city_id=city_id)
-            if isinstance(result, dict) and result.get("status") == "rejected":
-                raise MatchAborted(f"turn briefing production rejected: {result.get('rejection')}")
-            production[city_id] = result
-        snapshots["get_available_production"] = {
-            "by_city": production, "cities_not_prefetched": max(0, len(own_cities) - 4)}
-        # Keep the large map last, so core own-entity state receives a fair share.
-        visible_map = snapshots.pop("get_visible_map")
-        snapshots["get_visible_map"] = self._nearby_map(
-            visible_map, snapshots["get_units"], own_cities)
-        heading = ("Fresh visible turn briefing (partial previews; use tools for omitted details). "
-                   "Reads occurred before any action. Act from these observations; "
-                   "after a mutation "
-                   "refresh affected state. Production options cover at most four owned cities.\n")
-        budget = self.llm.max_result_chars
-        if budget <= len(heading):
-            return heading[:budget]
-        lines = [heading]
-        left = budget - len(heading)
-        for index, (name, value) in enumerate(snapshots.items()):
-            sections_left = len(snapshots) - index
-            allocation = left // sections_left
-            prefix = name + ": "
-            encoded = json.dumps(value, sort_keys=True, default=str, separators=(",", ":"))
-            allowance = max(0, allocation - len(prefix) - 1)
-            if len(encoded) > allowance:
-                marker = "...[partial; query tool for full result]"
-                encoded = (encoded[:max(0, allowance - len(marker))] + marker)[:allowance]
-            line = (prefix + encoded + "\n")[:allocation]
-            lines.append(line)
-            left -= len(line)
-        return "".join(lines)
-
-    def _nearby_map(self, visible_map: Any, units: Any, own_cities: list[dict]) -> Any:
-        """Prioritize projected tiles near owned entities; never query hidden state."""
-        if not isinstance(visible_map, dict) or not isinstance(visible_map.get("tiles"), dict):
-            return visible_map
-        anchors = []
-        entities = (units if isinstance(units, list) else []) + own_cities
-        for entity in entities:
-            if (not isinstance(entity, dict)
-                    or entity.get("owner", entity.get("owner_id")) != self.profile.player_id):
-                continue
-            try:
-                q, r = map(int, entity["coord"].split(","))
-                anchors.append((q, r))
-            except (KeyError, TypeError, ValueError, AttributeError):
-                continue
-
-        def order(item):
-            key, _tile = item
-            try:
-                q, r = map(int, key.split(","))
-                distance = min((max(abs(q - aq), abs(r - ar), abs(q + r - aq - ar))
-                                for aq, ar in anchors), default=0)
-                return distance, key
-            except (TypeError, ValueError, AttributeError):
-                return 10**12, str(key)
-
-        tiles = sorted(visible_map["tiles"].items(), key=order)
-        return {"turn": visible_map.get("turn"),
-                "nearby_visible_or_remembered_tiles": [{"coord": key, "tile": tile}
-                                                       for key, tile in tiles[:48]],
-                "tiles_not_in_preview": max(0, len(tiles) - 48)}
+        curator = ContextCurator(facade, self.profile.player_id, self.llm.max_result_chars)
+        await curator.refresh()
+        return curator.render()
 
     async def _close_turn(self, facade: Any) -> None:
         result = await facade.end_turn()
@@ -314,14 +239,20 @@ class LLMAgentRuntime:
         tools = TOOL_SCHEMAS
         system = SYSTEM_PROMPT
         if self.paced_turns:
-            system += "\n\n" + PACED_TURN_PROMPT
+            system = CURATED_SYSTEM_PROMPT
+            tools = [tool for tool in tools if tool["name"] not in BASIC_READS]
+            tools = [*tools, DETAIL_SCHEMA]
             if self.recall_available is False:
                 tools = [tool for tool in tools if tool["name"] != "recall_lessons"]
                 system += "\nCross-match recall is unavailable in this match; do not request it."
         return await self.client.create(system=system, messages=messages, tools=tools)
 
-    async def _call_tool(self, facade: Any, name: Any, args: Any
-                         ) -> tuple[bool, str]:
+    async def _call_tool(self, facade: Any, name: Any, args: Any,
+                         *, curator: ContextCurator | None = None) -> tuple[bool, str]:
+        if name == "inspect_context" and curator is not None:
+            result = await curator.inspect(args) if isinstance(args, dict) else {
+                "status": "rejected", "rejection": "arguments_must_be_object"}
+            return result.get("status") == "accepted", self._compact(result)
         if not isinstance(name, str) or name not in _SCHEMA_BY_NAME:
             # manifest lookup FIRST: a facade attribute that is not a tool
             # (e.g. "names") must degrade to an error result, never dispatch
@@ -365,6 +296,8 @@ class LLMAgentRuntime:
                     f"bad arguments: {key} exceeds maxLength {max_len} "
                     f"(got {len(value)} chars)"
                 )
+        if curator is not None and name in BASIC_READS:
+            return True, self._compact(curator.cached_read(name, args))
         try:
             # kwargs dispatch: no positional reordering can ever reinterpret
             # a malformed argument as a different parameter
@@ -372,6 +305,8 @@ class LLMAgentRuntime:
         except TypeError as exc:
             self._note_error("llm_malformed_args")
             return False, self._error(f"bad arguments: {exc}")
+        if curator is not None and name in _GAME_ACTIONS:
+            result = curator.action_result(name, args, result)
         ok = not isinstance(result, dict) or result.get("status") != "rejected"
         if name == "end_turn":
             ok = isinstance(result, dict) and result.get("status") == "accepted"
@@ -380,6 +315,8 @@ class LLMAgentRuntime:
     def _compact(self, result: Any) -> str:
         payload = json.dumps(result, sort_keys=True, default=str)
         if len(payload) > self.llm.max_result_chars:
+            if self.paced_turns:
+                raise MatchAborted("tool result exceeds curated context budget")
             return (payload[: self.llm.max_result_chars]
                     + f"\n...[truncated, full {len(payload)} chars]")
         return payload
