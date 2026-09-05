@@ -67,6 +67,8 @@ def parse_handshake(lines: list[str]) -> dict[str, Any]:
         "supports_digest": present and parsed.get("SUPPORTS_DIGEST") is True,
         # mod >= 0.3: without the rolling DiffSinceLast seam, act() cannot
         # reconcile commanded effects and the live driver refuses to dispatch
+        "supports_reward_receipts": present
+        and parsed.get("SUPPORTS_REWARD_RECEIPTS") is True,
         "supports_guarded_handoff": present
         and parsed.get("SUPPORTS_GUARDED_HANDOFF") is True,
         "supports_command_diff": present
@@ -409,3 +411,71 @@ def parse_handoff_receipt(lines: list[str], player_id: int, turn: int,
     if len(rows) != 1 or rows[0] not in expected:
         raise RuntimeError(f"handoff completion not verified: {rows!r}")
     return expected[rows[0]]
+
+
+def parse_reward_begin(lines: list[str], nonce: str) -> None:
+    rows = [r for r in _split_lines(lines) if r and r != "---END---"]
+    if len(rows) != 1 or rows[0] not in (
+        f"REWARD_BEGIN|{nonce}|accepted", f"REWARD_BEGIN|{nonce}|duplicate"
+    ):
+        if rows == [f"REWARD_BEGIN|{nonce}|quarantined_missing_event"]:
+            raise RuntimeError("reward command quarantined: consumed village lacked native event")
+        raise RuntimeError("reward command begin receipt missing or rejected")
+
+
+def parse_reward_finish(lines: list[str], nonce: str, seq: int, player: int,
+                        turn: int, unit_id: str) -> tuple[list[str], list[dict[str, Any]]]:
+    rows = [r for r in _split_lines(lines) if r and r != "---END---"]
+    headers = [r for r in rows if r.startswith("REWARD_FINISH|")]
+    if headers != [f"REWARD_FINISH|{nonce}|{seq}"]:
+        raise RuntimeError("reward command finish identity mismatch")
+    causes = [r for r in rows if r.startswith("REWARD_CAUSE|")]
+    ledger = [r for r in rows if r.startswith("LEDGER|")]
+    observations = [r for r in rows if r.startswith("REWARD_OBSERVATION|")]
+    if len(observations) != 1:
+        raise RuntimeError("missing reward observation")
+    obs = observations[0].split("|")
+    categories = {"no_matching_event", "duplicate_events", "matched_add_population",
+                  "unsupported_or_unmatched", "missing_consumption_event"}
+    if len(obs) != 6 or obs[1] != nonce or obs[5] not in categories:
+        raise RuntimeError("malformed reward observation")
+    event_count, reward_type, reward_subtype = map(_coerce_strict, obs[2:5])
+    if any(type(v) is not int for v in (event_count, reward_type, reward_subtype)):
+        raise RuntimeError("invalid reward observation numbers")
+    if not 0 <= event_count <= 1024 or max(abs(reward_type), abs(reward_subtype)) > 2**32 - 1:
+        raise RuntimeError("reward observation outside bounds")
+    if ((obs[5] == "matched_add_population") != bool(causes)
+            or bool(causes) and event_count != 1):
+        raise RuntimeError("reward observation contradicts cause")
+    if len(causes) > 1 or len(rows) != len(headers) + len(causes) + len(ledger) + len(observations):
+        raise RuntimeError("malformed reward command completion")
+    provenance = []
+    for cause in causes:
+        parts = cause.split("|")
+        owner, raw = entity_ids.decode(unit_id, "u")
+        if (len(parts) != 10 or parts[1] != nonce or owner != player
+                or parts[2:7] != [str(player), str(turn), str(raw),
+                                  "GOODYHUT_SURVIVORS", "GOODYHUT_ADD_POP"]):
+            raise RuntimeError("reward causal identity mismatch")
+        city = "c" + str(player) + ":" + parts[7]
+        entity_ids.decode(city, "c")
+        before, after = _coerce_strict(parts[8]), _coerce_strict(parts[9])
+        if type(before) is not int or type(after) is not int or before < 1 or after != before + 1:
+            raise RuntimeError("invalid reward population delta")
+        exact = f"LEDGER|city.growth|city|{city}|population|{before}|{after}"
+        if ledger.count(exact) != 1:
+            raise RuntimeError("reward cause lacks exact mutation")
+        provenance.append({"event": "GoodyHutReward", "command_nonce": nonce,
+                           "nonce_origin": "controller_move_window",
+                           "player_id": player, "turn": turn, "unit_id": unit_id,
+                           "reward_type": "GOODYHUT_SURVIVORS",
+                           "reward_subtype": "GOODYHUT_ADD_POP", "city_id": city,
+                           "before": before, "after": after})
+    # Population must never ride the move attribute scope without a causal row.
+    pop = [r for r in ledger if r.split("|")[1:3] == ["city.growth", "city"]]
+    if len(pop) != len(provenance):
+        raise RuntimeError("unmatched commanded population row")
+    provenance.append({"event": "GoodyHutReward", "command_nonce": nonce,
+                       "observation": obs[5], "event_count": event_count,
+                       "native_reward_type": reward_type, "native_reward_subtype": reward_subtype})
+    return ledger, provenance

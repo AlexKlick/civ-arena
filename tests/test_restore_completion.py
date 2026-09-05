@@ -62,7 +62,12 @@ assert(restores==1 and units[1].moves==0 and units[1].attacks==0)
 async def test_restore_failure_prevents_action_and_attempts_refreeze(failure):
     adapter = FireTunerAdapter()
     adapter._phase_open = 1
+    adapter._turn_mirror = 1
     async def read(lua):
+        if 'BeginRewardCommand' in lua:
+            return [f"REWARD_BEGIN|{lua.split(chr(39))[1]}|accepted"]
+        if 'CancelRewardCommand' in lua:
+            return []
         if 'FreezeUnit' in lua:
             return ['FROZEN|131073']
         if isinstance(failure, Exception):
@@ -99,5 +104,5 @@ async def test_previous_mod_is_rejected_at_preflight():
     adapter.mod_handshake = AsyncMock(return_value={
         'mod_version': '0.3.4', 'supports_freeze': True, 'supports_ledger': True,
         'supports_digest': True, 'supports_command_diff': True})
-    with pytest.raises(RuntimeError, match='0.3.7'):
+    with pytest.raises(RuntimeError, match='0.3.8'):
         await adapter.require_mod()

@@ -45,16 +45,18 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.7"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.8"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and type(Puppeteer.GuardedHandoff) == "function"
+    and type(Puppeteer.BeginRewardCommand) == "function"
+    and type(Puppeteer.FinishRewardCommand) == "function"
     and Puppeteer.supports_freeze and Puppeteer.supports_ledger
     and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
     return
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.7"
+Puppeteer.version = "0.3.8"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -79,6 +81,13 @@ local lease = nil                  -- { playerID, turn, snapshot = {unitId -> st
 -- that same turn eligible for a new movement allowance.
 PUPPETEER_INITIAL_ATTACH_USED = PUPPETEER_INITIAL_ATTACH_USED or {}
 local command_ledger = {}          -- UNDECLARED actuals: drift the referee never asked for
+local reward_window = nil
+local reward_finished = nil
+local reward_row = nil
+local reward_hook_registered = false
+-- A consumed village without a timely event makes subsequent event attribution unsafe.
+-- This quarantine survives lease changes and same-version reinjection.
+local reward_quarantined = false
 local ambient_ledger = {}          -- DECLARED at phase boundaries: the authorization manifest
 local ambient_window_open = false  -- true ONLY inside BeginAmbientWindow/EndAmbientWindow
 local ambient_snapshot = nil       -- BeginAmbientWindow's per-player snapshot
@@ -241,6 +250,9 @@ function Puppeteer.Handshake()
     print("SUPPORTS_LEDGER|" .. boolstr(Puppeteer.supports_ledger))
     print("SUPPORTS_DIGEST|" .. boolstr(Puppeteer.supports_digest))
     print("SUPPORTS_COMMAND_DIFF|" .. boolstr(Puppeteer.supports_command_diff))
+    print("SUPPORTS_REWARD_RECEIPTS|" .. boolstr(reward_hook_registered
+        and type(Puppeteer.BeginRewardCommand) == "function"
+        and type(Puppeteer.FinishRewardCommand) == "function"))
     print("SUPPORTS_GUARDED_HANDOFF|" .. boolstr(type(Puppeteer.GuardedHandoff) == "function"))
     print("---END---")
 end
@@ -304,6 +316,7 @@ local function acquire_lease(playerID, initialAllowances)
             end
         end
     end
+    reward_window, reward_finished, reward_row = nil, nil, nil
     lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
               snapshot = snapshot_player(playerID),
               preserve_attacks = initialAllowances ~= nil }
@@ -489,6 +502,7 @@ function Puppeteer.DiffSinceLast(attrCsv, seq)
                 and (("," .. attrCsv .. ","):find(
                     "," .. attr .. ",", 1, true) ~= nil)
         end
+        if row == reward_row then keep = true end
         if keep then
             table.insert(out, row)
         else
@@ -498,6 +512,7 @@ function Puppeteer.DiffSinceLast(attrCsv, seq)
             table.insert(command_ledger, row)
         end
     end
+    reward_row = nil
     lease.snapshot = snapshot_player(lease.playerID)
     diff_cache = table.concat(out, "\n")
     diff_cache_seq = seq
@@ -518,6 +533,7 @@ release_lease = function(playerID, turn)
             diff_player(playerID, lease.snapshot, book_actual)
         end
         lease = nil
+        reward_window, reward_row = nil, nil
         diff_cache = nil
     end
 end
@@ -536,14 +552,186 @@ local function OnPlayerTurnActivated(playerID, isHuman)
     trace("ACTIVATED|" .. tostring(playerID) .. "|" .. tostring(isHuman))
 end
 
+-- A native reward is causal evidence only inside one dispatched move. No
+-- growth-shaped allowance and no baseline reset: unmatched rows remain actuals.
+local function reward_identity(w)
+    return w ~= nil and lease ~= nil and lease.playerID == w.player
+        and lease.turn == w.turn and Game.GetCurrentGameTurn() == w.turn
+        and Game.GetLocalPlayer() == w.player
+end
+
+local function OnGoodyHutReward(playerID, unitID, rewardType, rewardSubType)
+    local w = reward_window
+    if w == nil then return end
+    -- Even a duplicate matching event invalidates attribution; never grant twice.
+    if playerID ~= w.player or unitID ~= w.unit then return end
+    w.events = w.events + 1
+    w.reward_type = type(rewardType) == 'number' and rewardType == math.floor(rewardType)
+        and math.abs(rewardType) < 4294967296 and rewardType or 0
+    w.reward_subtype = type(rewardSubType) == 'number' and rewardSubType == math.floor(rewardSubType)
+        and math.abs(rewardSubType) < 4294967296 and rewardSubType or 0
+    local ok, valid = pcall(function()
+        if not reward_identity(w) or w.events ~= 1 then return false end
+        local kind = GameInfo.GoodyHuts[rewardType]
+        local sub = GameInfo.GoodyHutSubTypes[rewardSubType]
+        local unit = Players[playerID]:GetUnits():FindID(unitID)
+        local modifier = GameInfo.Modifiers['GOODY_SURVIVORS_ADD_POPULATION']
+        local amount, amount_count = nil, 0
+        for arg in GameInfo.ModifierArguments() do
+            if arg.ModifierId == 'GOODY_SURVIVORS_ADD_POPULATION' and arg.Name == 'Amount' then
+                amount, amount_count = tonumber(arg.Value), amount_count + 1
+            end
+        end
+        return amount == 1 and amount_count == 1 and modifier ~= nil
+            and modifier.ModifierType == 'MODIFIER_PLAYER_NEAREST_CITY_ADD_POPULATION'
+            and kind ~= nil and kind.GoodyHutType == 'GOODYHUT_SURVIVORS'
+            and sub ~= nil and sub.SubTypeGoodyHut == 'GOODYHUT_ADD_POP'
+            and sub.GoodyHut == 'GOODYHUT_SURVIVORS'
+            and sub.ModifierID == 'GOODY_SURVIVORS_ADD_POPULATION'
+            and unit ~= nil and unit:GetX() == w.x and unit:GetY() == w.y
+    end)
+    w.valid_event = ok and valid
+end
+
+function Puppeteer.BeginRewardCommand(playerID, turn, unitID, nonce, x, y, seq)
+    local function report(status)
+        print('REWARD_BEGIN|' .. tostring(nonce) .. '|' .. status)
+        print('---END---')
+    end
+    local ok, status = pcall(function()
+        if type(nonce) ~= 'string' or #nonce ~= 64 or nonce:find('[^0-9a-f]') then
+            return 'rejected'
+        end
+        for _, value in ipairs({playerID, turn, unitID, x, y, seq}) do
+            if type(value) ~= 'number' or value ~= math.floor(value)
+                or value < 0 or value > 9007199254740991 then return 'rejected' end
+        end
+        if not reward_hook_registered then return 'unsupported' end
+        if reward_quarantined then return 'quarantined_missing_event' end
+        if reward_window ~= nil then
+            local w = reward_window
+            if w.nonce == nonce and w.player == playerID and w.turn == turn
+                and w.unit == unitID and w.x == x and w.y == y and w.seq == seq
+                and reward_identity(w) then return 'duplicate' end
+            return 'rejected'
+        end
+        if reward_finished ~= nil and reward_finished.nonce == nonce then return 'rejected' end
+        if diff_cache ~= nil and seq <= diff_cache_seq then return 'rejected' end
+        if lease == nil or lease.playerID ~= playerID or lease.turn ~= turn
+            or Game.GetCurrentGameTurn() ~= turn or Game.GetLocalPlayer() ~= playerID
+            or not Players[playerID]:IsTurnActive() then return 'rejected' end
+        if Players[playerID]:GetUnits():FindID(unitID) == nil then return 'rejected' end
+        local plot = Map.GetPlot(x,y)
+        local improvement = plot ~= nil and GameInfo.Improvements[plot:GetImprovementType()] or nil
+        local was_goody = improvement ~= nil and improvement.ImprovementType == 'IMPROVEMENT_GOODY_HUT'
+        local w = {was_goody=was_goody, player=playerID, turn=turn, unit=unitID, nonce=nonce,
+            x=x, y=y, seq=seq, events=0, populations={}}
+        local best, tied = nil, false
+        for _, city in Players[playerID]:GetCities():Members() do
+            local id, population = city:GetID(), city:GetPopulation()
+            if city:GetOwner() ~= playerID or population < 1
+                or population ~= math.floor(population) then return 'rejected' end
+            w.populations[id] = population
+            local distance = Map.GetPlotDistance(x, y, city:GetX(), city:GetY())
+            if best == nil or distance < best then
+                best, tied, w.city = distance, false, id
+            elseif distance == best then tied = true end
+        end
+        if tied then w.city = nil end
+        reward_window = w
+        return 'accepted'
+    end)
+    report(ok and status or 'failed')
+end
+
+function Puppeteer.CancelRewardCommand(nonce)
+    if reward_window ~= nil and reward_window.nonce == nonce then reward_window = nil end
+    print('REWARD_CANCEL|' .. tostring(nonce))
+    print('---END---')
+end
+
+function Puppeteer.FinishRewardCommand(nonce, attrs, seq)
+    if reward_finished ~= nil and reward_finished.nonce == nonce
+        and reward_finished.seq == seq and reward_finished.attrs == attrs then
+        print(reward_finished.output) print('---END---') return
+    end
+    local w = reward_window
+    if not reward_identity(w) or w.nonce ~= nonce or w.seq ~= seq then
+        error('reward command identity mismatch')
+    end
+    reward_window = nil -- consumed even if validation/diff fails
+    local causal = nil
+    local checked, consumed = pcall(function()
+        local plot = Map.GetPlot(w.x,w.y)
+        if not w.was_goody or plot == nil then return false end
+        local improvement = GameInfo.Improvements[plot:GetImprovementType()]
+        return improvement == nil or improvement.ImprovementType ~= 'IMPROVEMENT_GOODY_HUT'
+    end)
+    if checked and consumed and w.events == 0 then reward_quarantined = true end
+    local ok, matched = pcall(function()
+        if not w.was_goody or not w.valid_event or w.events ~= 1 or w.city == nil then return false end
+        local plot = Map.GetPlot(w.x,w.y)
+        if plot == nil then return false end
+        local improvement = GameInfo.Improvements[plot:GetImprovementType()]
+        if improvement ~= nil and improvement.ImprovementType == 'IMPROVEMENT_GOODY_HUT' then
+            return false
+        end
+        local before = w.populations[w.city]
+        if lease.snapshot.cities[w.city] == nil
+            or lease.snapshot.cities[w.city].population ~= before then return false end
+        local changed, seen = 0, {}
+        for _, city in Players[w.player]:GetCities():Members() do
+            local id, after = city:GetID(), city:GetPopulation()
+            seen[id] = true
+            if city:GetOwner() ~= w.player then return false end
+            if w.populations[id] == nil then return false end
+            if after ~= w.populations[id] then
+                changed = changed + 1
+                if id ~= w.city or after ~= before + 1 then return false end
+            end
+        end
+        for id in pairs(w.populations) do if not seen[id] then return false end end
+        if changed ~= 1 then return false end
+        reward_row = 'LEDGER|city.growth|city|c' .. w.player .. ':' .. w.city
+            .. '|population|' .. ifloor(before) .. '|' .. ifloor(before + 1)
+        causal = 'REWARD_CAUSE|' .. nonce .. '|' .. w.player .. '|' .. w.turn
+            .. '|' .. w.unit .. '|GOODYHUT_SURVIVORS|GOODYHUT_ADD_POP|'
+            .. w.city .. '|' .. ifloor(before) .. '|' .. ifloor(before + 1)
+        return true
+    end)
+    if not ok or not matched then reward_row, causal = nil, nil end
+    local rows = Puppeteer.DiffSinceLast(attrs, seq)
+    -- Only emit provenance if the exact authorized row was actually returned.
+    local output = 'REWARD_FINISH|' .. nonce .. '|' .. tostring(seq)
+    local classification = 'no_matching_event'
+    if reward_quarantined then classification = 'missing_consumption_event'
+    elseif w.events > 1 then classification = 'duplicate_events'
+    elseif w.events == 1 then
+        classification = causal ~= nil and 'matched_add_population' or 'unsupported_or_unmatched'
+    end
+    output = output .. '\nREWARD_OBSERVATION|' .. nonce .. '|' .. w.events
+        .. '|' .. tostring(w.reward_type or 0) .. '|' .. tostring(w.reward_subtype or 0)
+        .. '|' .. classification
+    if causal ~= nil then output = output .. '\n' .. causal end
+    if rows ~= '' then output = output .. '\n' .. rows end
+    reward_finished = {nonce=nonce, seq=seq, attrs=attrs, output=output}
+    print(output) print('---END---')
+end
+
 -- Re-injection hygiene (D9): the adapter re-executes this file at every
 -- attach — retire the PREVIOUS injection's hooks first or both live on
 -- and fight over one `lease`.
 if type(PUPPETEER_CLEANUP) == "function" then PUPPETEER_CLEANUP() end
+if Events.GoodyHutReward ~= nil then
+    reward_hook_registered = pcall(function()
+        Events.GoodyHutReward.Add(OnGoodyHutReward)
+    end)
+end
 GameEvents.PlayerTurnStartComplete.Add(OnPlayerTurnStartComplete)
 Events.PlayerTurnDeactivated.Add(OnPlayerTurnDeactivated)
 GameEvents.PlayerTurnActivated.Add(OnPlayerTurnActivated)
 PUPPETEER_CLEANUP = function()
+    if reward_hook_registered then Events.GoodyHutReward.Remove(OnGoodyHutReward) end
     GameEvents.PlayerTurnStartComplete.Remove(OnPlayerTurnStartComplete)
     Events.PlayerTurnDeactivated.Remove(OnPlayerTurnDeactivated)
     GameEvents.PlayerTurnActivated.Remove(OnPlayerTurnActivated)
