@@ -60,7 +60,7 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.6",
+        version: str = "0.3.7",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
@@ -103,8 +103,13 @@ class FakeMod:
         self.trace: list[str] = []
         self.pending_blockers: list[str] = []
         self._restored: set[int] = set()
+        self._handoff_receipts: set[tuple[int, int, int]] = set()
         self.act_log: list[tuple[str, str]] = []  # (tool, status) per command
         self.reset_board()
+
+    def _switch_local_player(self, player: int) -> None:
+        """Engine boundary exposed so tests can model native nonlocal actions."""
+        self.local_player = player
 
     def _production_hash(self, item: str) -> int:
         prefix = "UNIT_" if self.BUILDABLE.get(item, (0, "building"))[1] == "unit" \
@@ -448,6 +453,7 @@ class FakeMod:
                 f"SUPPORTS_FREEZE|{str(self.supports_freeze).lower()}",
                 f"SUPPORTS_LEDGER|{str(self.supports_ledger).lower()}",
                 "SUPPORTS_DIGEST|true",
+                "SUPPORTS_GUARDED_HANDOFF|true",
                 f"SUPPORTS_COMMAND_DIFF|{str(self.has_command_diff).lower()}",
             ]
         if "Puppeteer.Status" in code and not self.injected:
@@ -462,11 +468,39 @@ class FakeMod:
             if not enabled and self.lease and self.lease["player"] == pid:
                 self.lease = None
             return [f"PUPPET_SET|{pid}|{str(enabled).lower()}"]
+        m = re.search(r"Puppeteer\.GuardedHandoff\((\d+), (\d+), (\d+)\)", code)
+        if m:
+            pid, turn, nxt = (int(x) for x in m.groups())
+            prefix = f"HANDOFF|{pid}|{turn}|{nxt}|"
+            key = (pid, turn, nxt)
+            if key in self._handoff_receipts:
+                return [prefix + "duplicate|already_sent", "---END---"]
+            if self.lease != {"player": pid, "turn": turn}:
+                return [prefix + "rejected|wrong_lease", "---END---"]
+            if self.local_player != pid or self.turn != turn:
+                return [prefix + "rejected|wrong_local_or_turn", "---END---"]
+            if nxt == pid or not self.puppets.get(nxt) or nxt not in self.players:
+                return [prefix + "rejected|invalid_next", "---END---"]
+            for unit in self.units.values():
+                if unit["owner"] == pid:
+                    unit["moves"] = 0
+            self._switch_local_player(nxt)
+            # Keep the rolling mark: all actual outgoing drift is still audited.
+            if self.mark is not None:
+                self.ledger_rows.extend(self._diff(pid, self.mark))
+            self.lease = None
+            self.mark = None
+            self._diff_cache = None
+            self.turn_active = False
+            if self.hotseat and pid in self.hotseat:
+                self._hotseat_next(pid)
+            self._handoff_receipts.add(key)
+            return [prefix + "accepted|frozen_then_switched", "---END---"]
         m = re.search(r"SetLocalPlayerAndObserver\(\s*(\d+)\s*\)", code)
         if m:
             # A2: the driver's lease-engagement local-player switch — the
             # fake answers with the read-back the driver's Lua prints.
-            self.local_player = int(m.group(1))
+            self._switch_local_player(int(m.group(1)))
             return [f"LOCAL_SWITCHED|{self.local_player}|{self.local_player}",
                     "---END---"]
         if "SetWantsPause(false)" in code:

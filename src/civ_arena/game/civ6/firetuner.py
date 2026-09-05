@@ -413,10 +413,12 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
-        if doc["mod_version"] != "0.3.6":
+        if doc["mod_version"] != "0.3.7":
             raise RuntimeError(
-                "PuppeteerMod 0.3.6 required for owner-qualified IDs "
+                "PuppeteerMod 0.3.7 required for guarded handoff, owner-qualified IDs "
                 "checked restore completion, and silent native lease hooks")
+        if doc.get("supports_guarded_handoff") is not True:
+            raise RuntimeError("PuppeteerMod guarded_handoff capability required")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
@@ -488,14 +490,10 @@ class FireTunerAdapter:
             # seat it would end the WRONG seat — so the driven seat's turn
             # ends via the H2 non-local path instead.
             nxt = self._pre_end_switch
-            sw = await self._conn.execute_read(
-                lua_translator.switch_local_player(nxt))
-            want = f"LOCAL_SWITCHED|{nxt}|{nxt}"
-            if not any(ln.strip() == want for ln in sw):
-                raise RuntimeError(
-                    f"pre-end local switch to p{nxt} did not take: {sw!r}")
-            await self._conn.execute_read(
-                lua_translator.finish_all_moves(player_id))
+            async with asyncio.timeout(5):
+                rows = await self._conn.execute_read(
+                    lua_translator.guarded_handoff(player_id, turn, nxt))
+                response_parser.parse_handoff_receipt(rows, player_id, turn, nxt)
         elif self._strategy == "h1":
             await self._conn.execute_write(
                 lua_translator.request_end_turn(player_id))
