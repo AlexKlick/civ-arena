@@ -1,0 +1,236 @@
+import datetime as dt
+import http.client
+import json
+import threading
+
+import pytest
+
+from civ_arena import dashboard as d
+
+STAMP = '2026-09-05T01:00:00+00:00'
+NOW = dt.datetime.fromisoformat(STAMP).timestamp()
+
+
+def event(kind, **fields):
+    return {'kind': kind, 'ts': STAMP, 'turn': 1, 'player_id': 0,
+            'agent_id': 'seat0', **fields}
+
+
+def write_run(root, events, summary=None, name='match-one', tail=b''):
+    run = root / name
+    run.mkdir()
+    raw = b''.join((json.dumps(dict(row, seq=i)) + '\n').encode()
+                   for i, row in enumerate(events)) + tail
+    (run / 'events.jsonl').write_bytes(raw)
+    if summary is not None:
+        (run / 'summary.json').write_text(json.dumps(summary))
+    return run
+
+
+def start():
+    return event('MATCH_START', config={'agents': [['seat0', 0, 'llm'], ['seat1', 1, 'llm']]})
+
+
+def identity():
+    return event('HEARTBEAT', audit='run_identity', identity={'config': {'agents': [
+        {'agent_id': 'seat0', 'player_id': 0, 'llm': {'model_id': 'MiniMax-M3'}},
+        {'agent_id': 'seat1', 'player_id': 1, 'llm': {'model_id': 'MiniMax-M3'}}]}})
+
+
+def test_actual_notes_pair_fifo_by_agent_turn_and_tool_and_redact(tmp_path, monkeypatch):
+    monkeypatch.setenv('EXAMPLE_API_KEY', 'very-private-value')
+    events = [start(), identity(), event('LEASE_GRANT'),
+              event('TOOL_CALL', tool='write_diary', args={'text': 'private very-private-value'}),
+              event('TOOL_CALL', tool='write_diary', args={'text': 'second accepted'}),
+              event('TOOL_RESULT', tool='write_diary', player_id=1, agent_id='seat1',
+                    status='accepted'),
+              event('TOOL_RESULT', tool='write_diary', status='rejected',
+                    rejection={'password': 'sensitive', 'detail': 'very-private-value'}),
+              event('TOOL_RESULT', tool='write_diary', status='accepted'),
+              event('TOOL_CALL', tool='record_prediction',
+                    args={'text': 'Grow in three turns', 'confidence': 65,
+                          'nested': {'api_key': 'unknown-secret'}}),
+              event('TOOL_RESULT', tool='record_prediction', status='accepted'),
+              event('HEARTBEAT', audit='provider_request', agent='seat0', posts_sent=1)]
+    write_run(tmp_path, events)
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    turn = result['turns'][0]
+    assert [x['status'] for x in turn['calls']] == ['rejected', 'accepted', 'accepted']
+    assert [x['text'] for x in turn['notes']] == ['second accepted', 'Grow in three turns']
+    assert turn['notes'][1]['confidence'] == 65
+    assert result['agents'][0]['model'] == 'MiniMax-M3'
+    assert result['metrics']['requests'] == turn['requests'] == 1
+    encoded = json.dumps(result)
+    assert 'very-private-value' not in encoded and 'unknown-secret' not in encoded
+    assert 'sensitive' not in encoded
+    assert any('Unmatched TOOL_RESULT' in warning for warning in result['warnings'])
+
+
+def test_partial_tail_recent_activity_and_stale_activity_are_distinct(tmp_path):
+    write_run(tmp_path, [start()], tail=b'{"seq":1,"kind":')
+    store = d.DashboardStore(tmp_path)
+    assert store.load('match-one', now=NOW + 1)['status'] == 'running'
+    result = store.load('match-one', now=NOW + 31)
+    assert result['status'] == 'stalled'
+    assert any('Partial trailing' in warning for warning in result['warnings'])
+    assert any('not process-liveness proof' in warning for warning in result['warnings'])
+
+
+@pytest.mark.parametrize('tail', [b'{bad}\n{}\n', b'{bad}\n', b'{"seq":7}\n'])
+def test_malformed_interior_or_sequence_never_becomes_running(tmp_path, tail):
+    write_run(tmp_path, [start()], tail=tail)
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert result['status'] == 'incomplete'
+
+
+def test_terminal_summary_is_authoritative_and_failure_is_visible(tmp_path, monkeypatch):
+    monkeypatch.setenv('TEST_SECRET', 'secret-in-exception')
+    summary = {'clean': False, 'aborted': 'watchdog secret-in-exception', 'completed_rounds': 1}
+    events = [start(), identity()]
+    for pid in (0, 1):
+        events += [event('HEARTBEAT', audit='completed_seat_turn', row={
+            'turn': 1, 'player': pid, 'agent': f'seat{pid}',
+            'lease_released': True, 'elapsed_s': 2.5})]
+    events += [event('VIOLATION'), event('MATCH_END', summary=summary)]
+    run = write_run(tmp_path, events, summary)
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert result['status'] == 'aborted'
+    assert result['metrics'] == {'completed_rounds': 1, 'completed_seat_turns': 2,
+                                 'requests': 0, 'violations': 1}
+    assert any('watchdog' in warning for warning in result['warnings'])
+    assert 'secret-in-exception' not in json.dumps(result)
+    (run / 'summary.json').write_text('{"clean":true}')
+    assert d.DashboardStore(tmp_path).load('match-one', now=NOW)['status'] == 'incomplete'
+
+
+def test_live_turn_end_waits_for_driver_completion_audit(tmp_path):
+    write_run(tmp_path, [start(), identity(), event('LEASE_GRANT'), event('TURN_END')])
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert result['metrics']['completed_seat_turns'] == 0
+    assert result['turns'][0]['status'] == 'active'
+
+
+def test_out_of_order_completion_never_counts_a_clean_round(tmp_path):
+    write_run(tmp_path, [start(), identity(), event('HEARTBEAT', audit='completed_seat_turn',
+        row={'turn': 1, 'player': 1, 'agent': 'seat1', 'lease_released': True})])
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert result['metrics']['completed_rounds'] == 0
+    assert any('order' in warning for warning in result['warnings'])
+    assert result['status'] == 'incomplete'
+
+
+@pytest.mark.parametrize('players', [[0, 0], [1, 0], [0]])
+def test_impossible_clean_terminal_is_incomplete(tmp_path, players):
+    summary = {'clean': True, 'aborted': None, 'completed_rounds': 1}
+    events = [start(), identity()]
+    events += [event('HEARTBEAT', audit='completed_seat_turn', row={
+        'turn': 1, 'player': pid, 'agent': f'seat{pid}', 'lease_released': True})
+        for pid in players]
+    events.append(event('MATCH_END', summary=summary))
+    write_run(tmp_path, events, summary)
+    assert d.DashboardStore(tmp_path).load('match-one', now=NOW)['status'] == 'incomplete'
+
+
+def test_log_and_response_bounds_are_explicit(tmp_path, monkeypatch):
+    write_run(tmp_path, [start(), event('TOOL_CALL', tool='get_map', args={}),
+                         event('TOOL_RESULT', tool='get_map', status='accepted',
+                               observed={'long': 'x' * 20_000})])
+    monkeypatch.setattr(d, 'MAX_RESPONSE_BYTES', 2500)
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert len(json.dumps(result).encode()) <= 2500
+    assert any('limit' in warning for warning in result['warnings'])
+    monkeypatch.setattr(d, 'MAX_LOG_BYTES', 20)
+    assert d.DashboardStore(tmp_path).load('match-one', now=NOW)['status'] == 'incomplete'
+
+
+def test_symlinks_and_non_regular_artifacts_do_not_escape_root(tmp_path):
+    root, outside = tmp_path / 'runs', tmp_path / 'outside'
+    root.mkdir()
+    outside.mkdir()
+    run = write_run(outside, [start()])
+    (root / 'linked').symlink_to(run, target_is_directory=True)
+    store = d.DashboardStore(root)
+    with pytest.raises(d.InvalidRun):
+        store.load('linked')
+    local = root / 'local'
+    local.mkdir()
+    (local / 'events.jsonl').symlink_to(run / 'events.jsonl')
+    assert store.load('local')['status'] == 'incomplete'
+    for name in ('../outside', '/tmp', 'a/b', '..', '.', 'a\\b'):
+        with pytest.raises(d.InvalidRun):
+            store.load(name)
+
+
+def test_real_http_is_loopback_read_only_and_serves_only_explicit_assets(tmp_path):
+    root, assets = tmp_path / 'runs', tmp_path / 'assets'
+    root.mkdir()
+    assets.mkdir()
+    run = write_run(root, [start()])
+    before = (run / 'events.jsonl').read_bytes()
+    (assets / 'index.html').write_text('<html>dashboard</html>')
+    (assets / 'private.txt').write_text('must-not-serve')
+    server = d.create_server(root, port=0, static_root=assets)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        for method, path, status in [('GET', '/', 200), ('HEAD', '/', 200),
+                                     ('GET', '/api/runs', 200),
+                                     ('GET', '/api/run?id=match-one', 200),
+                                     ('GET', '/api/run?id=../outside', 404),
+                                     ('GET', '/api/run?id=%2Ftmp', 404),
+                                     ('GET', '/api/run?id=a&id=b', 404),
+                                     ('GET', '/private.txt', 404),
+                                     ('GET', '/events.jsonl', 404),
+                                     ('POST', '/api/run?id=match-one', 405),
+                                     ('DELETE', '/api/run?id=match-one', 405)]:
+            connection.request(method, path)
+            response = connection.getresponse()
+            body = response.read()
+            assert response.status == status, (method, path, body)
+            assert response.getheader('Access-Control-Allow-Origin') is None
+            if method == 'HEAD':
+                assert body == b''
+        connection.request('GET', '/api/runs', headers={'Host': 'attacker.invalid'})
+        response = connection.getresponse()
+        assert response.status == 403
+        response.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert (run / 'events.jsonl').read_bytes() == before
+    assert sorted(p.name for p in run.iterdir()) == ['events.jsonl']
+    with pytest.raises(ValueError, match='loopback'):
+        d.create_server(root, host='0.0.0.0', port=0)
+
+
+def test_run_index_reuses_unchanged_parse_and_invalidates_on_append(tmp_path, monkeypatch):
+    run = write_run(tmp_path, [start()])
+    store = d.DashboardStore(tmp_path)
+    original, calls = store.load, []
+    def load(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(store, 'load', load)
+    assert len(store.list_runs()['runs']) == 1
+    assert len(store.list_runs()['runs']) == 1
+    assert len(calls) == 1
+    with (run / 'events.jsonl').open('a') as stream:
+        stream.write(json.dumps(dict(event('HEARTBEAT'), seq=1)) + '\n')
+    store.list_runs()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('config', [{'agents': None}, {'agents': 5}, None])
+def test_malformed_run_payload_does_not_poison_healthy_inventory(tmp_path, config):
+    write_run(tmp_path, [start()], name='healthy')
+    write_run(tmp_path, [event('MATCH_START', config=config)], name='malformed')
+    store = d.DashboardStore(tmp_path)
+    result = store.load('malformed', now=NOW)
+    assert result['status'] == 'incomplete'
+    assert any('Malformed' in warning for warning in result['warnings'])
+    inventory = {row['id']: row for row in store.list_runs()['runs']}
+    assert inventory['malformed']['status'] == 'incomplete'
+    assert 'healthy' in inventory
