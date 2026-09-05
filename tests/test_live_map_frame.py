@@ -88,7 +88,8 @@ def test_real_lua_units_cities_and_terrain_share_host_frame(tmp_path, engine, ax
 local unit={{GetID=function() return 131073 end,GetX=function() return {x} end,
  GetY=function() return {y} end,GetType=function() return 1 end}}
 local city={{GetID=function() return 65536 end,GetX=function() return {x} end,
- GetY=function() return {y} end,GetName=function() return 'Frame City' end}}
+ GetY=function() return {y} end,GetName=function() return 'Frame City' end,
+ GetBuildQueue=function() return {{GetCurrentProductionTypeHash=function() return 0 end}} end}}
 local player={{GetID=function() return 1 end,
  GetUnits=function() return {{Members=function() return ipairs({{unit}}) end}} end,
  GetCities=function() return {{Members=function() return ipairs({{city}}) end}} end}}

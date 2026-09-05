@@ -192,7 +192,8 @@ def test_units_and_cities_generated_read_uses_qualified_raw_identity(lua):
 local unit={GetID=function() return 131073 end,GetX=function() return 1 end,
  GetY=function() return 0 end,GetType=function() return 1 end}
 local city={GetID=function() return 65537 end,GetX=function() return 1 end,
- GetY=function() return 0 end,GetName=function() return 'Uruk' end}
+ GetY=function() return 0 end,GetName=function() return 'Uruk' end,
+ GetBuildQueue=function() return {GetCurrentProductionTypeHash=function() return 0 end} end}
 local player={GetID=function() return 1 end,
  GetUnits=function() return {Members=function() return ipairs({unit}) end} end,
  GetCities=function() return {Members=function() return ipairs({city}) end} end}

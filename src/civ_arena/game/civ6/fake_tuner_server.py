@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import zlib
 
 from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.vendor import tuner_client
@@ -104,6 +105,12 @@ class FakeMod:
         self._restored: set[int] = set()
         self.act_log: list[tuple[str, str]] = []  # (tool, status) per command
         self.reset_board()
+
+    def _production_hash(self, item: str) -> int:
+        prefix = "UNIT_" if self.BUILDABLE.get(item, (0, "building"))[1] == "unit" \
+            else "BUILDING_"
+        raw = (~zlib.crc32((prefix + item).encode())) & 0xFFFFFFFF
+        return raw if raw < 2**31 else raw - 2**32
 
     # -- the mini engine ---------------------------------------------------
     def reset_board(self) -> None:
@@ -326,7 +333,8 @@ class FakeMod:
                 return [f"ACT|set_city_production|ERR|ARGS_INVALID|{item}",
                         "---END---"]
             c["queue"] = item
-            return [f"ACT|set_city_production|OK|{item}|10", "---END---"]
+            return [f"PRODUCTION_REQUEST|{self._production_hash(item)}",
+                    f"ACT|set_city_production|OK|{item}|10", "---END---"]
         if tool == "purchase":
             cid = dec(num(r"CityManager\.GetCity\(me, (\d+)\)"))
             item = token(r"GameInfo\.Units\['UNIT_([A-Z0-9_]+)'\]") or \
@@ -418,7 +426,8 @@ class FakeMod:
         if m is not None:
             out = self._act(m.group(1), code)
             if out is not None:
-                self.act_log.append((m.group(1), out[0].split("|")[2]))
+                verdict = next(row for row in out if row.startswith("ACT|"))
+                self.act_log.append((m.group(1), verdict.split("|")[2]))
                 return out
         if "PUPPET_PLAYERS = {}" in code:
             # the injected mod source (D9): execution succeeds silently, and
@@ -474,7 +483,7 @@ class FakeMod:
             c = self.cities.get(cid)
             if c is None or c["owner"] != self.local_player:
                 return ["CURPROD|-1", "---END---"]
-            h = 4242 if c.get("queue") else 0
+            h = self._production_hash(c["queue"]) if c.get("queue") else 0
             return [f"CURPROD|{h}", "---END---"]
         if "Puppeteer.Status" in code:
             if not self.has_status:

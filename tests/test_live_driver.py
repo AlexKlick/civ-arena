@@ -789,16 +789,12 @@ def test_llm_client_string_content_normalizes():
     assert _normalize_blocks(None) is None
 
 
-def test_set_city_production_readback_requires_hash_match():
-    """B2: the readback uses GetCurrentProductionTypeHash and OK requires
-    cur == item.Hash — the old GetCurrentProductionType chain never
-    existed in shipped Lua (cur stayed -1, every submission "passed",
-    and housekeeping overwrote the agent's choice ten turns running)."""
+def test_set_city_production_submits_hash_for_subsequent_readback():
+    """The engine applies requests after the Lua chunk; the adapter verifies later."""
     lua = lua_translator.set_city_production("c0:1", "MONUMENT")
-    assert "GetCurrentProductionTypeHash" in lua
-    assert "GetCurrentProductionType(" not in lua
-    assert "cur ~= item.Hash" in lua          # 0 (nothing set) FAILS now
-    assert "engine-did-not-set" in lua
+    assert "PRODUCTION_REQUEST|" in lua
+    assert "tostring(item.Hash)" in lua
+    assert "GetCurrentProductionTypeHash" not in lua
 
 
 def test_cities_read_uses_production_type_hash():
@@ -840,4 +836,4 @@ def test_fake_mod_curprod_tracks_queue():
                 " tParams)")
     city["queue"] = "MONUMENT"   # the act handler's effect, set directly
     rows = mod.respond(read)
-    assert rows and rows[0] == "CURPROD|4242"
+    assert rows and rows[0] == f"CURPROD|{mod._production_hash('MONUMENT')}"

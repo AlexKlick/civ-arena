@@ -70,6 +70,9 @@ _COORD = re.compile(r"^-?\d+,-?\d+\Z")
 # tools that operate on a unit: restore its movement before the command
 # (the lease froze every unit at engagement), re-freeze on rejection so
 # the release diff sees the frozen baseline.
+_PRODUCTION_VERIFY_TIMEOUT_S = 5.0
+_PRODUCTION_POLL_INTERVAL_S = 0.2
+
 _UNIT_TOOLS = frozenset({"move_unit", "attack", "fortify", "found_city"})
 
 # Codex P1-5: attrs each tool may legitimately move (the mod's DiffSinceLast
@@ -137,6 +140,37 @@ def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
             except ValueError:
                 return f"{tool}.{key} is not an exact owner-qualified ID"
     return None
+
+
+async def verify_production(connection, city_id: str, submitted: list[str]) -> int:
+    """Verify an asynchronous request without submitting it a second time."""
+    receipts = [row.split("|", 1)[1] for row in response_parser._split_lines(submitted)
+                if row.startswith("PRODUCTION_REQUEST|")]
+    if len(receipts) != 1 or not re.fullmatch(r"-?[0-9]+", receipts[0]):
+        raise RuntimeError("production request lacks an exact target-hash receipt")
+    expected = int(receipts[0])
+    if expected == 0:
+        raise RuntimeError("production request target hash is empty")
+    last = None
+    try:
+        async with asyncio.timeout(_PRODUCTION_VERIFY_TIMEOUT_S):
+            while True:
+                rows = await connection.execute_write(
+                    lua_translator.current_production_read(city_id))
+                values = [row.split("|", 1)[1] for row in response_parser._split_lines(rows)
+                          if row.startswith("CURPROD|")]
+                if len(values) != 1 or not re.fullmatch(r"-?[0-9]+", values[0]):
+                    raise RuntimeError("production readback unavailable after submission")
+                last = int(values[0])
+                if last == expected:
+                    return expected
+                if last == -1:
+                    raise RuntimeError("production city or owner unavailable after submission")
+                await asyncio.sleep(_PRODUCTION_POLL_INTERVAL_S)
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"production request unconfirmed: expected hash {expected}, last {last}; "
+            "submitted request may still apply") from exc
 
 
 _MOD_VERSION_RE = re.compile(r'Puppeteer\.version\s*=\s*"([^"]+)"')
@@ -549,8 +583,8 @@ class FireTunerAdapter:
     # -- observation ----------------------------------------------------------
     async def observe(self, req: ObserveRequest) -> Any:
         # OMNISCIENT by seam contract — the referee projects scope AFTER this
-        # returns. Reads are GameCore (verified accessors), except
-        # AVAILABLE_PRODUCTION whose CanStartOperation gate is InGame-only.
+        # returns. City queues and AVAILABLE_PRODUCTION use InGame; the
+        # current production getter is unavailable on GameCore city objects.
         if req.kind is ObserveKind.OVERVIEW:
             lines = await self._conn.execute_read(
                 lua_translator.overview_read())
@@ -559,7 +593,7 @@ class FireTunerAdapter:
             lines = await self._conn.execute_read(lua_translator.units_read())
             return response_parser.parse_units(lines, qualified=True)
         if req.kind is ObserveKind.CITIES:
-            lines = await self._conn.execute_read(lua_translator.cities_read())
+            lines = await self._conn.execute_write(lua_translator.cities_read())
             return response_parser.parse_cities(lines, qualified=True)
         if req.kind is ObserveKind.VISIBLE_MAP:
             # M17c derived visibility (the engine's fog state is not
@@ -575,7 +609,7 @@ class FireTunerAdapter:
             units = response_parser.parse_units(await self._conn.execute_read(
                 lua_translator.units_read()), qualified=True)
             cities = response_parser.parse_cities(
-                await self._conn.execute_read(lua_translator.cities_read()), qualified=True)
+                await self._conn.execute_write(lua_translator.cities_read()), qualified=True)
             visible: set[str] = set()
             for u in units:
                 if u["owner"] == req.player_id:
@@ -707,6 +741,9 @@ class FireTunerAdapter:
                 status="rejected", result=verdict, mutations=(),
                 rejection=_rejection_value(verdict["rejection"]),
                 error=verdict["detail"])
+        production_hash = None
+        if cmd.tool == "set_city_production":
+            production_hash = await verify_production(self._conn, cmd.args["city_id"], lines)
         # Codex P2-10: a landed act MUST refresh the digest before returning
         # — otherwise execute()'s post-hash is the PRE-command digest and the
         # log's hash trail goes stale mid-lease.
@@ -714,10 +751,11 @@ class FireTunerAdapter:
         muts = await self._drain_command_diff(
             cmd.player_id, _TOOL_ATTRS.get(cmd.tool, ""),
             self._next_diff_seq())
-        return ActionResult(
-            status="accepted",
-            result={"tool": cmd.tool, "detail": verdict["detail"]},
-            mutations=tuple(muts))
+        result = {"tool": cmd.tool, "detail": verdict["detail"]}
+        if production_hash is not None:
+            result.update(production_hash=production_hash,
+                          verification="subsequent_ingame_read")
+        return ActionResult(status="accepted", result=result, mutations=tuple(muts))
 
     def _next_diff_seq(self) -> int:
         """Per-lease monotonically increasing diff sequence (Codex P1-6):

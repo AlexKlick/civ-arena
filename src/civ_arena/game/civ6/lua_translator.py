@@ -189,29 +189,31 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         -- in command chunks, live-learned run 009)
         name = string.gsub(name, "|", "-")
         name = string.gsub(name, "%c", " ")
+        -- InGame queue is authoritative. Missing accessors must not look idle.
+        local bq = city:GetBuildQueue()
+        if bq == nil or bq.GetCurrentProductionTypeHash == nil then
+            error("city production queue unavailable")
+        end
+        local h = bq:GetCurrentProductionTypeHash()
+        if type(h) ~= "number" then error("city production hash unavailable") end
         local queue = "-"
-        pcall(function()
-            local bq = city:GetBuildQueue()
-            if bq ~= nil and bq.GetCurrentProductionTypeHash ~= nil then
-                local h = bq:GetCurrentProductionTypeHash()
-                if h ~= nil and h ~= 0 then
-                    for row in GameInfo.Units() do
-                        if row.Hash == h then queue = row.UnitType break end
-                    end
-                    if queue == "-" then
-                        for row in GameInfo.Buildings() do
-                            if row.Hash == h then queue = row.BuildingType break end
-                        end
-                    end
-                    if queue ~= "-" then
-                        local nm = queue
-                        if string.sub(nm, 1, 5) == "UNIT_" then nm = string.sub(nm, 6) end
-                        if string.sub(nm, 1, 9) == "BUILDING_" then nm = string.sub(nm, 10) end
-                        queue = nm
-                    end
+        if h ~= 0 then
+            for row in GameInfo.Units() do
+                if row.Hash == h then queue = row.UnitType break end
+            end
+            if queue == "-" then
+                for row in GameInfo.Buildings() do
+                    if row.Hash == h then queue = row.BuildingType break end
                 end
             end
-        end)
+            if queue == "-" then
+                queue = "UNKNOWN_PRODUCTION_" .. tostring(h)
+            elseif string.sub(queue, 1, 5) == "UNIT_" then
+                queue = string.sub(queue, 6)
+            elseif string.sub(queue, 1, 9) == "BUILDING_" then
+                queue = string.sub(queue, 10)
+            end
+        end
         local pop = 1
         pcall(function() pop = math.floor(city:GetPopulation()) end)
         local x = city:GetX() local y = city:GetY()
@@ -828,22 +830,9 @@ tParams[CityOperationTypes.PARAM_INSERT_MODE] = CityOperationTypes.VALUE_EXCLUSI
 CityManager.RequestOperation(pCity, CityOperationTypes.BUILD, tParams)
 local turns = -1
 pcall(function() turns = math.floor(bq:GetTurnsLeft(item.Hash)) end)
--- Codex P1-4 readback: OK means the queue TOOK the item, not merely that
--- the request was submitted (upstream's NOT_SET verification shape).
--- B2: the accessor is GetCurrentProductionTypeHash (0 = nothing) — the
--- old GetCurrentProductionType chain never existed in shipped Lua, so
--- cur stayed -1 and EVERY submission "passed" (live-tourney-glm53: ten
--- MONUMENT re-queues, each overwriting the agent's own choice, all OK).
-local cur = 0
-pcall(function()
-    if bq.GetCurrentProductionTypeHash ~= nil then
-        cur = bq:GetCurrentProductionTypeHash()
-    end
-end)
-if cur ~= item.Hash then
-    print('ACT|set_city_production|ERR|ILLEGAL_MOVE|engine-did-not-set')
-    print('---END---') return
-end
+-- RequestOperation applies asynchronously. The adapter must poll this hash
+-- in subsequent InGame reads before reporting accepted to the agent.
+print('PRODUCTION_REQUEST|' .. tostring(item.Hash))
 print('ACT|set_city_production|OK|{item_id}|' .. turns)
 print('---END---')"""
 
@@ -861,12 +850,11 @@ if pCity == nil or pCity:GetID() ~= {cid} then
     print('CURPROD|-1') print('---END---') return
 end
 local bq = pCity:GetBuildQueue()
-local h = 0
-pcall(function()
-    if bq ~= nil and bq.GetCurrentProductionTypeHash ~= nil then
-        h = bq:GetCurrentProductionTypeHash()
-    end
-end)
+if bq == nil or bq.GetCurrentProductionTypeHash == nil then
+    error("city production queue unavailable")
+end
+local h = bq:GetCurrentProductionTypeHash()
+if type(h) ~= "number" then error("city production hash unavailable") end
 print('CURPROD|' .. tostring(h))
 print('---END---')"""
 
