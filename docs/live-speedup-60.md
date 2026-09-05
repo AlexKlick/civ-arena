@@ -202,6 +202,45 @@ terminator appears. The focused gate passed 54 tests:
 [silent hook regression log](../runs/sixty-round-development-20260905/silent-hooks-reviewed-focused.log).
 This proves the local regression; another fresh live run is still required.
 
+## Strategic autopilot validation lane
+
+The user's updated design moves routine decision work into the controller.
+The opt-in configuration is `configs/live-hotseat-strategic-minimax2-060.yaml`:
+both strategic models remain MiniMax-M3, with the same provider, request caps,
+sixty-round target and `declare_own_endpath_drift=true` allowance.
+The controller supplies projected state and accepts one validated JSON directive
+on the initial turn, five-turn cadence, or meaningful state-change trigger.
+Quiet turns use no provider request. Tactical overrides expire after one turn.
+
+Scouting is a bounded heuristic over known adjacent terrain, with reproducible
+selection seeds and component scores. It is not a legal-move oracle or a
+calibrated outcome forecast. Actual moves go through the existing audited
+facade; engine rejection and observed positions remain authoritative. The
+browser distinguishes model strategy updates from autopilot execution and
+shows alternatives alongside observed action results. Its pre-live Chrome
+checks use synthetic records only:
+[browser review](../runs/sixty-round-development-20260905/strategic-review/civ-strategy-browser-review-chrome-final.log).
+
+This mode is explicitly fresh-only until directive and trigger history can be
+restored through the checkpoint schema. It does not imply full-game victory,
+stronger strategic play, or the future multi-turn technology/civic dependency
+forecast. The launch command below retains the approved limits:
+
+```bash
+PYTHONPATH=src PYTHONUNBUFFERED=1 DISPLAY=:1 \
+  /home/alexk/documents/civ-arena/.venv/bin/python scripts/live_zero_touch.py \
+  --session arch1 --kill-first \
+  --config configs/live-hotseat-strategic-minimax2-060.yaml --rounds 60 \
+  --startup-timeout 2700 --match-timeout 7200 --agent-turn-timeout 600 \
+  --recovery-timeout 180 --recovery-sweeps 8 \
+  --run-id UNIQUE_FRESH_ID --runs-root /home/alexk/civ-arena-reliability-20260904/runs
+```
+
+The local launch helper records the commit, source tree, config/mod hashes and
+unique ID, and preserves a run-specific installed-mod backup before copying the
+reviewed mod. Startup separately preserves replaced save slots. Do not launch
+with an active tuner client or reuse an existing run ID.
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
