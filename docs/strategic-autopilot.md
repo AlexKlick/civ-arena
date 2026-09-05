@@ -32,11 +32,25 @@ flowchart LR
 
 [`StrategicController`](../src/civ_arena/agents/llm/strategic_controller.py) is an
 opt-in controller, selected by `decision_mode: strategic_autopilot`. On a
-decision turn it requests exactly one `submit_directive` tool call. Missing,
-multiple, malformed, truncated, or prose-accompanied directive responses fail
-the turn. Ordinary game-action tools and basic observation tools are not exposed
-to this model call. The existing client still owns transport retries and records
-actual posts; one decision request must not be confused with one network attempt.
+decision turn it requests exactly one `submit_directive` tool call using named
+tool selection. A complete, valid directive can be accompanied by text or
+thinking blocks; those blocks never supply actions. Missing, multiple, malformed
+or truncated directives permit one fresh format-repair request within the
+existing tool-round and match-request limits. Repeated failure aborts before any
+game action. Ordinary game-action tools and basic observation tools are not
+exposed to this model call. The existing client still owns transport retries and
+records actual posts; one decision request must not be confused with one network
+attempt. MiniMax documents support for `tool_choice`; the named-tool JSON shape
+follows the compatible Messages API.
+[MiniMax compatibility](https://platform.minimax.io/docs/api-reference/text-anthropic-api),
+[named-tool selection](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools).
+
+Each decision attempt retains its exact bounded, player-visible context and a
+digest. Response diagnostics retain shape, usage and categorical validation
+outcome, without raw prose or thinking. These records distinguish a formatting
+failure from transport failure and bind a later reproduction to the actual
+curated input. The earlier failed turn-sixteen run predates these diagnostics
+and cannot be retroactively reconstructed from its compact observation events.
 
 The initial turn requires a decision. The default cadence is five turns since
 the previous decision. Additional triggers include changed owned cities, newly
