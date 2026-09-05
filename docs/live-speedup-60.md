@@ -303,6 +303,27 @@ orders. Neither decision had scouting candidates, so actual live probability-
 chart proof remains unavailable; synthetic chart proof remains separate.
 [Browser records and screenshots](../runs/sixty-round-live-20260905T041339Z/browser-proof/).
 
+## Guarded handoff release
+
+Mod 0.3.7 and the adapter now execute one guarded GameCore handoff: validate
+outgoing lease/turn/local identity and the next armed living major, freeze and
+verify outgoing movement, then switch local control. The rolling snapshot is
+preserved so unrelated drift remains visible. The explicit receipt is bound to
+both seats and the turn; helper execution is bounded to five seconds, followed
+by observed lease-release polling. Function-backed capability preflight rejects
+an incomplete mod before play. Next-seat native `IsHuman()` is not required
+before switching because that value follows local control in this build.
+
+Full integrated pytest at `e7e6b3e` passed **1,043 tests**, with one skipped and
+zero failures/errors. All 1,044 collected identities ran exactly once in four
+disjoint groups, with complete logs. Ruff passed. The integrated code matches
+the independently reviewed isolated commit `3f3a11e`.
+[Release summary](../runs/sixty-round-development-20260905/guarded-handoff-release/summary.json),
+[Ruff](../runs/sixty-round-development-20260905/guarded-handoff-release-ruff.log),
+and [review and focused evidence](../runs/sixty-round-live-20260905T041339Z/guarded-handoff-evidence/).
+Fresh sixty-round validation is still pending; prior failed runs and the
+postmortem probe do not satisfy it.
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
