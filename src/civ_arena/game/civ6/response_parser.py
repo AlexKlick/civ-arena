@@ -67,6 +67,8 @@ def parse_handshake(lines: list[str]) -> dict[str, Any]:
         "supports_digest": present and parsed.get("SUPPORTS_DIGEST") is True,
         # mod >= 0.3: without the rolling DiffSinceLast seam, act() cannot
         # reconcile commanded effects and the live driver refuses to dispatch
+        "supports_guarded_handoff": present
+        and parsed.get("SUPPORTS_GUARDED_HANDOFF") is True,
         "supports_command_diff": present
         and parsed.get("SUPPORTS_COMMAND_DIFF") is True,
     }
@@ -394,3 +396,16 @@ def parse_restore_receipt(lines: list[str], unit_id: str) -> str:
             prefix + "restored", prefix + "already_restored", prefix + "unknown_entity"):
         raise RuntimeError(f"invalid restore completion receipt for {unit_id}: {rows!r}")
     return rows[0].removeprefix(prefix)
+
+
+def parse_handoff_receipt(lines: list[str], player_id: int, turn: int,
+                          next_player: int) -> str:
+    """Require exactly one receipt bound to this transition; failures stay failures."""
+    rows = [line.strip() for line in _split_lines(lines)
+            if line.strip() and line.strip() != "---END---"]
+    prefix = f"HANDOFF|{player_id}|{turn}|{next_player}|"
+    expected = {prefix + "accepted|frozen_then_switched": "accepted",
+                prefix + "duplicate|already_sent": "duplicate"}
+    if len(rows) != 1 or rows[0] not in expected:
+        raise RuntimeError(f"handoff completion not verified: {rows!r}")
+    return expected[rows[0]]

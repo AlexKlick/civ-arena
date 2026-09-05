@@ -625,6 +625,16 @@ print("---END---")
 """
 
 
+def guarded_handoff(player_id: int, turn: int, next_player: int) -> str:
+    """One checked GameCore transaction; IDs never interpolate unchecked text."""
+    for value in (player_id, turn, next_player):
+        if type(value) is not int or value < 0 or value > 2**53 - 1:
+            raise ValueError("invalid handoff identity")
+    if player_id == next_player or turn < 1:
+        raise ValueError("invalid handoff transition")
+    return f"Puppeteer.GuardedHandoff({player_id}, {turn}, {next_player})"
+
+
 def finish_all_moves(player_id: int) -> str:
     """D7-H2 primitive: zero remaining movement so the engine auto-completes."""
     return f"Puppeteer.FinishAllMoves({player_id})"

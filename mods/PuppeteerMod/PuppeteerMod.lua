@@ -45,15 +45,16 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.6"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.7"
     and type(Puppeteer.AttachCurrentTurn) == "function"
+    and type(Puppeteer.GuardedHandoff) == "function"
     and Puppeteer.supports_freeze and Puppeteer.supports_ledger
     and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
     return
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.6"
+Puppeteer.version = "0.3.7"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -240,6 +241,7 @@ function Puppeteer.Handshake()
     print("SUPPORTS_LEDGER|" .. boolstr(Puppeteer.supports_ledger))
     print("SUPPORTS_DIGEST|" .. boolstr(Puppeteer.supports_digest))
     print("SUPPORTS_COMMAND_DIFF|" .. boolstr(Puppeteer.supports_command_diff))
+    print("SUPPORTS_GUARDED_HANDOFF|" .. boolstr(type(Puppeteer.GuardedHandoff) == "function"))
     print("---END---")
 end
 
@@ -638,6 +640,58 @@ function Puppeteer.FinishAllMoves(playerID)
     end
     print("FINISHED_MOVES|" .. playerID .. "|" .. n)
     print("---END---")
+end
+
+-- Transfer local control only after the outgoing seat has no movement.
+-- One GameCore chunk removes the switch-to-nonlocal / later-freeze window.
+-- Never advance lease.snapshot here: release must still audit all drift.
+local handoff_receipts = {}
+function Puppeteer.GuardedHandoff(playerID, turn, nextPlayer)
+    local key = tostring(playerID) .. ":" .. tostring(turn) .. ":" .. tostring(nextPlayer)
+    local function report(status, reason)
+        print("HANDOFF|" .. tostring(playerID) .. "|" .. tostring(turn)
+            .. "|" .. tostring(nextPlayer) .. "|" .. status .. "|" .. reason)
+        print("---END---")
+    end
+    local ok, status, reason = pcall(function()
+        for _, value in ipairs({playerID, turn, nextPlayer}) do
+            if type(value) ~= "number" or value < 0 or value ~= math.floor(value) then
+                return "rejected", "invalid_identity"
+            end
+        end
+        if handoff_receipts[key] then return "duplicate", "already_sent" end
+        if lease == nil or lease.playerID ~= playerID or lease.turn ~= turn then
+            return "rejected", "wrong_lease"
+        end
+        if Game.GetCurrentGameTurn() ~= turn then return "rejected", "wrong_turn" end
+        if Game.GetLocalPlayer() ~= playerID then return "rejected", "wrong_local" end
+        if nextPlayer == playerID or not PUPPET_PLAYERS[nextPlayer] then
+            return "rejected", "invalid_next"
+        end
+        local nextAlive = false
+        for _, player in ipairs(PlayerManager.GetAliveMajors()) do
+            if player:GetID() == nextPlayer then nextAlive = true end
+        end
+        if not nextAlive then return "rejected", "next_not_alive_major" end
+        local player = Players[playerID]
+        if player == nil or not player:IsHuman() or not player:IsTurnActive() then
+            return "rejected", "current_not_active_local_human"
+        end
+        for _, unit in player:GetUnits():Members() do UnitManager.FinishMoves(unit) end
+        for _, unit in player:GetUnits():Members() do
+            if unit:GetMovesRemaining() ~= 0 then return "failed", "freeze_incomplete" end
+        end
+        -- Refuse an unexpected synchronous transition; do not switch a new seat.
+        if lease == nil or lease.playerID ~= playerID or lease.turn ~= turn
+            or Game.GetCurrentGameTurn() ~= turn or Game.GetLocalPlayer() ~= playerID then
+            return "failed", "changed_during_freeze"
+        end
+        PlayerManager.SetLocalPlayerAndObserver(nextPlayer)
+        if Game.GetLocalPlayer() ~= nextPlayer then return "failed", "switch_not_observed" end
+        handoff_receipts[key] = true
+        return "accepted", "frozen_then_switched"
+    end)
+    if not ok then report("failed", "engine_error") else report(status, reason) end
 end
 
 -- -- command application ---------------------------------------------------------
