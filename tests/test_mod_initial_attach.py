@@ -186,3 +186,27 @@ def test_translator_emits_only_guarded_initial_call():
     for args in ((True, 1), (0, True), (0, 2), (-1, 1), ('0', 1)):
         with pytest.raises(ValueError):
             lua_translator.attach_current_turn(*args)
+
+
+def test_native_handoff_emits_no_unsolicited_rows_into_ledger_reply(run_mod):
+    rows = run_mod("""
+Puppeteer.SetPuppet(0,true)
+Puppeteer.SetPuppet(1,true)
+Puppeteer.AttachCurrentTurn(0,1)
+Puppeteer.Release(0,1)
+print('RESPONSE_BEGIN')
+-- Reproduce the live handoff race: the native hook fires after Release
+-- and before DumpLedger. Only the requested ledger terminator may print.
+currentTurn=2
+hooks.activated(1,true)
+hooks.start(1)
+hooks.start(1)
+Puppeteer.DumpLedger()
+print('RESPONSE_END')
+assert(units[1].moves==0 and units[2].moves==0)
+assert(string.find(Puppeteer.Status(), 'LEASE_PLAYER|1', 1, true))
+assert(string.find(Puppeteer.Status(), 'LEASE_TURN|2', 1, true))
+assert(string.find(Puppeteer.Trace(), 'LEASE_SET|1|2', 1, true))
+""")
+    start, end = rows.index('RESPONSE_BEGIN'), rows.index('RESPONSE_END')
+    assert rows[start + 1:end] == ['---END---']

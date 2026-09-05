@@ -413,10 +413,10 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
-        if doc["mod_version"] != "0.3.5":
+        if doc["mod_version"] != "0.3.6":
             raise RuntimeError(
-                "PuppeteerMod 0.3.5 required for owner-qualified IDs "
-                "and checked restore completion")
+                "PuppeteerMod 0.3.6 required for owner-qualified IDs "
+                "checked restore completion, and silent native lease hooks")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:

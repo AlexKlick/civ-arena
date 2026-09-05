@@ -14,7 +14,7 @@
 --
 -- v0.2 (M14b):
 --   * Status() — POLLABLE lease state. The tuner wire drains unsolicited
---     output around every command, so hook-time prints never arrive;
+--     output around every command; hook-time prints can contaminate replies;
 --     every wait must poll Status() instead (docs: D3, poll never push).
 --   * ambient recorder — BeginAmbientWindow snapshots the player, the
 --     EndAmbientWindow diff is booked as the DECLARED manifest; Release
@@ -45,7 +45,7 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.5"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.6"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and Puppeteer.supports_freeze and Puppeteer.supports_ledger
     and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
@@ -53,7 +53,7 @@ if type(Puppeteer) == "table" and Puppeteer.version == "0.3.5"
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.5"
+Puppeteer.version = "0.3.6"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -308,7 +308,8 @@ local function acquire_lease(playerID, initialAllowances)
     if lease.turn == 1 then PUPPETEER_INITIAL_ATTACH_USED[playerID] = true end
     trace("LEASE_SET|" .. tostring(playerID) .. "|"
           .. tostring(Game.GetCurrentGameTurn()))
-    print("PUPPET_ACTIVE|true")
+    -- Native hooks run between RPCs: never print onto the command-response
+    -- channel here. Status() and Trace() are the explicit polling surfaces.
     return true, "acquired"
 end
 

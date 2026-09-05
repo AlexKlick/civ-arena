@@ -41,7 +41,7 @@ async def test_mod_handshake_gate_passes():
         await adapter.setup({})
         doc = await adapter.require_mod()
         assert doc["present"] is True
-        assert doc["mod_version"] == "0.3.5"
+        assert doc["mod_version"] == "0.3.6"
         assert doc["supports_freeze"] and doc["supports_ledger"]
         assert doc["supports_command_diff"], "M14d: DiffSinceLast required"
         await adapter.teardown()
