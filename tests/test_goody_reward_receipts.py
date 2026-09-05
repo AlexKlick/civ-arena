@@ -146,7 +146,8 @@ def test_native_capability_requires_event_registration_and_functions(native):
 def completion(nonce=NONCE, seq=1):
     return [f'REWARD_FINISH|{nonce}|{seq}',
             f'REWARD_OBSERVATION|{nonce}|1|1892398955|16|matched_add_population',
-            f'REWARD_CAUSE|{nonce}|0|1|10|GOODYHUT_SURVIVORS|GOODYHUT_ADD_POP|30|3|4', ROW]
+            f'REWARD_CAUSE|{nonce}|0|1|10|GOODYHUT_SURVIVORS|GOODYHUT_ADD_POP|30|3|4|'
+            'IMPROVEMENT_GOODY_HUT', ROW]
 
 
 @pytest.mark.parametrize('alter', [
@@ -207,7 +208,7 @@ async def test_adapter_begin_failure_sends_no_move_or_restore():
 @pytest.mark.parametrize('cap', [None, False])
 async def test_preflight_refuses_missing_reward_hook(cap):
     adapter = FireTunerAdapter()
-    doc = {'mod_version': '0.3.8', 'supports_freeze': True, 'supports_ledger': True,
+    doc = {'mod_version': '0.3.9', 'supports_freeze': True, 'supports_ledger': True,
            'supports_digest': True, 'supports_command_diff': True, 'supports_guarded_handoff': True}
     if cap is not None:
         doc['supports_reward_receipts'] = cap
@@ -311,3 +312,86 @@ async def test_rejected_move_is_refrozen_even_when_reward_cancellation_fails():
         await adapter.act(ActionCommand('move_unit', {'unit_id': 'u0:10', 'dest': '1,0'},
                                        0, 'rejected', 'lease'))
     assert moves == 0
+
+
+SUMERIA = """
+improvement=2
+GameInfo.Improvements[2]={ImprovementType='IMPROVEMENT_BARBARIAN_CAMP'}
+civilization='CIVILIZATION_SUMERIA'
+PlayerConfigurations={[0]={GetCivilizationTypeName=function() return civilization end}}
+function each(rows)
+    local i=0
+    return function() i=i+1; return rows[i] end
+end
+civilizationTraits={{CivilizationType='CIVILIZATION_SUMERIA',
+                    TraitType='TRAIT_CIVILIZATION_FIRST_CIVILIZATION'}}
+traitModifiers={{TraitType='TRAIT_CIVILIZATION_FIRST_CIVILIZATION',
+                 ModifierId='TRAIT_BARBARIAN_CAMP_GOODY'}}
+GameInfo.CivilizationTraits=function() return each(civilizationTraits) end
+GameInfo.TraitModifiers=function() return each(traitModifiers) end
+GameInfo.Modifiers.TRAIT_BARBARIAN_CAMP_GOODY={
+    ModifierType='MODIFIER_PLAYER_ADJUST_IMPROVEMENT_GOODY_HUT'}
+GameInfo.DynamicModifiers={MODIFIER_PLAYER_ADJUST_IMPROVEMENT_GOODY_HUT={
+    CollectionType='COLLECTION_OWNER',EffectType='EFFECT_ADJUST_IMPROVEMENT_GOODY_HUT'}}
+modifierArguments={
+    {ModifierId='GOODY_SURVIVORS_ADD_POPULATION',Name='Amount',Value='1'},
+    {ModifierId='TRAIT_BARBARIAN_CAMP_GOODY',Name='ImprovementType',
+     Value='IMPROVEMENT_BARBARIAN_CAMP'},
+    {ModifierId='TRAIT_BARBARIAN_CAMP_GOODY',Name='GoodyHutImprovementType',
+     Value='IMPROVEMENT_GOODY_HUT'}}
+GameInfo.ModifierArguments=function() return each(modifierArguments) end
+"""
+
+
+def test_sumerian_camp_exact_reward_uses_native_event_and_reports_site(native):
+    rows = native(BEGIN + GROW + FINISH + 'Puppeteer.DumpLedger()', SUMERIA)
+    start = rows.index(f'REWARD_FINISH|{NONCE}|1')
+    end = rows.index('---END---', start)
+    ledger, audit = rp.parse_reward_finish(rows[start:end], NONCE, 1, 0, 1, 'u0:10')
+    assert ledger.count(ROW) == 1
+    assert audit[0]['site_improvement'] == 'IMPROVEMENT_BARBARIAN_CAMP'
+    assert audit[0]['before'] == 3 and audit[0]['after'] == 4
+    assert rows.count(ROW) == 1  # not also booked as undeclared
+
+
+@pytest.mark.parametrize('alter', [
+    "civilization='CIVILIZATION_EGYPT'", 'PlayerConfigurations=nil',
+    'civilizationTraits={}', 'traitModifiers={}',
+    "traitModifiers[1].ModifierId='OTHER'",
+    "GameInfo.Modifiers.TRAIT_BARBARIAN_CAMP_GOODY.ModifierType='OTHER'",
+    'GameInfo.Modifiers.TRAIT_BARBARIAN_CAMP_GOODY=nil',
+    'GameInfo.DynamicModifiers={}',
+    "GameInfo.DynamicModifiers.MODIFIER_PLAYER_ADJUST_IMPROVEMENT_GOODY_HUT.EffectType='OTHER'",
+    "modifierArguments[2].Value='OTHER'", "modifierArguments[3].Value='OTHER'",
+    'modifierArguments[4]=modifierArguments[2]', 'modifierArguments[3]=nil',
+])
+def test_other_civilization_or_missing_changed_trait_chain_cannot_authorize_camp(native, alter):
+    rows = native(BEGIN + GROW + FINISH + "print('UNDECLARED'); Puppeteer.DumpLedger()",
+                  SUMERIA + alter + '\n')
+    assert not any(row.startswith('REWARD_CAUSE|') for row in rows)
+    assert ROW in rows[rows.index('UNDECLARED'):]
+
+
+def test_ordinary_camp_disappearance_does_not_expect_reward_or_quarantine(native):
+    second = 'b' * 64
+    rows = native(BEGIN + 'improvement=0; units[1].x=1\n' + FINISH
+                  + BEGIN.replace(NONCE, second).replace(',0,1)', ',0,2)'),
+                  SUMERIA + "civilization='CIVILIZATION_EGYPT'\n")
+    assert f'REWARD_OBSERVATION|{NONCE}|0|0|0|no_matching_event' in rows
+    assert f'REWARD_BEGIN|{second}|accepted' in rows
+
+
+@pytest.mark.parametrize('setup,site', [(SUMERIA, 2), ('', 1)])
+def test_unchanged_eligible_site_cannot_authorize_population(native, setup, site):
+    rows = native(BEGIN + GROW + f'improvement={site}\n' + FINISH
+                  + 'Puppeteer.DumpLedger()', setup)
+    assert not any(row.startswith('REWARD_CAUSE|') for row in rows)
+    assert ROW in rows
+
+
+def test_sumerian_camp_without_native_event_still_aborts(native):
+    rows = native(BEGIN + 'improvement=0; units[1].x=1\n' + FINISH, SUMERIA)
+    start = rows.index(f'REWARD_FINISH|{NONCE}|1')
+    end = rows.index('---END---', start)
+    with pytest.raises(RuntimeError, match='consumed village lacked native event'):
+        rp.parse_reward_finish(rows[start:end], NONCE, 1, 0, 1, 'u0:10')

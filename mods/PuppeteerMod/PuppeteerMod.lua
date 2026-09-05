@@ -45,7 +45,7 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.8"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.9"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and type(Puppeteer.GuardedHandoff) == "function"
     and type(Puppeteer.BeginRewardCommand) == "function"
@@ -56,7 +56,7 @@ if type(Puppeteer) == "table" and Puppeteer.version == "0.3.8"
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.8"
+Puppeteer.version = "0.3.9"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -593,6 +593,50 @@ local function OnGoodyHutReward(playerID, unitID, rewardType, rewardSubType)
     w.valid_event = ok and valid
 end
 
+-- Sumeria alone receives an additional goody reward when clearing a camp.
+-- Bind the live configuration and active data chain; a camp is not generally
+-- a reward site, and absent/modified data must not create an expectation.
+local function sumerian_camp_reward(playerID)
+    local ok, eligible = pcall(function()
+        local cfg = PlayerConfigurations[playerID]
+        if cfg == nil or cfg:GetCivilizationTypeName() ~= 'CIVILIZATION_SUMERIA' then
+            return false
+        end
+        local trait = 'TRAIT_CIVILIZATION_FIRST_CIVILIZATION'
+        local modifierID = 'TRAIT_BARBARIAN_CAMP_GOODY'
+        local civilizationLinks, modifierLinks = 0, 0
+        for row in GameInfo.CivilizationTraits() do
+            if row.CivilizationType == 'CIVILIZATION_SUMERIA' and row.TraitType == trait then
+                civilizationLinks = civilizationLinks + 1
+            end
+        end
+        for row in GameInfo.TraitModifiers() do
+            if row.TraitType == trait and row.ModifierId == modifierID then
+                modifierLinks = modifierLinks + 1
+            end
+        end
+        if civilizationLinks ~= 1 or modifierLinks ~= 1 then return false end
+        local modifier = GameInfo.Modifiers[modifierID]
+        if modifier == nil
+            or modifier.ModifierType ~= 'MODIFIER_PLAYER_ADJUST_IMPROVEMENT_GOODY_HUT' then
+            return false
+        end
+        local effect = GameInfo.DynamicModifiers[modifier.ModifierType]
+        if effect == nil or effect.CollectionType ~= 'COLLECTION_OWNER'
+            or effect.EffectType ~= 'EFFECT_ADJUST_IMPROVEMENT_GOODY_HUT' then return false end
+        local args, count = {}, 0
+        for row in GameInfo.ModifierArguments() do
+            if row.ModifierId == modifierID then
+                if args[row.Name] ~= nil then return false end
+                args[row.Name], count = row.Value, count + 1
+            end
+        end
+        return count == 2 and args.ImprovementType == 'IMPROVEMENT_BARBARIAN_CAMP'
+            and args.GoodyHutImprovementType == 'IMPROVEMENT_GOODY_HUT'
+    end)
+    return ok and eligible
+end
+
 function Puppeteer.BeginRewardCommand(playerID, turn, unitID, nonce, x, y, seq)
     local function report(status)
         print('REWARD_BEGIN|' .. tostring(nonce) .. '|' .. status)
@@ -623,8 +667,15 @@ function Puppeteer.BeginRewardCommand(playerID, turn, unitID, nonce, x, y, seq)
         if Players[playerID]:GetUnits():FindID(unitID) == nil then return 'rejected' end
         local plot = Map.GetPlot(x,y)
         local improvement = plot ~= nil and GameInfo.Improvements[plot:GetImprovementType()] or nil
-        local was_goody = improvement ~= nil and improvement.ImprovementType == 'IMPROVEMENT_GOODY_HUT'
-        local w = {was_goody=was_goody, player=playerID, turn=turn, unit=unitID, nonce=nonce,
+        local site_kind = nil
+        if improvement ~= nil then
+            local kind = improvement.ImprovementType
+            if kind == 'IMPROVEMENT_GOODY_HUT'
+                or (kind == 'IMPROVEMENT_BARBARIAN_CAMP' and sumerian_camp_reward(playerID)) then
+                site_kind = kind
+            end
+        end
+        local w = {site_kind=site_kind, player=playerID, turn=turn, unit=unitID, nonce=nonce,
             x=x, y=y, seq=seq, events=0, populations={}}
         local best, tied = nil, false
         for _, city in Players[playerID]:GetCities():Members() do
@@ -663,17 +714,17 @@ function Puppeteer.FinishRewardCommand(nonce, attrs, seq)
     local causal = nil
     local checked, consumed = pcall(function()
         local plot = Map.GetPlot(w.x,w.y)
-        if not w.was_goody or plot == nil then return false end
+        if w.site_kind == nil or plot == nil then return false end
         local improvement = GameInfo.Improvements[plot:GetImprovementType()]
-        return improvement == nil or improvement.ImprovementType ~= 'IMPROVEMENT_GOODY_HUT'
+        return improvement == nil or improvement.ImprovementType ~= w.site_kind
     end)
     if checked and consumed and w.events == 0 then reward_quarantined = true end
     local ok, matched = pcall(function()
-        if not w.was_goody or not w.valid_event or w.events ~= 1 or w.city == nil then return false end
+        if w.site_kind == nil or not w.valid_event or w.events ~= 1 or w.city == nil then return false end
         local plot = Map.GetPlot(w.x,w.y)
         if plot == nil then return false end
         local improvement = GameInfo.Improvements[plot:GetImprovementType()]
-        if improvement ~= nil and improvement.ImprovementType == 'IMPROVEMENT_GOODY_HUT' then
+        if improvement ~= nil and improvement.ImprovementType == w.site_kind then
             return false
         end
         local before = w.populations[w.city]
@@ -696,7 +747,7 @@ function Puppeteer.FinishRewardCommand(nonce, attrs, seq)
             .. '|population|' .. ifloor(before) .. '|' .. ifloor(before + 1)
         causal = 'REWARD_CAUSE|' .. nonce .. '|' .. w.player .. '|' .. w.turn
             .. '|' .. w.unit .. '|GOODYHUT_SURVIVORS|GOODYHUT_ADD_POP|'
-            .. w.city .. '|' .. ifloor(before) .. '|' .. ifloor(before + 1)
+            .. w.city .. '|' .. ifloor(before) .. '|' .. ifloor(before + 1) .. '|' .. w.site_kind
         return true
     end)
     if not ok or not matched then reward_row, causal = nil, nil end

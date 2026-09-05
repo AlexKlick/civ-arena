@@ -60,7 +60,7 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.8",
+        version: str = "0.3.9",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
