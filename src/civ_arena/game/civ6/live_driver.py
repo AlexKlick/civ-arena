@@ -612,6 +612,50 @@ def implementation_identity(spec, mod_lua):
             "mod_sha256": hashlib.sha256(mod_lua.encode()).hexdigest()}
 
 
+async def _attach_initial_hotseat_turn(adapter, player: int, audit) -> None:
+    """Acquire an already-active fresh turn once; never skip the first seat.
+
+    Fake games acquire leases through their simulated engine hooks. Live
+    attachment requires the mod's guarded operation and an observed lease.
+    """
+    if adapter._simulate is not None:
+        return
+    async with asyncio.timeout(12):
+        before = await adapter.poll_status()
+        if before.get("PUPPET_ACTIVE") is True or before.get("TURN_ACTIVE") is not True:
+            return
+        turn = before.get("TURN")
+        if type(turn) is not int or turn != 1:
+            raise RuntimeError("initial hotseat attachment requires fresh engine turn 1")
+        conn = adapter._conn
+        async with conn._lock:
+            state = conn.gamecore_index
+            if (not conn.is_connected or state is None
+                    or conn.lua_states.get(state) != "GameCore_Tuner"):
+                raise RuntimeError("initial hotseat attachment has no GameCore connection")
+            # Bypass reconnect/retry: a lost response must not repeat mutation.
+            lines = await conn._locked_execute(
+                state, lua_translator.attach_current_turn(player, turn), 8.0)
+        receipts = [line.strip() for block in lines for line in block.splitlines()
+                    if line.strip().startswith("ATTACH_CURRENT|")]
+        audit("initial_turn_attach", player=player, expected_turn=turn,
+              receipts=[ui_control.redact(row) for row in receipts])
+        if len(receipts) != 1:
+            raise RuntimeError("initial hotseat attachment receipt missing or duplicated")
+        parts = receipts[0].split("|")
+        if (len(parts) != 5 or parts[1] not in ("accepted", "duplicate")
+                or parts[2:4] != [str(player), str(turn)]):
+            raise RuntimeError(
+                f"initial hotseat attachment refused: {ui_control.redact(receipts[0])}")
+        after = await adapter.poll_status()
+        audit("initial_turn_attach_observed", status=after)
+        if (after.get("PUPPET_ACTIVE") is not True
+                or after.get("LEASE_PLAYER") != player
+                or after.get("LEASE_TURN") != turn
+                or after.get("TURN") != turn):
+            raise RuntimeError("initial hotseat attachment did not establish the expected lease")
+
+
 async def phase_dispatch_hotseat(
     spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
     rounds: int, strategy: str, mod_lua: str, *,
@@ -771,6 +815,7 @@ async def phase_dispatch_hotseat(
             audit("mod_capabilities", capabilities=caps)
             for pid in seats:
                 await adapter.read_raw(lua_translator.set_puppet(pid, True))
+            await _attach_initial_hotseat_turn(adapter, ledger.order[0], audit)
             await adapter.refresh_digest()
         adapter.handoff_wait = wait_release
         play_started = time.monotonic()

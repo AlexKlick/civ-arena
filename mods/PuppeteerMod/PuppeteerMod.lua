@@ -43,8 +43,17 @@
 --   * does PlayerManager.SetLocalPlayerAndObserver work from GameCore
 --     context? If not, write paths must run entirely in InGame state.
 
+-- Same-version reinjection must not discard an active lease or its restore
+-- budget. The adapter normally avoids reinjection; this guards direct loads.
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.3"
+    and type(Puppeteer.AttachCurrentTurn) == "function"
+    and Puppeteer.supports_freeze and Puppeteer.supports_ledger
+    and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
+    return
+end
+
 Puppeteer = {}
-Puppeteer.version = "0.3.2"
+Puppeteer.version = "0.3.3"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -64,6 +73,10 @@ end
 
 local PUPPET_PLAYERS = {}          -- set[playerID] = true; configured via SetPuppet
 local lease = nil                  -- { playerID, turn, snapshot = {unitId -> state} }
+-- Survives mod replacement within this GameCore VM, not a fresh game. Once
+-- turn one was acquired (or an attach freeze attempted), release cannot make
+-- that same turn eligible for a new movement allowance.
+PUPPETEER_INITIAL_ATTACH_USED = PUPPETEER_INITIAL_ATTACH_USED or {}
 local command_ledger = {}          -- UNDECLARED actuals: drift the referee never asked for
 local ambient_ledger = {}          -- DECLARED at phase boundaries: the authorization manifest
 local ambient_window_open = false  -- true ONLY inside BeginAmbientWindow/EndAmbientWindow
@@ -265,12 +278,7 @@ end
 
 -- -- freeze / lease -----------------------------------------------------------
 
-local function OnPlayerTurnStartComplete(playerID)
-    trace("HOOK_ENTER|" .. tostring(playerID))
-    if not PUPPET_PLAYERS[playerID] then
-        trace("HOOK_SKIP|not-puppet|" .. tostring(playerID))
-        return
-    end
+local function acquire_lease(playerID, initialAllowances)
     -- Step 1: freeze ALL of the puppet's units (zero movement) so the
     -- built-in AI cannot act during our lease, THEN snapshot. Order is
     -- load-bearing (Codex P1-1): the snapshot is the release-diff baseline,
@@ -284,13 +292,104 @@ local function OnPlayerTurnStartComplete(playerID)
             local ok, err = pcall(function() UnitManager.FinishMoves(unit) end)
             if not ok then trace("FREEZE_ERR|u" .. tostring(unit:GetID())
                                  .. "|" .. tostring(err)) end
+            if initialAllowances ~= nil then
+                if not ok then return false, "freeze_failed" end
+                local checked, preserved = pcall(function()
+                    return unit:GetMovesRemaining() == 0
+                        and unit:GetAttacksRemaining() == initialAllowances[unit:GetID()]
+                end)
+                if not checked or not preserved then return false, "freeze_verification_failed" end
+            end
         end
     end
     lease = { playerID = playerID, turn = Game.GetCurrentGameTurn(),
-              snapshot = snapshot_player(playerID) }
+              snapshot = snapshot_player(playerID),
+              preserve_attacks = initialAllowances ~= nil }
+    if lease.turn == 1 then PUPPETEER_INITIAL_ATTACH_USED[playerID] = true end
     trace("LEASE_SET|" .. tostring(playerID) .. "|"
           .. tostring(Game.GetCurrentGameTurn()))
     print("PUPPET_ACTIVE|true")
+    return true, "acquired"
+end
+
+local function OnPlayerTurnStartComplete(playerID)
+    trace("HOOK_ENTER|" .. tostring(playerID))
+    if not PUPPET_PLAYERS[playerID] then
+        trace("HOOK_SKIP|not-puppet|" .. tostring(playerID))
+        return
+    end
+    -- A delayed native callback after explicit initial acquisition must not
+    -- freeze again or clear the once-per-lease restored-unit set.
+    if lease ~= nil and lease.playerID == playerID
+        and lease.turn == Game.GetCurrentGameTurn() then
+        trace("HOOK_DUPLICATE|" .. tostring(playerID))
+        return
+    end
+    if Game.GetCurrentGameTurn() == 1 and PUPPETEER_INITIAL_ATTACH_USED[playerID] then
+        trace("HOOK_SKIP|initial-already-acquired|" .. tostring(playerID))
+        return
+    end
+    acquire_lease(playerID, nil)
+end
+
+-- Acquire only the initial local human turn whose natural start hook was
+-- missed before injection. No end-turn or global event is synthesized.
+-- GetAttacksRemaining is source-backed; no max/used-attacks accessor is
+-- assumed. Remaining attacks survive both freeze and per-unit restore.
+function Puppeteer.AttachCurrentTurn(expectedPlayer, expectedTurn)
+    local function report(status, reason)
+        print("ATTACH_CURRENT|" .. status .. "|" .. tostring(expectedPlayer)
+            .. "|" .. tostring(expectedTurn) .. "|" .. reason)
+        print("---END---")
+    end
+    local checked, reason, allowances = pcall(function()
+        if type(expectedPlayer) ~= "number" or expectedPlayer < 0
+            or expectedPlayer ~= math.floor(expectedPlayer) then return "invalid_player" end
+        if expectedTurn ~= 1 then return "not_initial_turn" end
+        if Game.GetCurrentGameTurn() ~= expectedTurn then return "turn_mismatch" end
+        if Game.GetLocalPlayer() ~= expectedPlayer then return "not_local_player" end
+        if not PUPPET_PLAYERS[expectedPlayer] then return "not_armed" end
+        local player = Players[expectedPlayer]
+        if player == nil then return "missing_player" end
+        if not player:IsHuman() then return "not_human" end
+        if not player:IsTurnActive() then return "not_active" end
+        if lease ~= nil then
+            if lease.playerID == expectedPlayer and lease.turn == expectedTurn then
+                return "duplicate"
+            end
+            return "existing_lease"
+        end
+        if PUPPETEER_INITIAL_ATTACH_USED[expectedPlayer] then return "already_acquired" end
+        local remainingAttacks = {}
+        local count = 0
+        -- Complete every precondition before freezing ANY unit. Missing API
+        -- or partially spent movement fails closed without mutating the game.
+        for _, unit in player:GetUnits():Members() do
+            local x = unit:GetX()
+            if x ~= -9999 then
+                local moves, maximum = unit:GetMovesRemaining(), unit:GetMaxMoves()
+                local attacks = unit:GetAttacksRemaining()
+                if type(moves) ~= "number" or type(maximum) ~= "number"
+                    or maximum < 0 or moves ~= maximum then return "movement_spent" end
+                if type(attacks) ~= "number" or attacks < 0
+                    or attacks ~= math.floor(attacks) then return "invalid_attacks" end
+                remainingAttacks[unit:GetID()] = attacks
+                count = count + 1
+            end
+        end
+        if count == 0 then return "no_live_units" end
+        return "ready", remainingAttacks
+    end)
+    if not checked then report("rejected", "guard_unavailable") return end
+    if reason == "duplicate" then report("duplicate", "already_engaged") return end
+    if reason ~= "ready" then report("rejected", reason) return end
+    -- Consume the attempt before the first mutation, including failed freezes.
+    PUPPETEER_INITIAL_ATTACH_USED[expectedPlayer] = true
+    local ok, acquired, detail = pcall(acquire_lease, expectedPlayer, allowances)
+    if not ok then report("failed", "acquisition_error") return end
+    if not acquired then report("failed", detail) return end
+    trace("ATTACH_CURRENT|" .. tostring(expectedPlayer) .. "|" .. tostring(expectedTurn))
+    report("accepted", "acquired")
 end
 
 local function OnPlayerTurnDeactivated(playerID)
@@ -316,7 +415,7 @@ function Puppeteer.RestoreUnit(unitId)
     local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
     if unit ~= nil then
         UnitManager.RestoreMovement(unit)
-        UnitManager.RestoreUnitAttacks(unit)
+        if not lease.preserve_attacks then UnitManager.RestoreUnitAttacks(unit) end
         lease.restored[unitId] = true
     end
 end

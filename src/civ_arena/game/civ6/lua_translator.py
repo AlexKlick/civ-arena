@@ -532,6 +532,13 @@ def set_puppet(player_id: int, enabled: bool) -> str:
     return f"Puppeteer.SetPuppet({player_id}, {str(enabled).lower()})"
 
 
+def attach_current_turn(player_id: int, turn: int) -> str:
+    """Guarded v0.3.3 initial attachment; the driver must poll the resulting lease."""
+    if type(player_id) is not int or player_id < 0 or type(turn) is not int or turn != 1:
+        raise ValueError("initial attachment requires a nonnegative player and turn 1")
+    return f"Puppeteer.AttachCurrentTurn({player_id}, {turn})"
+
+
 def switch_local_player(player_id: int) -> str:
     """A2 (2026-09-03, live-proven in the A1 probe): on the
     LoadGame(SERVER_TYPE_NONE) path the engine treats a re-flagged human
