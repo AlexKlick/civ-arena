@@ -241,6 +241,30 @@ unique ID, and preserves a run-specific installed-mod backup before copying the
 reviewed mod. Startup separately preserves replaced save slots. Do not launch
 with an active tuner client or reuse an existing run ID.
 
+## Strategic release gate and provider preflight
+
+The full local pytest gate at `f655412` collected 1,013 tests and completed each
+exactly once: **1,012 passed, one skipped, zero failures/errors** in four
+disjoint file groups with complete logs. Ruff then passed after wrapping one
+new test signature; the affected dashboard suite passed 25 tests. The only
+post-gate code-file change was that whitespace-only test signature; runtime
+source was unchanged. [Full gate summary](../runs/sixty-round-development-20260905/strategic-release/summary.json),
+[Ruff](../runs/sixty-round-development-20260905/strategic-release-ruff-final.log),
+and [affected test check](../runs/sixty-round-development-20260905/strategy-dashboard-format-focused.log).
+
+Provider-only probes made three total requests: the first exposed the tactical
+schema/validator mismatch; after correction, one request returned a valid JSON
+directive in 2.272 seconds. A separate request using explicit live opening-freeze
+metadata returned a valid founding order and warrior move in 2.732 seconds.
+No probe executed game actions. These requests are separate from match spend.
+[Final provider probe](../runs/sixty-round-development-20260905/strategic-provider-probe-live-freeze.json).
+
+The visible physical-monitor dashboard was reloaded at 04:12 UTC. It correctly
+showed the old stopped run and no strategy records; this is actual dashboard
+proof for retained data, not proof of live strategic execution. The current
+reload reported no browser errors or failed requests.
+[Browser evidence](../runs/sixty-round-development-20260905/visible-strategic-browser/).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
