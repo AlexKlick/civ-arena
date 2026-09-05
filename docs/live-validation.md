@@ -847,3 +847,125 @@ in the spectator record. No fresh game was launched and no further provider
 requests followed. The existing headless/Moonlight session remains preserved.
 Acceptance remains 0/2 runs started; installed callback execution and real
 handoff observations for this revision remain **BLOCKED** by the failed stage.
+
+## Direct spectator attempt — 2026-09-04 23:42 UTC
+
+The operator explicitly removed the rehearsal requirement and requested a direct
+MiniMax game in Moonlight. Rehearsals are validation stages, not runtime
+prerequisites. This attempt requested 30 rounds on source commit
+`225eb9e83a17278e75e1531bb6aed953d4d254c7`; it did not reach agent dispatch.
+
+### Verified findings
+
+- Provider/model PASS for the revised two-step tool probe: unchanged configured
+  MiniMax client and configuration, two POSTs, both responses reporting
+  `MiniMax-M3`, accepted `echo(value="civ-preflight")` followed by an
+  acknowledgment, 370 input and 31 output tokens. The first prompt required
+  the tool before any text; acknowledgment wording moved to the tool result.
+  [Exact probe](../runs/direct-minimax-20260904T234254Z/provider_probe.py) and
+  [response evidence](../runs/direct-minimax-20260904T234254Z/provider-probe.log).
+  Earlier text-only probe failures remain valid evidence for those prompts;
+  premature acknowledgment is an inference, not a confirmed cause.
+- Host PASS for process launch, tuner listener and front-end availability.
+  The user's earlier Civ6 process had exited before this launch. The new
+  process used the existing X/Moonlight session without restarting X.
+  [Complete launcher log](../runs/direct-minimax-20260904T234254Z/game-launcher.log).
+- Startup FAIL: the fresh turn-1 autosave appeared, but the quicksave gate
+  expired, exit 25, after 532.026 seconds of the 2700-second startup budget.
+  The game window was 2881x1788; fixed fractions for a 1024x768 menu missed
+  the actual buttons. The Start Game button is anchored a fixed distance
+  from the bottom, and the pause menu is centered. A direct XResizeWindow
+  request did not overcome Civ6's equal minimum/maximum size hints.
+  [Staging capture](../runs/direct-minimax-20260904T234254Z/staging-resized.png),
+  [pause menu capture](../runs/direct-minimax-20260904T234254Z/game-entered.png),
+  [failure capture](../runs/direct-minimax-20260904T234254Z/startup-failure.png).
+- Parent-agent UI adjustments were supplemental diagnostics: a corrected Start
+  Game click was sent; the corrected quicksave landed at 23:52:53 UTC,
+  after the terminal event at 23:52:36 UTC.
+  Neither counts as proof that the launcher handles the layout unattended.
+  [Start action](../runs/direct-minimax-20260904T234254Z/start-button-adjustment.log),
+  [quicksave action](../runs/direct-minimax-20260904T234254Z/quicksave-adjustment.log).
+- Terminal record PASS for this controlled startup failure: exactly one
+  MATCH_START and one MATCH_END; terminal payload equals summary; 22 prior
+  save files backed up. No driver run was created, zero completed seat turns,
+  zero completed rounds and zero live-match provider requests.
+  [Terminal audit](../runs/direct-minimax-20260904T234254Z/terminal-audit.json),
+  [startup summary](../runs/minimax-watch-20260904T234254Z-startup/summary.json),
+  [events](../runs/minimax-watch-20260904T234254Z-startup/events.jsonl),
+  [outcome](../runs/direct-minimax-20260904T234254Z/outcome.json).
+  Both the initial save inventory and the resulting fresh saves were preserved;
+  the [post-stop inventory](../runs/direct-minimax-20260904T234254Z/saves-after.json)
+  records 22 files, including the late quicksave.
+
+### Follow-up probes
+
+Correct resolution-dependent startup input and test failures before input.
+Validate the correction on the live engine in a separately identified attempt.
+Do not call it live-proven from mocked connection or window tests.
+
+The menu polling helper also has a source limitation: the tuner's quiet-drain
+loop can prolong an individual poll under continuous unsolicited messages.
+The outer startup timeout remains authoritative; this was not the observed
+failure in this attempt.
+
+### Blocked checks
+
+Live model actions, popup dismissal during play, lease handoffs and both
+30-round acceptance matches remain BLOCKED by incomplete startup. Neither
+acceptance match completed. The existing movement allowance remains
+`declare_own_endpath_drift: true`; no movement rows were admitted because no
+agent turns ran. Source/config identity and unchanged limits are in
+[custody](../runs/direct-minimax-20260904T234254Z/custody.json).
+
+### Evidence gaps
+
+No active-turn digest, replay, model action or popup-close proof exists for
+this attempt. A fresh game autosave is startup evidence, not a completed agent
+turn. Before live input, an initial command mistakenly reused the evidence
+directory as the dispatch ID; the exclusive guard refused it. Its
+[separate failed invocation](../runs/direct-minimax-20260904T234254Z/launcher.log)
+is preserved and is not a match outcome.
+
+Reproduce the requested direct launch with a NEW run ID, after resolving the
+layout issue (the command below records this attempt, not a successful run):
+
+```bash
+cd /home/alexk/civ-arena-reliability-20260904
+PYTHONPATH=src PYTHONUNBUFFERED=1 /home/alexk/documents/civ-arena/.venv/bin/python \
+  scripts/live_zero_touch.py --session arch1 \
+  --config configs/live-hotseat-llm-minimax2-001.yaml --rounds 30 \
+  --startup-timeout 2700 --match-timeout 7200 --agent-turn-timeout 600 \
+  --recovery-timeout 180 --recovery-sweeps 8 \
+  --run-id minimax-watch-20260904T234254Z
+```
+
+Use `--from-menu` only for a currently running main-menu session. It preserves
+that process during initial setup; Architecture-1 still saves and restarts
+Civ6 later to restore tuner access. Do not use `--fresh-x` when preserving the
+Moonlight session. On failure, stop new actions, retain the game and all run
+folders, and inspect the terminal summary. For a running launcher, send SIGTERM
+to its verified PID and allow the bounded cleanup to finish; do not kill Civ6
+or automatically overwrite/restore saves. This attempt stopped at its first
+failed live gate and was not relaunched.
+
+
+### Local correction after the stopped attempt
+
+Commit `ca7bb19` applies 1024x768 windowed mode through Civ6's own Options
+API at both Architecture-1 menu stages, then verifies game readback and
+actual geometry on the same Civ6 window. The mutation is sent once, without
+reconnect retries. It does not call SaveOptions or restart the X session.
+A failed/missing context, false apply, incorrect readback/geometry, changed
+window, timeout or disconnect failure stops before the next menu input.
+
+Repo-proof PASS: 36 passed, 0 failed, 0 skipped in 0.30 seconds in the focused
+launcher suite, including executable Lua fixtures; Ruff passed. The read-only
+review found no confirmed defects. [Tests](../runs/direct-minimax-20260904T234254Z/resolution-tests.log),
+[Ruff](../runs/direct-minimax-20260904T234254Z/resolution-ruff.log),
+[review](../runs/direct-minimax-20260904T234254Z/resolution-review.md),
+[commit-bound verification](../runs/direct-minimax-20260904T234254Z/resolution-verification.json).
+The full suite was not repeated for this isolated launcher correction; the
+previous 640-pass/1-skip full gate belongs to the earlier source documented
+above. The corrected launch has not been executed on the live engine, so
+actual resizing and subsequent input remain follow-up probes. The preserved
+failed run remains bound to `225eb9e`, not this correction.
