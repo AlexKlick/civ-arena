@@ -265,6 +265,44 @@ proof for retained data, not proof of live strategic execution. The current
 reload reported no browser errors or failed requests.
 [Browser evidence](../runs/sixty-round-development-20260905/visible-strategic-browser/).
 
+## First strategic live attempt: outgoing-seat handoff race
+
+Fresh run `minimax60-20260905T041339Z` used commit `8edc0d9`, mod 0.3.6,
+and the strategic configuration. Startup passed in 667.44 seconds. Player zero
+completed one seat turn in 23.118 seconds using one model request; player one
+never received an agent turn. The run stopped with one watchdog violation:
+a settler despawned and a city was founded without a founding command. The
+single `MATCH_END` matches the failed summary and cleanup completed. This is
+zero complete rounds, not a speed or operational-reliability acceptance.
+[Exact event accounting](../runs/sixty-round-live-20260905T041339Z/analysis.json).
+
+The actual directive contained two move overrides. The warrior's subsequent
+position changed; the settler's accepted submission left its position unchanged.
+Completeness repair then submitted sleep for the settler. Before handoff the
+sealed digest still showed two remaining settler moves. The driver switched
+local control in one RPC and called `FinishAllMoves` in the next, leaving the
+outgoing nonlocal seat an execution window. A read-only engine probe confirmed
+that after switching, outgoing player zero was nonhuman and player one human.
+The shipped UI and actual enum/hash bindings confirm that the sleep fallback
+uses the correct operation hash; no founding command was present.
+[Wire and engine diagnostic](../runs/sixty-round-live-20260905T041339Z/poststop-operations.log)
+and [primary UI source review](../runs/sixty-round-live-20260905T041339Z/unit-operation-source-review.log).
+
+A separate postmortem probe tested freezing before switching in the same
+GameCore chunk. Player one's untouched frozen settler could not found at zero
+movement; after a once-only restore to two moves it could. The probe froze and
+verified both outgoing units before switching, observed player zero's turn-two
+lease, and confirmed the settler remained with no player-one city. It retained
+an unrelated native research-change row in the ledger rather than hiding it.
+This supports the prospective handoff change for this specific case, not a
+repaired match or broad absence of native AI behavior.
+[Full postmortem steps and observations](../runs/sixty-round-live-20260905T041339Z/poststop-freeze-handoff.json).
+
+Actual browser proof shows the one-seat failed outcome and its two tactical
+orders. Neither decision had scouting candidates, so actual live probability-
+chart proof remains unavailable; synthetic chart proof remains separate.
+[Browser records and screenshots](../runs/sixty-round-live-20260905T041339Z/browser-proof/).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
