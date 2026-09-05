@@ -8,7 +8,7 @@ drained there. The event timing does not support a post-deactivation growth
 explanation. A tribal-village reward remains a hypothesis for that historical
 run: no reward event was captured and the failed run cannot be reclassified.
 
-Mod 0.3.8 prospectively binds native `Events.GoodyHutReward` observations to a
+Mod 0.3.9 prospectively binds native `Events.GoodyHutReward` observations to a
 single move window. The native event supplies player, raw unit ID, reward type,
 and reward subtype. The controller assigns the turn and command nonce when it
 opens that window; those are not native event fields. The adapter opens the
@@ -18,7 +18,9 @@ the command diff. Transport retries reuse the same completion and provenance.
 The only added authorization is one exact owned-city population `+1` row when:
 
 - The current lease, player, unit, turn, nonce, and diff sequence match.
-- The destination initially contains a tribal village and it is subsequently removed.
+- The destination initially contains a tribal village, or a Sumerian barbarian
+  camp with its active civilization/trait/modifier chain validated, and that
+  exact site type is subsequently removed.
 - Exactly one matching native event names `GOODYHUT_SURVIVORS` / `GOODYHUT_ADD_POP`,
   and the unit is at the command destination when the event is observed.
 - The active modifier is `MODIFIER_PLAYER_NEAREST_CITY_ADD_POPULATION` with
@@ -27,11 +29,22 @@ The only added authorization is one exact owned-city population `+1` row when:
   only city whose population changed. Its rolling ledger baseline equals the
   opening population and its observed population increased by exactly one.
 
+A camp is eligible only for `CIVILIZATION_SUMERIA`, linked through
+`CivilizationTraits` to `TRAIT_CIVILIZATION_FIRST_CIVILIZATION`, then through
+`TraitModifiers` to `TRAIT_BARBARIAN_CAMP_GOODY`. The active modifier must be
+`MODIFIER_PLAYER_ADJUST_IMPROVEMENT_GOODY_HUT`, with owner collection and
+`EFFECT_ADJUST_IMPROVEMENT_GOODY_HUT`, and exactly the arguments
+`ImprovementType=IMPROVEMENT_BARBARIAN_CAMP` and
+`GoodyHutImprovementType=IMPROVEMENT_GOODY_HUT`. Missing or changed links do not
+establish camp eligibility. Ordinary other-civilization camps create no reward
+expectation or missing-event quarantine. The causal receipt records the
+original eligible improvement type.
+
 The exact mutation is returned as a commanded effect with `causal_receipts` in
 the audited tool result. Other native rewards carry bounded numeric type/subtype
 and classification diagnostics. Gold, faith, science, spawned-unit rewards,
 ambiguous targets, missing events, duplicate events, and other unmatched drift
-receive no additional authorization. If a known village disappears without a
+receive no additional authorization. If an eligible reward site disappears without a
 matching native event by window close, the mod quarantines subsequent moves,
 including across lease transitions, and records `missing_consumption_event`.
 The adapter immediately aborts on that completion, including on the final

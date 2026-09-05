@@ -453,7 +453,8 @@ def parse_reward_finish(lines: list[str], nonce: str, seq: int, player: int,
     for cause in causes:
         parts = cause.split("|")
         owner, raw = entity_ids.decode(unit_id, "u")
-        if (len(parts) != 10 or parts[1] != nonce or owner != player
+        if (len(parts) != 11 or parts[1] != nonce or owner != player
+                or parts[10] not in ("IMPROVEMENT_GOODY_HUT", "IMPROVEMENT_BARBARIAN_CAMP")
                 or parts[2:7] != [str(player), str(turn), str(raw),
                                   "GOODYHUT_SURVIVORS", "GOODYHUT_ADD_POP"]):
             raise RuntimeError("reward causal identity mismatch")
@@ -470,6 +471,7 @@ def parse_reward_finish(lines: list[str], nonce: str, seq: int, player: int,
                            "player_id": player, "turn": turn, "unit_id": unit_id,
                            "reward_type": "GOODYHUT_SURVIVORS",
                            "reward_subtype": "GOODYHUT_ADD_POP", "city_id": city,
+                           "site_improvement": parts[10],
                            "before": before, "after": after})
     # Population must never ride the move attribute scope without a causal row.
     pop = [r for r in ledger if r.split("|")[1:3] == ["city.growth", "city"]]
