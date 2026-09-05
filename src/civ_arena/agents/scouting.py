@@ -6,6 +6,7 @@ position is not retried: the engine may still be applying it.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ from civ_arena.game.sim.state import hex_dist, neighbors, tiles_within
 
 MAX_UNITS = 16
 MAX_ATTEMPTS = 2
+NONPROGRESS_TTL = 3
 _LAND_COST = {"PLAINS": 1, "GRASSLAND": 1, "DESERT": 1, "TUNDRA": 1, "SNOW": 1,
               "HILL": 2, "HILLS": 2, "FOREST": 2, "JUNGLE": 2, "MARSH": 2}
 _SAFE_REJECTIONS = {"illegal_move", "ILLEGAL_MOVE"}
@@ -73,7 +75,78 @@ def _hold(unit: dict, reason: str) -> dict:
     return {"action": "fortify", "args": {"unit_id": unit["unit_id"]}, "reason": reason}
 
 
-def _decision(unit, units, tiles, directive, identity, directive_hash, opening_frozen):
+class ScoutingFeedback:
+    """Small fresh-only memory of observed non-progress, never engine illegality.
+
+    Only remember attempts after the controller has closed their issuing turn.
+    A subsequent consecutive own turn must still observe the original coordinate
+    before a candidate is suppressed. No wall clocks, model calls or extra reads.
+    """
+
+    def __init__(self):
+        self._pending: dict[str, dict] = {}
+        self._cooldowns: dict[str, dict] = {}
+
+    def begin_turn(self, snapshot: dict, *, player_id: int, turn: int,
+                   completed_turn: int) -> dict:
+        units, _ = _snapshot(snapshot)
+        owned = {u["unit_id"]: u["coord"] for u in units if _owner(u) == player_id}
+        audit = {"confirmed": [], "forgotten": [], "expired": [], "suppressed": {},
+                 "ttl_own_turns": NONPROGRESS_TTL, "unit_limit": MAX_UNITS,
+                 "destinations_per_unit": 6}
+        for uid in sorted(set(self._pending) | set(self._cooldowns)):
+            pending = self._pending.pop(uid, None)
+            record = self._cooldowns.get(uid)
+            origin = record["origin"] if record else pending["origin"]
+            if owned.get(uid) != origin:
+                self._cooldowns.pop(uid, None)
+                audit["forgotten"].append({"unit_id": uid, "reason": "lost_or_changed_origin"})
+                continue
+            if pending:
+                if completed_turn == turn - 1 and pending["turn"] == completed_turn:
+                    record = self._cooldowns.setdefault(uid, {"origin": origin,
+                                                              "destinations": {}})
+                    receipt = {"confirmed_turn": turn, "expires_turn": turn + NONPROGRESS_TTL,
+                               "issued_turn": pending["turn"]}
+                    record["destinations"][pending["dest"]] = receipt
+                    audit["confirmed"].append({"unit_id": uid, "origin": origin,
+                                               "dest": pending["dest"], **receipt})
+                else:
+                    audit["forgotten"].append({"unit_id": uid, "reason": "unconfirmed_turn_gap"})
+            if record:
+                for dest, receipt in list(record["destinations"].items()):
+                    if turn >= receipt["expires_turn"]:
+                        del record["destinations"][dest]
+                        audit["expired"].append({"unit_id": uid, "dest": dest})
+                if not record["destinations"]:
+                    self._cooldowns.pop(uid, None)
+        audit["suppressed"] = copy.deepcopy(self._cooldowns)
+        return audit
+
+    def remember_completed(self, graph: dict, *, turn: int) -> list[dict]:
+        """Stage accepted unchanged-position attempts only after successful closure."""
+        pending = {}
+        for row in graph.get("execution", []):
+            before, after = row["before"], row["after"]
+            if (row["action"] != "move_unit" or row["status"] != "accepted"
+                    or not before.get("owned") or not after.get("owned")
+                    or before.get("coord") != after.get("coord")):
+                continue
+            dest, origin = row["args"]["dest"], before["coord"]
+            if hex_dist(coordinate(origin), coordinate(dest)) != 1:
+                continue
+            pending[row["unit_id"]] = {"origin": origin, "dest": dest, "turn": turn}
+        # Prefer this turn's bounded action roster, then retain older cooldowns
+        # deterministically. At most sixteen units and six adjacent targets each.
+        retain = sorted(pending)[:MAX_UNITS]
+        retain += sorted(set(self._cooldowns) - set(retain))[:MAX_UNITS - len(retain)]
+        self._pending = {uid: pending[uid] for uid in retain if uid in pending}
+        self._cooldowns = {uid: self._cooldowns[uid] for uid in retain if uid in self._cooldowns}
+        return [{"unit_id": uid, **row} for uid, row in sorted(self._pending.items())]
+
+
+def _decision(unit, units, tiles, directive, identity, directive_hash, opening_frozen,
+              nonprogress):
     uid, origin = unit["unit_id"], coordinate(unit["coord"])
     seed = _digest(["frontier-v1", identity, uid, directive_hash])
     decision = {"unit_id": uid, "origin": unit["coord"], "movement": _remaining(unit),
@@ -130,6 +203,9 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
     occupied = {other["coord"] for other in units if other["unit_id"] != uid}
     policy = directive["scouting"]["policy"]
     weights = directive["scouting"]["weights"]
+    feedback = nonprogress.get(uid, {})
+    suppressed = (feedback.get("destinations", {})
+                  if feedback.get("origin") == unit["coord"] else {})
     for pos in sorted(neighbors(*origin)):
         dest = f"{pos[0]},{pos[1]}"
         tile = tiles.get(dest)
@@ -148,7 +224,11 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
         avoid_radius = {"cautious": 2, "balanced": 1, "explore": 0}[policy]
         if excluded is None and nearest is not None and nearest <= avoid_radius:
             excluded = "observed_threat_proximity"
+        if excluded is None and dest in suppressed:
+            excluded = "observed_nonprogress_cooldown"
         row = {"dest": dest, "excluded": excluded, "probability": 0.0}
+        if dest in suppressed:
+            row["nonprogress"] = copy.deepcopy(suppressed[dest])
         if excluded is None:
             gain = sum(p not in known for p in tiles_within(pos, 2))
             distance = min((hex_dist(pos, p) for p in frontier), default=0)
@@ -183,9 +263,11 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
 
 def plan_scouting(snapshot: dict, *, directive: dict, player_id: int,
                   match_id: str, agent_id: str, turn: int, seed: int = 0,
-                  frozen_unit_ids: frozenset[str] | set[str] = frozenset()) -> dict:
+                  frozen_unit_ids: frozenset[str] | set[str] = frozenset(),
+                  nonprogress: dict | None = None) -> dict:
     """Produce JSON audit with selection probabilities, not success probabilities."""
     units, tiles = _snapshot(snapshot)
+    nonprogress = {} if nonprogress is None else nonprogress
     owned = [unit for unit in units if _owner(unit) == player_id]
     normalized = validate_directive(directive, player_id=player_id,
                                     owned_unit_ids={unit["unit_id"] for unit in owned})
@@ -208,9 +290,10 @@ def plan_scouting(snapshot: dict, *, directive: dict, player_id: int,
             "knowledge": "projected_visible_or_remembered_terrain_and_current_visible_entities",
             "limits": {"units": MAX_UNITS, "attempts_per_unit": MAX_ATTEMPTS},
             "opening_frozen_unit_ids": sorted(frozen_unit_ids),
+            "nonprogress_suppression": copy.deepcopy(nonprogress),
             "deferred_units": max(0, len(owned) - MAX_UNITS),
             "decisions": [_decision(unit, units, tiles, normalized, identity, digest,
-                                     unit["unit_id"] in frozen_unit_ids)
+                                     unit["unit_id"] in frozen_unit_ids, nonprogress)
                           for unit in owned[:MAX_UNITS]]}
 
 
@@ -231,6 +314,7 @@ async def run_scouting(
     refresh: Callable[[], Awaitable[dict]],
     seed: int = 0,
     frozen_unit_ids: frozenset[str] | set[str] = frozenset(),
+    nonprogress: dict | None = None,
 ) -> dict:
     """At most two distinct attempts per unit, using audited caller callbacks.
 
@@ -244,7 +328,9 @@ async def run_scouting(
     """
     kwargs = {"directive": directive, "player_id": player_id, "match_id": match_id,
               "agent_id": agent_id, "turn": turn, "seed": seed}
-    plan = plan_scouting(snapshot, **kwargs, frozen_unit_ids=frozen_unit_ids)
+    plan = plan_scouting(snapshot, **kwargs, frozen_unit_ids=frozen_unit_ids,
+                         nonprogress=nonprogress)
+    nonprogress = plan["nonprogress_suppression"]
     untouched_frozen = set(frozen_unit_ids)
     plan["execution"] = []
     # Recompute each unit's candidates from the preceding action's fresh view.
@@ -260,7 +346,7 @@ async def run_scouting(
         # when a prior override consumed its settler. Only this owned unit's
         # decision is recomputed; no repeated all-roster planning or wire reads.
         decision = _decision(current_unit, units, tiles, plan["directive"], plan["identity"],
-                             plan["directive_sha256"], uid in untouched_frozen)
+                             plan["directive_sha256"], uid in untouched_frozen, nonprogress)
         if decision["selected"] is None:
             continue
         action = decision["selected"]
@@ -285,6 +371,20 @@ async def run_scouting(
                       "observation_changed": after != before,
                       "outcome": "submitted_observation_unchanged" if accepted and after == before
                       else "submitted_observation_changed" if accepted else "rejected"}
+            if action["action"] == "move_unit":
+                positions_observed = before.get("owned") and after.get("owned")
+                record.update(
+                    position_changed=(before["coord"] != after["coord"])
+                    if positions_observed else None,
+                    destination_observed=(after["coord"] == args["dest"])
+                    if after.get("owned") else None,
+                    movement_allowance_changed=(before["movement"] != after["movement"])
+                    if positions_observed else None,
+                )
+                if accepted:
+                    record["movement_outcome"] = ("submitted_displacement_observed"
+                                         if record["position_changed"] else
+                                         "submitted_displacement_unconfirmed")
             plan["execution"].append(record)
             if (accepted or after != before or not after.get("owned")
                     or after.get("movement", 0) <= 0
@@ -296,7 +396,7 @@ async def run_scouting(
             units, tiles = _snapshot(snapshot)
             current_unit = next(unit for unit in units if unit["unit_id"] == uid)
             decision = _decision(current_unit, units, tiles, plan["directive"], plan["identity"],
-                                 plan["directive_sha256"], False)
+                                 plan["directive_sha256"], False, nonprogress)
             alternatives = [row for row in decision["candidates"]
                             if row["excluded"] is None and row["dest"] not in tried]
             if not alternatives:
