@@ -34,7 +34,9 @@ ambiguous targets, missing events, duplicate events, and other unmatched drift
 receive no additional authorization. If a known village disappears without a
 matching native event by window close, the mod quarantines subsequent moves,
 including across lease transitions, and records `missing_consumption_event`.
-Late events cannot lift that quarantine. Existing movement-drift accounting stays
+The adapter immediately aborts on that completion, including on the final
+move of the final turn. Late events cannot lift the quarantine. Existing
+movement-drift accounting stays
 unchanged. No baseline reset, growth allowance, or handoff change is introduced.
 
 Source references are the installed base `gameplay/data/goodyhuts.xml` (reward,

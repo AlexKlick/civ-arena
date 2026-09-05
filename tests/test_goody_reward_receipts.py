@@ -251,3 +251,34 @@ def test_unsupported_native_reward_is_audited_without_population_authority(nativ
     assert audit == [{'event': 'GoodyHutReward', 'command_nonce': NONCE,
                       'observation': 'unsupported_or_unmatched', 'event_count': 1,
                       'native_reward_type': 3000000000, 'native_reward_subtype': 17}]
+
+
+async def test_final_move_missing_reward_event_cannot_reach_clean_end_phase():
+    adapter = FireTunerAdapter()
+    adapter._phase_open, adapter._turn_mirror = 0, 60
+    adapter._refresh_digest = AsyncMock()
+    adapter.end_phase = AsyncMock()
+
+    async def read(lua):
+        if 'BeginRewardCommand' in lua:
+            return [f"REWARD_BEGIN|{lua.split(chr(39))[1]}|accepted"]
+        if 'RestoreUnit' in lua:
+            return ['RESTORE_UNIT|0|10|restored']
+        if 'FinishRewardCommand' in lua:
+            nonce = lua.split("'")[1]
+            # The reward need not touch a watched attribute: missing native
+            # evidence itself must prevent a clean final turn.
+            return [f'REWARD_FINISH|{nonce}|1',
+                    f'REWARD_OBSERVATION|{nonce}|0|0|0|missing_consumption_event',
+                    'LEDGER|unit.moved|unit|u0:10|pos|0,0|1,0']
+        raise AssertionError(lua)
+
+    adapter._conn = AsyncMock()
+    adapter._conn.execute_read.side_effect = read
+    adapter._conn.execute_write.return_value = ['ACT|move_unit|OK|1,0']
+    with pytest.raises(RuntimeError, match='consumed village lacked native event'):
+        await adapter.act(ActionCommand('move_unit', {'unit_id': 'u0:10', 'dest': '1,0'},
+                                       0, 'final-move', 'turn-60-lease'))
+        await adapter.end_phase(0, 60)
+    adapter.end_phase.assert_not_awaited()
+    assert adapter._phase_open == 0
