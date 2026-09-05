@@ -338,7 +338,8 @@ def project_events(events, warnings, redactor):
         if key not in turns:
             turns[key] = {'turn': turn, 'player_id': pid, 'agent_id': redactor.text(aid),
                           'started_at': event_time(event), 'ended_at': None, 'status': 'active',
-                          'elapsed_s': None, 'requests': 0, 'calls': [], 'notes': []}
+                          'elapsed_s': None, 'requests': 0, 'calls': [], 'notes': [],
+                          'strategy': None, 'scouting_graph': None}
         agent(aid, pid)
         return turns[key]
 
@@ -369,6 +370,21 @@ def project_events(events, warnings, redactor):
             if turn is not None:
                 turn['requests'] += max(0, count - old)
             requests[aid] = max(old, count)
+        elif kind == 'HEARTBEAT' and audit in ('strategy_execution', 'strategy_graph'):
+            turn = seat(event)
+            if turn is None:
+                warnings.append('Strategy audit missing agent/seat/turn identity.')
+                incomplete = True
+                continue
+            if audit == 'strategy_execution':
+                turn['strategy'] = redactor.clean({key: event.get(key) for key in (
+                    'source', 'reasons', 'last_decision_turn', 'seed', 'directive',
+                    'persistence', 'cadence', 'opening_frozen_unit_ids')})
+            elif isinstance(event.get('graph'), dict):
+                turn['scouting_graph'] = redactor.clean(event['graph'])
+            else:
+                warnings.append('Scouting audit has no graph object.')
+                incomplete = True
         elif kind in ('LEASE_GRANT', 'TOOL_CALL', 'TOOL_RESULT', 'TURN_END'):
             turn = seat(event)
             if turn is None:

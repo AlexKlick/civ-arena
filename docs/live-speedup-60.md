@@ -176,6 +176,32 @@ Movement action receipts can still show the pre-operation position; truthful
 post-move projection remains a follow-up.
 [Restore evidence](../runs/sixty-round-development-20260905/restore-speed-evidence/).
 
+## Twenty-one-seat stop and silent native hooks
+
+The next fresh run, `minimax60-20260905T031207Z`, used commit `311f18a`
+and mod 0.3.5. It completed 21 correctly ordered seat turns (ten complete rounds
+plus player zero's turn eleven), then stopped during player one's turn eleven.
+The failure was `non-ledger row in ledger dump: PUPPET_ACTIVE|true`.
+Its one `MATCH_END` matches `summary.json`; cleanup completed, with an unfinished
+lease retained in the terminal evidence. This is a failed sixty-round attempt.
+
+There were 150 provider requests, zero watchdog violations, five observed popup
+dismissals, and two exact own-unit movement rows admitted in 21 allowance audits.
+Completed turns averaged 53.105 seconds, median 40.453; the first accepted action
+averaged 16.737 seconds. These are measurements from a failed run, not acceptance.
+[Event accounting and exact allowance rows](../runs/sixty-round-live-20260905T031207Z/analysis.json)
+and [launch custody](../runs/sixty-round-live-20260905T031207Z/launch.json) are preserved.
+
+The native start hook printed a lease status onto the tuner response channel.
+Review also found the native deactivation hook called the explicit release RPC,
+which printed a status and generic terminator. Mod 0.3.6 keeps both native hooks
+silent while explicit status/release requests retain their responses. A real-Lua
+engine fixture reproduces deactivation, activation and duplicate start callbacks
+inside the ledger response window and verifies only the requested ledger
+terminator appears. The focused gate passed 54 tests:
+[silent hook regression log](../runs/sixty-round-development-20260905/silent-hooks-reviewed-focused.log).
+This proves the local regression; another fresh live run is still required.
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,

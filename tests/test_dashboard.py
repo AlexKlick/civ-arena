@@ -234,3 +234,34 @@ def test_malformed_run_payload_does_not_poison_healthy_inventory(tmp_path, confi
     inventory = {row['id']: row for row in store.list_runs()['runs']}
     assert inventory['malformed']['status'] == 'incomplete'
     assert 'healthy' in inventory
+
+
+def test_strategy_audit_keeps_seats_distinct_and_does_not_count_plans_as_actions(tmp_path, monkeypatch):
+    monkeypatch.setenv('EXAMPLE_API_KEY', 'strategy-private-value')
+    graph = {'decisions': [{'unit_id': 'u0:7', 'candidates': [
+        {'dest': {'q': 1, 'r': 2}, 'probability': 0.75, 'score': 3.5}],
+        'selected': {'action': 'move_unit', 'args': {'unit_id': 'u0:7'}}}],
+        'execution': [{'unit_id': 'u0:7', 'outcome': 'submitted_observation_unchanged'}]}
+    events = [start(), identity(), event('LEASE_GRANT'),
+              event('HEARTBEAT', audit='strategy_execution', source='model',
+                    last_decision_turn=1, directive={'note': 'strategy-private-value'}),
+              event('HEARTBEAT', audit='strategy_graph', graph=graph),
+              event('HEARTBEAT', audit='strategy_execution', source='autopilot',
+                    player_id=1, agent_id='seat1', last_decision_turn=1, directive={})]
+    write_run(tmp_path, events)
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    first, second = result['turns']
+    assert first['strategy']['source'] == 'model'
+    assert second['strategy']['source'] == 'autopilot'
+    assert first['scouting_graph'] == graph
+    assert second['scouting_graph'] is None
+    assert first['calls'] == [] and first['requests'] == 0
+    assert result['metrics']['completed_seat_turns'] == 0
+    assert 'strategy-private-value' not in json.dumps(result)
+
+
+def test_malformed_strategy_graph_is_visible_incomplete_evidence(tmp_path):
+    write_run(tmp_path, [start(), event('HEARTBEAT', audit='strategy_graph', graph='invalid')])
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert result['status'] == 'incomplete'
+    assert 'Scouting audit has no graph object.' in result['warnings']

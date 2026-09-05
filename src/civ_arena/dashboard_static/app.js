@@ -5,7 +5,7 @@
   const svgNS = 'http://www.w3.org/2000/svg';
   const state = {runId: '', runPinned: false, turn: null, follow: true, filter: 'all',
     data: null, selectedCall: null, busy: false, timer: null, lastGraph: '', lastCards: '',
-    callsByKey: new Map()};
+    callsByKey: new Map(), lastStrategy: ''};
   const observation = tool => /^(get_|observe|read_|list_|query_|inspect_)/.test(tool || '');
   const noteTool = tool => /(diary|journal|goal|prediction|lesson|note|recall|strategy)/.test(tool || '');
   const kindOf = tool => observation(tool) ? 'Observation' : noteTool(tool) ? 'Note' : 'Action';
@@ -226,8 +226,68 @@
         element('pre', '', value == null ? label === 'Result' ? 'No result recorded yet.' : 'No arguments recorded.' : text(value)))));
     body.scrollTop = scrollPosition;
   }
+  function renderStrategy() {
+    const signature = JSON.stringify([state.runId, selectedTurns().map(turn => [turn.player_id, turn.turn, turn.strategy, turn.scouting_graph])]);
+    if (signature === state.lastStrategy) return;
+    state.lastStrategy = signature;
+    const panels = agentList().map((agent, seat) => {
+      const turn = seatTurn(agent), strategy = turn?.strategy, graph = turn?.scouting_graph;
+      const panel = element('article', `strategy-seat ${seat === 0 ? 'gold' : 'teal'}`);
+      append(panel, element('h3', '', `Seat ${seat + 1}`));
+      if (!strategy) {
+        append(panel, element('p', 'subtle', 'No strategy controller record for this turn.'));
+        return panel;
+      }
+      append(panel, badge('completed', strategy.source === 'model' ? 'Model strategy update' : 'Autopilot turn'),
+        element('p', 'subtle', `Last model decision: turn ${strategy.last_decision_turn ?? '—'}`));
+      const directive = element('details', 'strategy-json');
+      append(directive, element('summary', '', 'Strategy directive and triggers'),
+        element('pre', '', text({directive: strategy.directive, reasons: strategy.reasons, seed: strategy.seed})));
+      append(panel, directive);
+      if (!graph) {
+        append(panel, element('p', 'subtle', 'Scouting execution has not been recorded.'));
+        return panel;
+      }
+      const decisions = Array.isArray(graph.decisions) ? graph.decisions.filter(x => x && typeof x === 'object') : [];
+      if (!decisions.length) append(panel, element('p', 'subtle', 'No scouting decisions recorded.'));
+      decisions.forEach(initial => {
+        const execution = Array.isArray(graph.execution) ? graph.execution.filter(row => row?.unit_id === initial.unit_id) : [];
+        const decision = execution.find(row => row?.decision && typeof row.decision === 'object')?.decision || initial;
+        const item = element('section', 'scout-decision');
+        append(item, element('h4', '', `${decision.unit_id} · ${decision.override ? 'Tactical override' : 'Autopilot'}`));
+        const candidates = Array.isArray(decision.candidates) ? decision.candidates.filter(x => x && typeof x === 'object') : [];
+        const selected = decision.selected;
+        append(item, element('p', 'subtle', selected ? `Requested ${selected.action}: ${text(selected.args)}` : text(decision.reason || 'No action selected')));
+        if (candidates.length) {
+          const chart = svg('svg', {viewBox: `0 0 520 ${Math.max(90, candidates.length * 42 + 20)}`, role: 'img',
+            'aria-label': `Scouting alternatives for ${decision.unit_id}`});
+          const middle = candidates.length * 21 + 10;
+          append(chart, svg('circle', {cx: 24, cy: middle, r: 7, fill: seat ? '#65cbb8' : '#e5bd73'}));
+          candidates.forEach((candidate, index) => {
+            const y = 20 + index * 42, probability = finite(candidate.probability) ? candidate.probability : null;
+            const excluded = Boolean(candidate.excluded), color = excluded ? '#64768e' : seat ? '#65cbb8' : '#e5bd73';
+            append(chart, svg('path', {d: `M 31 ${middle} L 67 ${y}`, stroke: color, opacity: 0.5, fill: 'none'}),
+              svg('rect', {x: 72, y: y - 12, width: probability == null ? 0 : Math.max(0, Math.min(1, probability)) * 120,
+                height: 23, rx: 3, fill: color, opacity: 0.3}),
+              svg('text', {x: 79, y: y + 4, fill: '#bfcee1', 'font-size': 12},
+                `${text(candidate.dest).replace(/\s+/g, ' ')} · ${excluded ? 'excluded' : probability == null ? 'unscored' : (100 * probability).toFixed(1) + '%'} · score ${finite(candidate.score) ? candidate.score.toFixed(2) : '—'}`));
+          });
+          append(item, chart);
+        }
+        const details = element('details', 'strategy-json');
+        append(details, element('summary', '', 'Scores, seed, and observed execution'),
+          element('pre', '', text({decision, execution})));
+        append(item, details); append(panel, item);
+      });
+      if (finite(graph.deferred_units) && graph.deferred_units > 0) {
+        append(panel, element('p', 'subtle', `Deferred units: ${text(graph.deferred_units)}`));
+      }
+      return panel;
+    });
+    $('strategyChoices').replaceChildren(...panels);
+  }
   function render() {
-    renderMetrics(); renderTurnSelect(); renderCards(); renderGraph();
+    renderMetrics(); renderTurnSelect(); renderCards(); renderGraph(); renderStrategy();
     $('emptyState').hidden = Boolean(state.data);
   }
   async function request(path) {
@@ -283,7 +343,7 @@
   });
   $('turnSelect').addEventListener('change', event => {
     state.turn = event.target.value; state.follow = false; $('followLive').checked = false;
-    state.selectedCall = null; renderCards(); renderGraph();
+    state.selectedCall = null; renderCards(); renderGraph(); renderStrategy();
     $('graphTurn').textContent = ` / ${state.turn}`;
   });
   $('followLive').addEventListener('change', event => { state.follow = event.target.checked; render(); });
