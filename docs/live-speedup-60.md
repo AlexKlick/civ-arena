@@ -434,6 +434,33 @@ outcomes and temporarily avoids confirmed ineffective destinations.
 [Scouting feedback contract](scouting-nonprogress-feedback.md),
 [actual browser evidence](../runs/60-round-live-20260905T052156Z/browser-proof/).
 
+## Native reward and scouting follow-up validation
+
+At `2b59d2b`, the complete local pytest gate passed 1,124 tests with zero failures
+or errors and one optional Neo4j integration test skipped. All 1,125 collected
+test identities ran exactly once across four disjoint file groups. Ruff passed.
+This gate includes completed-turn scouting feedback and command-bound population
+receipts; it predates the Sumeria camp eligibility correction below and is not
+live acceptance evidence.
+[Captured gate](../runs/sixty-round-development-20260905/native-reward-final-release/summary.json),
+[Ruff](../runs/sixty-round-development-20260905/native-reward-final-release-ruff.log).
+
+A separate current MiniMax-M3 preflight returned one validated directive in one
+request (4.48 seconds), using retained projected observations and performing no
+game actions. This proves that request only.
+[Provider probe](../runs/sixty-round-development-20260905/native-reward-provider-probe.json).
+
+Installed rules and a read-only GameCore probe confirm that the configured
+Sumerian seat receives tribal-village rewards when clearing barbarian camps.
+A guard limited to an initial `IMPROVEMENT_GOODY_HUT` therefore omits an eligible
+reward source. The correction must bind camp eligibility to the current
+civilization's exact active trait/modifier/argument chain while preserving the
+native event and population-delta checks. This finding does not identify the
+historical turn-21 reward, whose event was not retained.
+[Installed rule source](../runs/60-round-live-20260905T052156Z/civ-sumeria-camp-exact-source.log),
+[GameCore API and active rules](../runs/60-round-live-20260905T052156Z/poststop-camp-api.log),
+[Receipt contract](live-goody-reward-receipts.md).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
