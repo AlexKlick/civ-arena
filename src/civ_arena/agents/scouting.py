@@ -110,12 +110,19 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
         else:
             selected = _hold(unit, "explicit_tactical_hold")
         return {**decision, "selected": selected, "reason": selected["reason"]}
-    if unit.get("fortified"):
+    assigned = unit.get("type") in directive["scouting"]["unit_types"]
+    if unit.get("fortified") and not assigned:
         return {**decision, "reason": "existing_standing_order"}
-    if unit.get("type") not in directive["scouting"]["unit_types"]:
+    if not assigned:
         selected = _hold(unit, "settler_safe_hold" if unit.get("type") == "SETTLER"
                          else "unit_not_assigned_to_scouting")
         return {**decision, "selected": selected, "reason": selected["reason"]}
+    # Assignment is persistent standing intent. Completeness repair can fortify
+    # an otherwise assigned scout at closure; that must not silently disable its
+    # role on every later quiet turn. Current tactical overrides were handled
+    # first, and the normal movement/frozen-allowance guards remain in force.
+    if unit.get("fortified"):
+        decision["standing_order_resolution"] = "persistent_scouting_assignment"
 
     known = {coordinate(key) for key in tiles}
     frontier = [pos for pos in sorted(known) if any(n not in known for n in neighbors(*pos))]
