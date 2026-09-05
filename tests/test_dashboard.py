@@ -265,3 +265,23 @@ def test_malformed_strategy_graph_is_visible_incomplete_evidence(tmp_path):
     result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
     assert result['status'] == 'incomplete'
     assert 'Scouting audit has no graph object.' in result['warnings']
+
+
+def test_encoded_strategy_payload_preserves_probabilities_and_outer_seat_identity(tmp_path):
+    payload = {'agent_id': 'seat1', 'player_id': 1, 'turn': 99,
+               'graph': {'decisions': [{'candidates': [{'probability': 0.75}]}]}}
+    write_run(tmp_path, [start(), event('HEARTBEAT', audit='strategy_graph',
+                                      strategy_payload_json=json.dumps(payload))])
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    turn = result['turns'][0]
+    assert (turn['agent_id'], turn['player_id'], turn['turn']) == ('seat0', 0, 1)
+    assert turn['scouting_graph']['decisions'][0]['candidates'][0]['probability'] == 0.75
+
+
+@pytest.mark.parametrize('payload', ['{bad', '[]', '{"graph":NaN}', 7])
+def test_bad_encoded_strategy_payload_is_incomplete(tmp_path, payload):
+    write_run(tmp_path, [start(), event('HEARTBEAT', audit='strategy_graph',
+                                      strategy_payload_json=payload)])
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    assert result['status'] == 'incomplete'
+    assert 'Strategy payload JSON is malformed.' in result['warnings']

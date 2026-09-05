@@ -371,6 +371,21 @@ def project_events(events, warnings, redactor):
                 turn['requests'] += max(0, count - old)
             requests[aid] = max(old, count)
         elif kind == 'HEARTBEAT' and audit in ('strategy_execution', 'strategy_graph'):
+            if 'strategy_payload_json' in event:
+                try:
+                    payload = parse_json(event['strategy_payload_json'])
+                    if not isinstance(payload, dict):
+                        raise ValueError('strategy payload must be an object')
+                except (ValueError, TypeError, RecursionError):
+                    warnings.append('Strategy payload JSON is malformed.')
+                    incomplete = True
+                    continue
+                # Display fields may be encoded for deterministic checkpoint
+                # compatibility. Identity always comes from the outer event.
+                event = dict(event, **{key: payload[key] for key in (
+                    'source', 'reasons', 'last_decision_turn', 'seed', 'directive',
+                    'persistence', 'cadence', 'opening_frozen_unit_ids', 'graph')
+                                      if key in payload})
             turn = seat(event)
             if turn is None:
                 warnings.append('Strategy audit missing agent/seat/turn identity.')
