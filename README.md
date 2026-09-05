@@ -13,13 +13,19 @@ lane includes diary, strategy, and recall services; see
 
 The Civ VI FireTuner implementation includes bounded hotseat recovery and
 terminal run auditing. Two consecutive live 30-round matches remain unproven;
-the latest startup attempt did not produce a game window or tuner. See
+the latest monitor game completed three rounds before a unit-identity
+accounting defect stopped it. See
 [`docs/live-validation.md`](docs/live-validation.md) for the evidence boundary
 and [`docs/strategy-program-kickoff.md`](docs/strategy-program-kickoff.md) for
 the parallel reliability, evaluation, and strategy work. A separate CAR-M1
 worktree contains the V2 turn-control candidate; it is not integrated here.
 The hotseat driver also checks and dismisses allowlisted informational popups
 for spectators; see [Moonlight viewing and popup handling](docs/spectator-popups.md).
+
+The [browser match room](docs/browser-match-room.md) shows each model's recorded
+plans, clickable action sequences, results and timings at `http://127.0.0.1:8788/`.
+It follows the event log without connecting to the game. Forecast and dependency
+graph work is planned in [live-turn-pacing.md](docs/live-turn-pacing.md).
 
 ## Layout
 
@@ -45,6 +51,7 @@ uv run python scripts/llm_ping.py                       # prove the model wire
 uv run python -m civ_arena.match configs/llm-vs-turtler.yaml  # LLM vs bot
 uv run python -m civ_arena.report runs/<match_id>       # telemetry summary
 uv run python -m civ_arena.replay runs/<match_id>       # verify replay == live
+uv run python -m civ_arena.dashboard --runs-root runs  # local browser match room
 uv run pytest                                            # full local gate
 uv run ruff check .
 ```

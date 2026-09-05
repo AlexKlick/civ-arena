@@ -1058,3 +1058,85 @@ record the source/config hashes, physical-monitor target and unchanged caps.
 The preceding direct-launch command is reproducible with a new run ID, but
 will not solve the recorded first-turn or roster defects. Preserve this run
 and save inventory; do not reuse either run ID or automatically restore saves.
+
+## 2026-09-05 continued monitor game and browser match room
+
+### Verified findings
+
+The operator requested repair of the currently loaded turn-one game, then
+prioritized a browser view of the models' plans and action graphs. The current
+map was preserved. Local commit `81341d0` adds guarded initial-turn attachment;
+`30fef52` closes extra major slots for future fresh launches. The roster change
+was not applied retroactively: this existing map still contains the two human
+MiniMax seats and two engine-AI major players.
+
+Continuation `minimax-resume-20260905T004340Z` ran source
+`30fef52a304f473706d5fb7906079469ebd47597`, clean tree
+`5a5a9552c1eee1bdef99430fc93db4c51e194b95`, mod SHA-256
+`78b64097d4222671dbb5bb465e39c02ee4a3a40a9c7f15e3736a045b2f907b2f`.
+Both agents used unchanged MiniMax-M3 configuration and limits. The physical
+monitor game accepted initial attachment at engine turn one and completed
+P0/P1 in order for engine turns one through three. Both agents performed
+accepted game actions. They sent 17 and 33 provider requests respectively.
+Elapsed match time was 330.05 seconds.
+
+The run then stopped on two watchdog findings during recovery. It has one
+MATCH_START and one MATCH_END, matching `summary.json`, six completed-seat
+audits and completed cleanup without errors. The final digest is cached,
+explicitly not re-polled at shutdown. This is an aborted diagnostic watch run,
+not a successful rehearsal or acceptance match.
+[Events](../runs/minimax-resume-20260905T004340Z/events.jsonl),
+[summary](../runs/minimax-resume-20260905T004340Z/summary.json),
+[terminal audit](../runs/dashboard-evidence-20260905/live-terminal-audit.json).
+
+The configured `declare_own_endpath_drift=true` allowance was retained. Event
+217 admitted P0 unit `u131073` position `47,23 -> 46,22` and moves `2 -> 0`;
+event 303 admitted its position `46,22 -> 47,21` and moves `2 -> 0`. All other
+movement-allowance audit arrays were empty. The two rejected P1 rows at
+387/388 exposed inconsistent raw/projected unit identity, reproduced offline
+in the [diagnosis](live-resume-diagnosis-20260905.md). The allowance was not
+broadened to suppress those findings.
+
+The popup monitor made 55 checks and zero close requests. No information
+popup dismissal during this run is proven. The browser work reads retained
+events and leaves the game and saves intact; its launch and verification
+record is [browser-match-room.md](browser-match-room.md).
+
+### Follow-up probes
+
+Migrate unit identity consistently through projection, ledger, parser and
+action lookup, using explicit owner-qualified identity. Test colliding raw
+IDs and foreign-unit movement before another live run. Validate the fresh
+two-major roster path on a new unique run after the identity correction.
+
+The earlier full suite at this stage reported 714 passed, three failed and one
+skipped. Two source probes were stale after helper extraction; a cancellation
+probe failed after the parent sent SIGINT during the suite. The unchanged
+cancellation case subsequently passed with the corrected marker probes:
+eight passed in `/tmp/civ-initial-attach-marker-cancel.log`. Commit `0808b6f`
+updates only the stale marker assertions. This focused result does not turn
+the interrupted full gate into a pass; a fresh settled-source gate is required.
+
+That subsequent gate completed on dashboard implementation `5e976b0`:
+**735 passed, zero failed, one skipped in 528.44 seconds**. Ruff passed.
+The marker corrections and unchanged cancellation fixture both pass in this
+full run. [Full pytest capture](../runs/dashboard-evidence-20260905/pytest-release.log),
+[Ruff capture](../runs/dashboard-evidence-20260905/ruff-release.log).
+This repository result does not repair or reclassify the failed live match.
+
+### Blocked checks
+
+Both consecutive fresh 30-round MiniMax acceptance runs remain unfulfilled.
+The continued four-major map and aborted result cannot count toward them.
+The sequence is stopped and preserved pending the unit-identity correction.
+
+### Evidence gaps
+
+Completed early turns demonstrate initial attachment and live handoffs, not
+repeatable 30-round reliability. The guarded initial-attachment regression
+suite has 40 passing tests, and roster/startup checks have 63 passing tests;
+the latter are repository proof, not live proof of the revised fresh roster.
+The retained continuation command is
+`runs/restart-evidence-20260905T002948Z/resume-command.json`; do not replay it
+against the now-advanced map. Stop-and-preserve instructions for the observer
+are in the browser runbook, and no automatic save recovery was attempted.
