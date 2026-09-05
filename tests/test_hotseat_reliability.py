@@ -138,7 +138,7 @@ async def test_termination_writes_one_honest_terminal_record(tmp_path, monkeypat
         async def aclose(self):
             if stage == 'cleanup':
                 await asyncio.Event().wait()
-    monkeypatch.setattr(ld, 'build_runtime', lambda _: Runtime())
+    monkeypatch.setattr(ld, 'build_runtime', lambda _, **_context: Runtime())
     if stage == 'startup':
         async def setup(_):
             raise RuntimeError('setup unavailable')

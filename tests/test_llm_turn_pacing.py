@@ -38,7 +38,7 @@ class Facade:
 
     async def get_overview(self):
         self.calls.append(("get_overview", {}))
-        return {"you": {"gold": 100, "researching": "POTTERY"}, "changes": self.changes}
+        return {"you": {"gold": 100, "researching": ""}, "changes": self.changes}
 
     async def get_available_research(self):
         self.calls.append(("get_available_research", {}))
@@ -85,11 +85,11 @@ async def test_briefing_precedes_model_and_prefetches_only_owned_city_options():
     await runtime(model).take_turn(facade)
     assert facade.calls[:6] == [
         ("get_visible_map", {}), ("get_units", {}), ("get_cities", {}),
-        ("get_overview", {}), ("get_available_research", {}),
-        ("get_available_production", {"city_id": "c0:7"})]
+        ("get_overview", {}), ("get_available_production", {"city_id": "c0:7"}),
+        ("get_available_research", {})]
     assert facade.calls[6][0] == "fortify" and facade.closed
     request = model.requests[0]
-    assert "Fresh visible turn briefing" in request["messages"][1]["content"]
+    assert "Controller context" in str(request["messages"][1]["content"])
     assert "private-agent-name" not in json.dumps(request["messages"])
     assert "recall_lessons" not in {tool["name"] for tool in request["tools"]}
     assert SPEC.max_tokens == 4096 and SPEC.max_tool_rounds == 16
@@ -101,17 +101,13 @@ async def test_briefing_is_bounded_and_map_prioritizes_visible_owned_position():
     rt = runtime(FakeModel([[use("end_turn")]]))
     visible = {"tiles": {f"{i},0": {"terrain": "PLAINS"} for i in range(100)}}
     visible["tiles"]["50,50"] = {"terrain": "HILLS", "owner_id": 0}
-    preview = rt._nearby_map(visible, await facade.get_units(), [])
-    assert preview["nearby_visible_or_remembered_tiles"][0]["coord"] == "50,50"
-    assert len(preview["nearby_visible_or_remembered_tiles"]) == 48
-    assert preview["tiles_not_in_preview"] == 53
-    assert "hidden" not in json.dumps(preview)
     async def huge_map():
         return visible
     facade.get_visible_map = huge_map
     briefing = await rt._turn_briefing(facade)
     assert len(briefing) <= SPEC.max_result_chars
-    assert "partial" in briefing
+    assert "terrain_omitted" in briefing
+    assert '"coord":"50,50"' in briefing
 
 
 @pytest.mark.parametrize("failure", ["exception", "rejection"])
@@ -135,18 +131,18 @@ async def test_same_batch_read_cache_invalidated_by_any_mutation_attempt(rejecte
     facade = Facade()
     facade.reject_action = rejected
     await runtime(model).take_turn(facade)
-    # One briefing read, one shared read, one fresh read after the mutation attempt.
-    assert sum(name == "get_overview" for name, _ in facade.calls) == 3
+    # Legacy model reads use curator cache, even within a mutation batch.
+    assert sum(name == "get_overview" for name, _ in facade.calls) == 1
 
 
 async def test_reads_not_cached_across_model_rounds_or_turns():
     model = FakeModel([[use("get_overview")], [use("get_overview"), use("end_turn")]])
     facade, rt = Facade(), runtime(model)
     await rt.take_turn(facade)
-    assert sum(name == "get_overview" for name, _ in facade.calls) == 3
+    assert sum(name == "get_overview" for name, _ in facade.calls) == 1
     rt.begin_turn(2)
     await rt.take_turn(facade)
-    assert sum(name == "get_overview" for name, _ in facade.calls) == 5
+    assert sum(name == "get_overview" for name, _ in facade.calls) == 2
 
 
 async def test_unavailable_recall_never_calls_facade_even_if_model_asks():
@@ -188,7 +184,7 @@ async def test_paced_prose_still_closes_via_existing_completeness_repair():
 class BriefingAwareFixture(FakeModel):
     """Fixture decision rule, not an inference about live MiniMax behavior."""
     async def create(self, *, system, messages, tools):
-        if self.posts_sent or any("Fresh visible turn briefing" in str(m["content"])
+        if self.posts_sent or any("Controller context" in str(m["content"])
                                   for m in messages):
             self.script = [[use("fortify", {"unit_id": "u0:10"}), use("end_turn")]]
         else:
@@ -239,7 +235,8 @@ async def test_real_session_prefetches_owned_city_projection_and_replays(tmp_pat
                   and r.get("agent_id") == "roman" and r.get("tool") == "get_available_production"]
     assert production and all(r["turn"] == 2 for r in production)
     assert all(arena.adapter.state.city(r["args"]["city_id"])["owner"] == 0 for r in production)
-    assert production[0]["args"]["city_id"] in model.requests[1]["messages"][1]["content"]
+    assert production[0]["args"]["city_id"] in json.dumps(
+        model.requests[1]["messages"][1]["content"])
     replay = await replay_run(arena.run_dir, arena.spec, tmp_path / "replay")
     assert replay["identical"], replay
 

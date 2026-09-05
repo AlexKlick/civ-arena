@@ -4,6 +4,7 @@ model-backed runtimes later behind the identical ``take_turn(facade)`` shape.
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,7 @@ class AgentProfile:
     llm: Any = None  # config.LLMSpec when policy == "llm"
     proposer: Any = None  # config.LLMSpec when policy == "planner" + proposer block
     case_base: Any = None  # config.CaseBaseSpec when policy == "planner" + case_base
+    decision_mode: str = "legacy"
 
 
 @dataclass
@@ -43,7 +45,12 @@ class ScriptedRuntime:
 
 def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
                   diary: Any = None, strategy: Any = None,
-                  on_post: Any = None) -> AgentRuntime:
+                  on_post: Any = None, match_id: str | None = None,
+                  audit: Any = None, opening_units_frozen: bool = False) -> AgentRuntime:
+    if profile.decision_mode not in ("legacy", "strategic_autopilot"):
+        raise ValueError("unknown decision_mode")
+    if profile.decision_mode != "legacy" and profile.policy != "llm":
+        raise ValueError("strategic_autopilot requires policy llm")
     if profile.policy == "llm":
         from civ_arena.agents.llm.runtime import LLMAgentRuntime
 
@@ -52,8 +59,16 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
                 f"agent {profile.agent_id!r}: policy 'llm' requires an LLMSpec "
                 "on the profile (config validation should have caught this)"
             )
-        return LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
-                                     strategy=strategy, on_post=on_post)
+        if profile.decision_mode == "strategic_autopilot" and not match_id:
+            raise ValueError("strategic_autopilot requires trusted match_id")
+        runtime = LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
+                                        strategy=strategy, on_post=on_post)
+        if profile.decision_mode == "strategic_autopilot":
+            from civ_arena.agents.llm.strategic_controller import StrategicController
+
+            runtime.configure_strategic_controller(StrategicController(
+                match_id=match_id, audit=audit, opening_units_frozen=opening_units_frozen))
+        return runtime
     if profile.policy == "expansionist":
         return ScriptedRuntime(profile=profile)
     if profile.policy == "turtler":
@@ -90,3 +105,12 @@ def load_rng(runtime: Any, doc: list[Any]) -> None:
     from civ_arena.canonical import rng_from_doc
 
     runtime.rng = rng_from_doc(doc)
+
+
+def strategy_audit_event(payload: dict) -> dict:
+    """Keep strategy probabilities inside a JSON string, outside simulator canonical values."""
+    envelope = {key: payload[key] for key in ('audit', 'match_id', 'agent_id', 'player_id', 'turn')}
+    details = {key: value for key, value in payload.items() if key not in envelope}
+    envelope['strategy_payload_json'] = json.dumps(
+        details, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return envelope
