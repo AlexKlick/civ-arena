@@ -101,11 +101,11 @@ def test_acquisition_and_duplicate_preserve_attack_and_movement_allowances(run_m
 Puppeteer.SetPuppet(0,true)
 Puppeteer.AttachCurrentTurn(0,1)
 assert(units[1].moves==0 and units[2].moves==0)
-Puppeteer.RestoreUnit(20)
+Puppeteer.RestoreUnit(20,0)
 assert(units[2].moves==2 and units[2].attacks==0)
 Puppeteer.AttachCurrentTurn(0,1)
 hooks.start(0)
-Puppeteer.RestoreUnit(20)
+Puppeteer.RestoreUnit(20,0)
 print('COUNTS|' .. freezes .. '|' .. restores .. '|' .. attackRestores)
 print(Puppeteer.Status())
 """)
@@ -133,11 +133,11 @@ def test_same_version_reinjection_preserves_lease_restore_budget_and_release_his
     rows = run_mod(f"""
 Puppeteer.SetPuppet(0,true)
 Puppeteer.AttachCurrentTurn(0,1)
-Puppeteer.RestoreUnit(10)
+Puppeteer.RestoreUnit(10,0)
 local original=Puppeteer
 dofile({json.dumps(str(MOD))})
 assert(original==Puppeteer)
-Puppeteer.RestoreUnit(10)
+Puppeteer.RestoreUnit(10,0)
 Puppeteer.AttachCurrentTurn(0,1)
 Puppeteer.Release(0,1)
 dofile({json.dumps(str(MOD))})
@@ -175,7 +175,7 @@ def test_native_lease_keeps_existing_restore_behavior(run_mod):
     rows = run_mod("""
 Puppeteer.SetPuppet(0,true)
 hooks.start(0)
-Puppeteer.RestoreUnit(10)
+Puppeteer.RestoreUnit(10,0)
 print('ATTACK_RESTORES|' .. attackRestores)
 """)
     assert rows[-1] == 'ATTACK_RESTORES|1'

@@ -94,8 +94,8 @@ def test_fake_mod_ownership_follows_local_player_switch():
     mod = _fake_mod()
     seat1_units = [uid for uid, u in mod.units.items() if u["owner"] == 1]
     assert seat1_units, "fake roster must include a seat-1 unit"
-    # composite engine id: owner 1 -> id + owner*65536
-    uid = f"u{seat1_units[0] + 1 * 65536}"
+    # Explicit owner and full engine id.
+    uid = f"u1:{seat1_units[0]}"
     lua = lt.move_unit(uid, "1,2")
 
     # lease engaged but NO switch: `me` is still 0 — the act is rejected

@@ -59,7 +59,7 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.0-rehearsal",
+        version: str = "0.3.4",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
@@ -163,32 +163,32 @@ class FakeMod:
                 continue
             b = b_units.get(uid)
             if b is None:
-                rows.append(f"LEDGER|unit.spawned|unit|u{uid}|exists"
+                rows.append(f"LEDGER|unit.spawned|unit|u{pid}:{uid}|exists"
                             f"|false|true")
                 continue
             if (u["x"], u["y"]) != (b[0], b[1]):
-                rows.append(f"LEDGER|unit.moved|unit|u{uid}|pos|{b[0]},{b[1]}"
+                rows.append(f"LEDGER|unit.moved|unit|u{pid}:{uid}|pos|{b[0]},{b[1]}"
                             f"|{u['x']},{u['y']}")
             if u["moves"] != b[2]:
-                rows.append(f"LEDGER|unit.moves|unit|u{uid}|moves|{b[2]}"
+                rows.append(f"LEDGER|unit.moves|unit|u{pid}:{uid}|moves|{b[2]}"
                             f"|{u['moves']}")
             if u["damage"] != b[3]:
-                rows.append(f"LEDGER|unit.damage|unit|u{uid}|damage|{b[3]}"
+                rows.append(f"LEDGER|unit.damage|unit|u{pid}:{uid}|damage|{b[3]}"
                             f"|{u['damage']}")
         for uid in sorted(set(b_units) - {u for u, x in self.units.items()
                                           if x["owner"] == pid}):
-            rows.append(f"LEDGER|unit.despawned|unit|u{uid}|exists|true|false")
+            rows.append(f"LEDGER|unit.despawned|unit|u{pid}:{uid}|exists|true|false")
         for cid, c in sorted(self.cities.items()):
             if c["owner"] != pid:
                 continue
             if cid not in b_cities:
-                rows.append(f"LEDGER|city.founded|city|c{cid}|exists|false|true")
+                rows.append(f"LEDGER|city.founded|city|c{pid}:{cid}|exists|false|true")
             elif c["pop"] != b_cities[cid]:
-                rows.append(f"LEDGER|city.growth|city|c{cid}|population|"
+                rows.append(f"LEDGER|city.growth|city|c{pid}:{cid}|population|"
                             f"{b_cities[cid]}|{c['pop']}")
         for cid in sorted(set(b_cities) - {c for c, x in self.cities.items()
                                            if x["owner"] == pid}):
-            rows.append(f"LEDGER|city.lost|city|c{cid}|exists|true|false")
+            rows.append(f"LEDGER|city.lost|city|c{pid}:{cid}|exists|true|false")
         gold = self.players[pid]["gold"]
         res = self.players[pid]["researching"]
         if gold != b_gold:
@@ -204,10 +204,10 @@ class FakeMod:
     def _digest(self) -> str:
         rows = []
         for uid, u in sorted(self.units.items()):
-            rows.append(f"u{uid}|{u['owner']}|{u['x']}|{u['y']}"
+            rows.append(f"u{u['owner']}:{uid}|{u['owner']}|{u['x']}|{u['y']}"
                         f"|{u['moves']}|{u['damage']}")
         for cid, c in sorted(self.cities.items()):
-            rows.append(f"c{cid}|{c['owner']}|{c['pop']}")
+            rows.append(f"c{c['owner']}:{cid}|{c['owner']}|{c['pop']}")
         for pid, p in sorted(self.players.items()):
             rows.append(f"p{pid}|{p['gold']}|{p['researching'] or -1}")
         rows.append(f"nonce{self.state_nonce}")
@@ -249,7 +249,7 @@ class FakeMod:
         me = self.local_player
 
         def dec(num: int) -> int:
-            return num % 65536
+            return num
 
         if tool == "move_unit":
             uid = num(r"UnitManager\.GetUnit\(me, (\d+)\)")
@@ -368,7 +368,7 @@ class FakeMod:
                     (15, 15) if u["type"] == "ARCHER" else (0, 0)
                 # composite id (Codex P1-11): uid + owner*65536
                 rows.append(
-                    f"UNITROW|{uid + u['owner'] * 65536}|{u['owner']}"
+                    f"UNITROW|u{u['owner']}:{uid}|{u['owner']}"
                     f"|{u['type']}|{q}|{r}"
                     f"|{100 - u['damage']}|{u['moves']}|2|{combat}|{ranged}"
                     f"|{str(u['fortified']).lower()}")
@@ -377,7 +377,7 @@ class FakeMod:
             rows = []
             for cid, c in sorted(self.cities.items()):
                 q, r = _ax(c["x"], c["y"])
-                rows.append(f"CITYROW|{cid + c['owner'] * 65536}"
+                rows.append(f"CITYROW|c{c['owner']}:{cid}"
                             f"|{c['owner']}|{c['name']}|{q}|{r}"
                             f"|{c['pop']}|{c['queue'] or '-'}")
             return ["CITIES|1", *rows, "---END---"]
@@ -399,7 +399,7 @@ class FakeMod:
                     cq, cr = _ax(c["x"], c["y"])
                     if (cq, cr) == (q, r):
                         owner = c["owner"]
-                        city = f"c{cid + c['owner'] * 65536}"
+                        city = f"c{c['owner']}:{cid}"
                 rows.append(f"TILEROW|{q}|{r}|{terrain}|true|{owner}|{city}")
             return ["VMAP|3", f"TURN|{self.turn}", *rows, "---END---"]
         if 'print("VMAP|1")' in code:
@@ -471,7 +471,7 @@ class FakeMod:
             # B2: the in-progress production hash (0 = nothing). The fake
             # maps a non-empty queue to a non-zero hash so housekeeping
             # skips cities with a build in progress.
-            cid = int(m.group(1)) % 65536
+            cid = int(m.group(1))
             c = self.cities.get(cid)
             if c is None or c["owner"] != self.local_player:
                 return ["CURPROD|-1", "---END---"]
@@ -553,15 +553,15 @@ class FakeMod:
                 self._diff_cache = None
             return ["PUPPET_ACTIVE|false"]
         if "Puppeteer.FreezeUnit" in code:
-            m = re.search(r"Puppeteer\.FreezeUnit\(\s*(\d+)\s*\)", code)
-            if m:
+            m = re.search(r"Puppeteer\.FreezeUnit\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
+            if m and self.lease and self.lease["player"] == int(m.group(2)):
                 u = self.units.get(int(m.group(1)))
                 if u is not None:
                     u["moves"] = 0
             return []  # silent, like the mod (it prints FROZEN| live)
         if "Puppeteer.RestoreUnit" in code:
-            m = re.search(r"Puppeteer\.RestoreUnit\(\s*(\d+)\s*\)", code)
-            if m and self.lease is not None:
+            m = re.search(r"Puppeteer\.RestoreUnit\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
+            if m and self.lease is not None and self.lease["player"] == int(m.group(2)):
                 uid = int(m.group(1))
                 # once per unit per lease (Codex P1-1): the SECOND restore
                 # for the same unit in one lease is a no-op
@@ -621,7 +621,7 @@ class FakeMod:
                 kind, etype, num, attr, before, after = self.auto_ambient
                 prefix = "c" if etype == "city" else "u"
                 self.ambient_rows.append(
-                    f"AMBIENT|{kind}|{etype}|{prefix}{num}"
+                    f"AMBIENT|{kind}|{etype}|{prefix}{m.group(1)}:{num}"
                     f"|{attr}|{before}|{after}")
             return [f"AMBIENT_WINDOW|closed|{m.group(1)}"]
 

@@ -45,7 +45,7 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.3"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.4"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and Puppeteer.supports_freeze and Puppeteer.supports_ledger
     and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
@@ -53,7 +53,7 @@ if type(Puppeteer) == "table" and Puppeteer.version == "0.3.3"
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.3"
+Puppeteer.version = "0.3.4"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -163,7 +163,7 @@ local function diff_player(playerID, before, book)
     for uid, u in pairs(after.units) do
         seen[uid] = true
         local b = before.units[uid]
-        local id = "u" .. uid
+        local id = "u" .. playerID .. ":" .. uid
         if b == nil then
             book("unit.spawned", "unit", id, "exists", "false", "true")
         else
@@ -183,14 +183,14 @@ local function diff_player(playerID, before, book)
     end
     for uid in pairs(before.units) do
         if not seen[uid] then
-            book("unit.despawned", "unit", "u" .. uid, "exists", "true", "false")
+            book("unit.despawned", "unit", "u" .. playerID .. ":" .. uid, "exists", "true", "false")
         end
     end
     local cseen = {}
     for cid, c in pairs(after.cities) do
         cseen[cid] = true
         local b = before.cities[cid]
-        local id = "c" .. cid
+        local id = "c" .. playerID .. ":" .. cid
         if b == nil then
             book("city.founded", "city", id, "exists", "false", "true")
         elseif ifloor(c.population) ~= ifloor(b.population) then
@@ -200,7 +200,7 @@ local function diff_player(playerID, before, book)
     end
     for cid in pairs(before.cities) do
         if not cseen[cid] then
-            book("city.lost", "city", "c" .. cid, "exists", "true", "false")
+            book("city.lost", "city", "c" .. playerID .. ":" .. cid, "exists", "true", "false")
         end
     end
     -- treasury / research / per-city production (digest parity: Codex P1-2)
@@ -404,8 +404,8 @@ end
 -- Codex P1-1 (2026-08-30): ONCE per unit per lease — restore-before-every-
 -- command refilled movement/attacks each call, i.e. UNLIMITED actions per
 -- turn. The once-only bound keeps each unit to its natural allowance.
-function Puppeteer.RestoreUnit(unitId)
-    if lease == nil then
+function Puppeteer.RestoreUnit(unitId, expectedPlayer)
+    if lease == nil or lease.playerID ~= expectedPlayer then
         return
     end
     if lease.restored == nil then lease.restored = {} end
@@ -413,7 +413,7 @@ function Puppeteer.RestoreUnit(unitId)
         return
     end
     local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
-    if unit ~= nil then
+    if unit ~= nil and unit:GetID() == unitId then
         UnitManager.RestoreMovement(unit)
         if not lease.preserve_attacks then UnitManager.RestoreUnitAttacks(unit) end
         lease.restored[unitId] = true
@@ -423,12 +423,12 @@ end
 -- v0.3: the undo for RestoreUnit when the command that followed was
 -- rejected — re-freeze so the restored-but-unused movement never books as
 -- an undeclared actual at release.
-function Puppeteer.FreezeUnit(unitId)
-    if lease == nil then
+function Puppeteer.FreezeUnit(unitId, expectedPlayer)
+    if lease == nil or lease.playerID ~= expectedPlayer then
         return
     end
     local unit = Players[lease.playerID]:GetUnits():FindID(unitId)
-    if unit ~= nil then
+    if unit ~= nil and unit:GetID() == unitId then
         UnitManager.FinishMoves(unit)
     end
     print("FROZEN|" .. unitId)
@@ -574,15 +574,15 @@ function Puppeteer.Digest()
         local pid = p:GetID()
         for _, unit in p:GetUnits():Members() do
             if not unit_gone(unit) then
-                table.insert(rows, string.format("u%d|%d|%d|%d|%d|%d",
-                    unit:GetID(), pid, unit:GetX(), unit:GetY(),
+                table.insert(rows, string.format("u%d:%d|%d|%d|%d|%d|%d",
+                    pid, unit:GetID(), pid, unit:GetX(), unit:GetY(),
                     math.floor(unit:GetMovesRemaining()),
                     math.floor(unit:GetDamage())))
             end
         end
         for _, city in p:GetCities():Members() do
-            table.insert(rows, string.format("c%d|%d|%d",
-                city:GetID(), pid, math.floor(city:GetPopulation())))
+            table.insert(rows, string.format("c%d:%d|%d|%d",
+                pid, city:GetID(), pid, math.floor(city:GetPopulation())))
         end
         local tech = p:GetTechs():GetResearchingTech()
         table.insert(rows, string.format("p%d|%d|%d",

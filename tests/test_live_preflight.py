@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[1]
 STATUS_DIGEST = [
     (0, "Puppeteer.Status",
      ["TURN|1", "PUPPET_ACTIVE|false", "LEASE_PLAYER|-1", "LEASE_TURN|-1"]),
-    (0, "Puppeteer.Digest", ["DIGEST|canned-board"]),
+    (0, "Puppeteer.Digest", ["DIGEST|p0|0|-1"]),
 ]
 
 
@@ -41,7 +41,7 @@ async def test_mod_handshake_gate_passes():
         await adapter.setup({})
         doc = await adapter.require_mod()
         assert doc["present"] is True
-        assert doc["mod_version"] == "0.3.0-rehearsal"
+        assert doc["mod_version"] == "0.3.4"
         assert doc["supports_freeze"] and doc["supports_ledger"]
         assert doc["supports_command_diff"], "M14d: DiffSinceLast required"
         await adapter.teardown()

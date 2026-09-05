@@ -51,6 +51,7 @@ from civ_arena.game.adapter import (
     RejectionReason,
 )
 from civ_arena.game.civ6 import lua_translator, response_parser
+from civ_arena.game.civ6.entity_ids import decode
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
 
 _LIVE_POINTER = (
@@ -61,8 +62,8 @@ _LIVE_POINTER = (
 # agent-supplied ids/coords are INTERPOLATED into Lua source — only these
 # spellings may cross the boundary (defense in depth beyond the referee's
 # type checks; a hostile tech_id like "MINING'] Evil() --" dies here).
-_UNIT_ID = re.compile(r"^u\d+\Z")
-_CITY_ID = re.compile(r"^c\d+\Z")
+_UNIT_ID = re.compile(r"^u(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
+_CITY_ID = re.compile(r"^c(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
 _TOKEN = re.compile(r"^[A-Z0-9_]+\Z")
 _COORD = re.compile(r"^-?\d+,-?\d+\Z")
 
@@ -130,6 +131,11 @@ def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
         value = args.get(key)
         if value is not None and not pattern.match(str(value)):
             return f"{tool}.{key}={value!r} fails the canonical spelling"
+        if value is not None and key in ("unit_id", "target_id", "city_id"):
+            try:
+                decode(value, "c" if key == "city_id" else "u")
+            except ValueError:
+                return f"{tool}.{key} is not an exact owner-qualified ID"
     return None
 
 
@@ -373,6 +379,8 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
+        if doc["mod_version"] != "0.3.4":
+            raise RuntimeError("PuppeteerMod 0.3.4 required for owner-qualified entity IDs")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
@@ -408,7 +416,7 @@ class FireTunerAdapter:
         await self._conn.execute_read(
             lua_translator.end_ambient_window(player_id))
         ambient = await self._conn.execute_read(lua_translator.dump_ambient())
-        manifest = response_parser.parse_ledger_lines(ambient)
+        manifest = response_parser.parse_ledger_lines(ambient, qualified=True)
         self._phase_open = player_id
         self._hash_owner = player_id
         self._sealed_hash = None
@@ -477,7 +485,7 @@ class FireTunerAdapter:
         # the referee's next sweep flags them (the live make-or-break check)
         await self._conn.execute_read(lua_translator.release(player_id, turn))
         ledger = await self._conn.execute_read(lua_translator.dump_ledger())
-        for doc in response_parser.parse_ledger_lines(ledger):
+        for doc in response_parser.parse_ledger_lines(ledger, qualified=True):
             self._journal.append(MutationRecord.from_doc(doc))
         self._hash_owner = None
         self._phase_open = -1
@@ -516,7 +524,7 @@ class FireTunerAdapter:
 
     async def _refresh_digest(self) -> None:
         lines = await self._conn.execute_read(lua_translator.mod_digest())
-        self._digest_text = response_parser.parse_digest(lines)
+        self._digest_text = response_parser.parse_digest(lines, qualified=True)
 
     async def _await(
         self, predicate: Callable[[dict[str, Any]], bool], what: str,
@@ -549,10 +557,10 @@ class FireTunerAdapter:
             return response_parser.parse_overview(lines)
         if req.kind is ObserveKind.UNITS:
             lines = await self._conn.execute_read(lua_translator.units_read())
-            return response_parser.parse_units(lines)
+            return response_parser.parse_units(lines, qualified=True)
         if req.kind is ObserveKind.CITIES:
             lines = await self._conn.execute_read(lua_translator.cities_read())
-            return response_parser.parse_cities(lines)
+            return response_parser.parse_cities(lines, qualified=True)
         if req.kind is ObserveKind.VISIBLE_MAP:
             # M17c derived visibility (the engine's fog state is not
             # exposed in this build's GameCore Lua — live-probed
@@ -565,9 +573,9 @@ class FireTunerAdapter:
             # no-expiry epistemics, adapter-side), served from cache with
             # their last-seen terrain — never re-read from the wire.
             units = response_parser.parse_units(await self._conn.execute_read(
-                lua_translator.units_read()))
+                lua_translator.units_read()), qualified=True)
             cities = response_parser.parse_cities(
-                await self._conn.execute_read(lua_translator.cities_read()))
+                await self._conn.execute_read(lua_translator.cities_read()), qualified=True)
             visible: set[str] = set()
             for u in units:
                 if u["owner"] == req.player_id:
@@ -621,7 +629,7 @@ class FireTunerAdapter:
                     "AVAILABLE_PRODUCTION requires subject_id (city_id)")
             lines = await self._conn.execute_write(
                 lua_translator.available_production_read(
-                    int(req.subject_id[1:])))
+                    req.subject_id))
             return response_parser.parse_available_production(lines)
         raise ValueError(f"unknown observe kind: {req.kind}")
 
@@ -662,6 +670,12 @@ class FireTunerAdapter:
             return ActionResult(
                 status="rejected", result=None, mutations=(),
                 rejection="args_invalid", error=bad)
+        for key, kind, rejection in (("unit_id", "u", "not_your_unit"),
+                                     ("city_id", "c", "not_your_city")):
+            if key in cmd.args and decode(cmd.args[key], kind)[0] != cmd.player_id:
+                return ActionResult(status="rejected", result=None, mutations=(),
+                                    rejection=rejection,
+                                    error="entity owner differs from acting seat")
         unit_id = cmd.args.get("unit_id")
         if cmd.tool in _UNIT_TOOLS:
             # unfreeze exactly this unit (the lease froze all of them at
@@ -733,7 +747,7 @@ class FireTunerAdapter:
                 entity_id=doc["entity_id"], attr=doc["attr"],
                 before=doc["before"], after=doc["after"],
                 origin="command")
-            for doc in response_parser.parse_ledger_lines(lines)
+            for doc in response_parser.parse_ledger_lines(lines, qualified=True)
         ]
         self._journal.extend(records)
         return records

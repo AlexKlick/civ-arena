@@ -17,6 +17,8 @@ VMs share no globals, so nothing may call across.
 
 from __future__ import annotations
 
+from civ_arena.game.civ6.entity_ids import decode
+
 # ---------------------------------------------------------------------------
 # Coordinates. The sim speaks axial hex (q, r); Civ VI speaks offset (x, y)
 # with pointy-top hexes — the odd-q layout (odd columns staggered DOWN).
@@ -147,10 +149,8 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
             if unit.GetFortifyTurns ~= nil then fortified = unit:GetFortifyTurns() > 0 end
         end)
         local x = unit:GetX() local y = unit:GetY()
-        -- composite id (Codex P1-11): engine unit ids are PER-OWNER; the
-        -- agent-facing id is id + owner*65536 so foreign and own units can
-        -- never collide (own units decode back with uid % 65536)
-        print("UNITROW|" .. (unit:GetID() + p:GetID() * 65536)
+        -- Explicit owner plus full engine ID: no arithmetic packing.
+        print("UNITROW|u" .. p:GetID() .. ":" .. unit:GetID()
             .. "|" .. p:GetID() .. "|" .. name
             .. "|" .. x .. "|" .. (y - math.floor(x / 2))
             .. "|" .. hp .. "|" .. moves .. "|" .. maxmoves
@@ -215,7 +215,7 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         local pop = 1
         pcall(function() pop = math.floor(city:GetPopulation()) end)
         local x = city:GetX() local y = city:GetY()
-        print("CITYROW|" .. (city:GetID() + p:GetID() * 65536)
+        print("CITYROW|c" .. p:GetID() .. ":" .. city:GetID()
             .. "|" .. p:GetID() .. "|" .. name
             .. "|" .. x .. "|" .. (y - math.floor(x / 2))
             .. "|" .. pop .. "|" .. queue)
@@ -260,7 +260,7 @@ for _, c in ipairs(coords) do
         terrain = string.gsub(terrain, "%c", " ")
         local owner = -1
         pcall(function() owner = plot:GetOwner() end)
-        local q = c[1] local r = c[2]
+        local q = c[1] local r = c[2] - math.floor(c[1] / 2)
         print("TILEROW|" .. q .. "|" .. r .. "|" .. terrain
             .. "|true|" .. owner .. "|")
     end
@@ -294,14 +294,16 @@ print("---END---")
 """
 
 
-def available_production_read(city_id: int) -> str:
+def available_production_read(city_id: str) -> str:
     """Sim-AVAILABLE_PRODUCTION-shaped read (InGame — CanStartOperation
     lives there). item_id is the engine Type minus UNIT_/BUILDING_."""
+    owner, raw = decode(city_id, "c")
     return f"""
 print("AVPROD|1")
 local me = Game.GetLocalPlayer()
-local pCity = CityManager.GetCity(me, {city_id})
-if pCity == nil then print("---END---") return end
+if me ~= {owner} then print("---END---") return end
+local pCity = CityManager.GetCity(me, {raw})
+if pCity == nil or pCity:GetID() ~= {raw} then print("---END---") return end
 local bq = pCity:GetBuildQueue()
 for row in GameInfo.Units() do
     local ok = false
@@ -590,17 +592,15 @@ def release(player_id: int, turn: int = -1) -> str:
 
 
 def restore_unit(unit_id: str) -> str:
-    """'u7' -> RestoreUnit(7): the mod keys snapshots by numeric engine id."""
-    num = unit_id[1:] if unit_id[:1] in ("u", "c") else unit_id
-    return f"Puppeteer.RestoreUnit({num})"
+    """Restore a full engine ID only under its owner's active lease."""
+    owner, raw = decode(unit_id, "u")
+    return f"Puppeteer.RestoreUnit({raw}, {owner})"
 
 
 def freeze_unit(unit_id: str) -> str:
-    """Mod v0.3: re-freeze ONE unit — the adapter's undo for a restore whose
-    command was then rejected, so the release diff sees the frozen baseline
-    and the restore never books as undeclared movement."""
-    num = unit_id[1:] if unit_id[:1] in ("u", "c") else unit_id
-    return f"Puppeteer.FreezeUnit({num})"
+    """Undo restore under the same owner binding; never reinterpret IDs."""
+    owner, raw = decode(unit_id, "u")
+    return f"Puppeteer.FreezeUnit({raw}, {owner})"
 
 
 def diff_since_last(attrs: str = "", seq: int = 0) -> str:
@@ -653,24 +653,23 @@ def _bail(tool: str, reason: str, detail: str) -> str:
             "print('---END---') return ")
 
 
-def _own_uid(unit_id: str) -> int:
-    """Decode an own-unit composite id (uid + owner*65536; Codex P1-11).
-    Own units belong to the acting local player, so the low 16 bits are
-    the engine id."""
-    return int(unit_id[1:]) % 65536
+def _owner_guard(owner: int, tool: str) -> str:
+    reason = 'NOT_YOUR_CITY' if tool in ('purchase', 'set_city_production') else 'NOT_YOUR_UNIT'
+    return f"if me ~= {owner} then {_bail(tool, reason, 'local-owner-mismatch')} end"
 
 
 def move_unit(unit_id: str, dest: str) -> str:
     """InGame MOVE_TO (upstream's route — the same op a human click issues;
     the engine enforces movement cost/ZOC/terrain). MoveUnit exists only in
     GameCore and bypasses those rules, so it is NOT used for play."""
-    num = _own_uid(unit_id)
+    owner, num = decode(unit_id, "u")
     q, r = (int(p) for p in dest.split(","))
     x, y = axial_to_xy(q, r)
     return f"""-- arena:tool=move_unit
 local me = Game.GetLocalPlayer()
+{_owner_guard(owner, "move_unit")}
 local unit = UnitManager.GetUnit(me, {num})
-if unit == nil then {_bail("move_unit", "UNKNOWN_ENTITY", unit_id)} end
+if unit == nil or unit:GetID() ~= {num} then {_bail("move_unit", "UNKNOWN_ENTITY", unit_id)} end
 if unit:GetMovesRemaining() <= 0 then {_bail("move_unit", "NO_MOVEMENT", unit_id)} end
 if not UnitManager.CanStartOperation(unit, UnitOperationTypes.MOVE_TO,
             nil, true) then {_bail("move_unit", "ILLEGAL_MOVE", dest)} end
@@ -683,20 +682,20 @@ print('---END---')"""
 
 
 def attack(unit_id: str, target_id: str) -> str:
-    """InGame: ranged units fire RANGE_ATTACK; melee closes via MOVE_TO with
-    the ATTACK modifier (upstream's verified split). Target resolved by
-    owner scan — target ids carry no owner on our wire."""
-    num, tnum = _own_uid(unit_id), int(target_id[1:])
+    """InGame ranged attack or melee MOVE_TO, with an explicit target owner."""
+    owner, num = decode(unit_id, "u")
+    target_owner, target_raw = decode(target_id, "u")
     _cannot = _bail("attack", "CANNOT_ATTACK", target_id)
     return f"""-- arena:tool=attack
 local me = Game.GetLocalPlayer()
+{_owner_guard(owner, "attack")}
 local unit = UnitManager.GetUnit(me, {num})
-if unit == nil then {_bail("attack", "UNKNOWN_ENTITY", unit_id)} end
--- composite id (Codex P1-11): owner rides in the high bits — no owner
--- scan, no wrong-target risk when both players have the same unit id
-local tOwner = math.floor({tnum} / 65536)
-local target = UnitManager.GetUnit(tOwner, {tnum} % 65536)
-if target == nil then {_bail("attack", "UNKNOWN_ENTITY", target_id)} end
+if unit == nil or unit:GetID() ~= {num} then {_bail("attack", "UNKNOWN_ENTITY", unit_id)} end
+local tOwner = {target_owner}
+local target = UnitManager.GetUnit(tOwner, {target_raw})
+if target == nil or target:GetID() ~= {target_raw} then
+    {_bail("attack", "UNKNOWN_ENTITY", target_id)}
+end
 local tx = target:GetX() local ty = target:GetY()
 local info = GameInfo.Units[unit:GetType()]
 local ranged = (info ~= nil and info.RangedCombat ~= nil and info.RangedCombat > 0)
@@ -718,11 +717,12 @@ print('---END---')"""
 def fortify(unit_id: str) -> str:
     """InGame FORTIFY with upstream's SLEEP fallback for units that cannot
     fortify (e.g. embarked)."""
-    num = _own_uid(unit_id)
+    owner, num = decode(unit_id, "u")
     return f"""-- arena:tool=fortify
 local me = Game.GetLocalPlayer()
+{_owner_guard(owner, "fortify")}
 local unit = UnitManager.GetUnit(me, {num})
-if unit == nil then {_bail("fortify", "UNKNOWN_ENTITY", unit_id)} end
+if unit == nil or unit:GetID() ~= {num} then {_bail("fortify", "UNKNOWN_ENTITY", unit_id)} end
 if unit.GetFortifyTurns ~= nil and unit:GetFortifyTurns() > 0 then
     print('ACT|fortify|OK|already')
     print('---END---') return
@@ -745,13 +745,14 @@ def found_city(unit_id: str, name: str | None = None) -> str:
     """InGame FOUND_CITY at the settler's tile. The optional name is
     DECLARED-IGNORED (engine auto-names; renaming is not on this surface)."""
     _ = name
-    num = _own_uid(unit_id)
+    owner, num = decode(unit_id, "u")
     _not_settler = _bail("found_city", "ILLEGAL_MOVE",
                          "not-a-settler-or-blocked")
     return f"""-- arena:tool=found_city
 local me = Game.GetLocalPlayer()
+{_owner_guard(owner, "found_city")}
 local unit = UnitManager.GetUnit(me, {num})
-if unit == nil then {_bail("found_city", "UNKNOWN_ENTITY", unit_id)} end
+if unit == nil or unit:GetID() ~= {num} then {_bail("found_city", "UNKNOWN_ENTITY", unit_id)} end
 if not UnitManager.CanStartOperation(unit, UnitOperationTypes.FOUND_CITY,
             nil, true) then {_not_settler} end
 local x = unit:GetX() local y = unit:GetY()
@@ -805,11 +806,14 @@ def set_city_production(city_id: str, item_id: str) -> str:
     """InGame CityManager.RequestOperation(BUILD) with upstream's
     VALUE_EXCLUSIVE insert mode — the tool's contract is REPLACE, not
     queue-alongside."""
-    cid = int(city_id[1:]) % 65536
+    owner, cid = decode(city_id, "c")
     return f"""{_resolve_item_lua(item_id, "set_city_production")}
 local me = Game.GetLocalPlayer()
+{_owner_guard(owner, "set_city_production")}
 local pCity = CityManager.GetCity(me, {cid})
-if pCity == nil then {_bail("set_city_production", "UNKNOWN_ENTITY", city_id)} end
+if pCity == nil or pCity:GetID() ~= {cid} then
+    {_bail("set_city_production", "UNKNOWN_ENTITY", city_id)}
+end
 local bq = pCity:GetBuildQueue()
 local tCheck = {{}}
 tCheck[CityOperationTypes[pname]] = item.Hash
@@ -848,11 +852,12 @@ def current_production_read(city_id: str) -> str:
     """B2: the in-progress production hash for the local player's city
     (0 = nothing building) — the housekeeping gate that stops the
     every-turn re-fill. InGame context (CityManager lives there)."""
-    cid = int(city_id[1:]) % 65536
+    owner, cid = decode(city_id, "c")
     return f"""
 local me = Game.GetLocalPlayer()
+if me ~= {owner} then print("CURPROD|-1") print("---END---") return end
 local pCity = CityManager.GetCity(me, {cid})
-if pCity == nil then
+if pCity == nil or pCity:GetID() ~= {cid} then
     print('CURPROD|-1') print('---END---') return
 end
 local bq = pCity:GetBuildQueue()
@@ -868,7 +873,7 @@ print('---END---')"""
 
 def purchase(city_id: str, item_id: str) -> str:
     """InGame CityManager.RequestCommand(PURCHASE), gold only."""
-    cid = city_id[1:]
+    owner, cid = decode(city_id, "c")
     # hoisted: the bail detail embeds Lua string concat, which cannot sit
     # inside an f-string replacement field (3.12 tokenizer)
     # the detail must be a self-contained Lua expression with BALANCED
@@ -878,8 +883,9 @@ def purchase(city_id: str, item_id: str) -> str:
         "' .. tostring(cost) .. 'gt' .. tostring(balance) .. '")
     return f"""{_resolve_item_lua(item_id, "purchase")}
 local me = Game.GetLocalPlayer()
+{_owner_guard(owner, "purchase")}
 local pCity = CityManager.GetCity(me, {cid})
-if pCity == nil then {_bail("purchase", "UNKNOWN_ENTITY", city_id)} end
+if pCity == nil or pCity:GetID() ~= {cid} then {_bail("purchase", "UNKNOWN_ENTITY", city_id)} end
 local yieldRow = GameInfo.Yields['YIELD_GOLD']
 if yieldRow == nil then {_bail("purchase", "ILLEGAL_MOVE", "no-gold-yield")} end
 local formation = MilitaryFormationTypes.STANDARD_MILITARY_FORMATION

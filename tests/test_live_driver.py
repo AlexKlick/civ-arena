@@ -107,8 +107,8 @@ def test_translator_mod_commands():
     assert lua_translator.set_puppet(0, True) == "Puppeteer.SetPuppet(0, true)"
     assert lua_translator.set_puppet(1, False) == \
         "Puppeteer.SetPuppet(1, false)"
-    assert lua_translator.restore_unit("u7") == "Puppeteer.RestoreUnit(7)"
-    assert lua_translator.restore_unit("c3") == "Puppeteer.RestoreUnit(3)"
+    assert lua_translator.restore_unit("u0:7") == "Puppeteer.RestoreUnit(7, 0)"
+    assert lua_translator.restore_unit("u1:3") == "Puppeteer.RestoreUnit(3, 1)"
     assert "ACTION_ENDTURN" in lua_translator.request_end_turn(0)
     assert "SetCivic" not in lua_translator.request_end_turn(0)
 
@@ -395,12 +395,12 @@ def test_translator_act_routing_pins():
     token; set_research is the inverse. The standing SetCivic prohibition
     (permanently breaks AI civics) covers the whole module."""
     ingame = {
-        "move_unit": lua_translator.move_unit("u1", "2,3"),
-        "attack": lua_translator.attack("u1", "u2"),
-        "fortify": lua_translator.fortify("u1"),
-        "found_city": lua_translator.found_city("u1"),
-        "set_city_production": lua_translator.set_city_production("c1", "WARRIOR"),
-        "purchase": lua_translator.purchase("c1", "MONUMENT"),
+        "move_unit": lua_translator.move_unit("u0:1", "2,3"),
+        "attack": lua_translator.attack("u0:1", "u0:2"),
+        "fortify": lua_translator.fortify("u0:1"),
+        "found_city": lua_translator.found_city("u0:1"),
+        "set_city_production": lua_translator.set_city_production("c0:1", "WARRIOR"),
+        "purchase": lua_translator.purchase("c0:1", "MONUMENT"),
     }
     for tool, lua in ingame.items():
         assert "RequestOperation" in lua or "RequestCommand" in lua, tool
@@ -428,12 +428,12 @@ def test_act_args_injection_guard():
     from civ_arena.game.civ6.firetuner import _arg_violation
 
     assert _arg_violation("set_research", {"tech_id": "MINING"}) is None
-    assert _arg_violation("move_unit", {"unit_id": "u7", "dest": "-3,4"}) is None
+    assert _arg_violation("move_unit", {"unit_id": "u0:7", "dest": "-3,4"}) is None
     for tool, bad in (
         ("set_research", {"tech_id": "MINING'] Evil() --"}),
-        ("move_unit", {"unit_id": "u7", "dest": "1,2); Evil("}),
-        ("attack", {"unit_id": "u7'", "target_id": "u1"}),
-        ("purchase", {"city_id": "c1", "item_id": "lower_case"}),
+        ("move_unit", {"unit_id": "u0:7", "dest": "1,2); Evil("}),
+        ("attack", {"unit_id": "u7'", "target_id": "u0:1"}),
+        ("purchase", {"city_id": "c0:1", "item_id": "lower_case"}),
     ):
         assert _arg_violation(tool, bad) is not None, (tool, bad)
 
@@ -511,13 +511,13 @@ async def test_observes_over_fake_and_foreign_projection():
         assert any(u["type"] == "SETTLER" for u in units)
         cities = await adapter.observe(
             ObserveRequest(kind=ObserveKind.CITIES, player_id=0))
-        assert cities and cities[0]["city_id"] == "c1"
+        assert cities and cities[0]["city_id"] == "c0:1"
         research = await adapter.observe(
             ObserveRequest(kind=ObserveKind.AVAILABLE_RESEARCH, player_id=0))
         assert {"tech_id": "MINING", "cost": 25} in research
         production = await adapter.observe(ObserveRequest(
             kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=0,
-            subject_id="c1"))
+            subject_id="c0:1"))
         assert {"item_id": "MONUMENT", "cost": 60, "turns": 10,
                 "kind": "building"} in production
         vmap = await adapter.observe(
@@ -559,11 +559,11 @@ async def test_act_accepted_books_commanded_rows_and_refreshes_digest():
         _ = received_callbacks, commands
         pre_hash = adapter.state_hash()
         res = await adapter.act(_cmd("move_unit", {
-            "unit_id": "u2", "dest": "5,4"}))
+            "unit_id": "u0:2", "dest": "5,4"}))
         assert res.status == "accepted", res
         kinds = [(m.kind, m.entity_id) for m in res.mutations]
-        assert ("unit.moved", "u2") in kinds, kinds
-        assert ("unit.moves", "u2") in kinds, kinds
+        assert ("unit.moved", "u0:2") in kinds, kinds
+        assert ("unit.moves", "u0:2") in kinds, kinds
         # the journal holds THE SAME records (allowed == actual multiset)
         drained = adapter.drain_mutations()
         assert [(m.kind, m.entity_id, m.attr, m.before, m.after)
@@ -589,7 +589,7 @@ async def test_act_rejected_refreezes_and_books_nothing():
         await adapter.begin_phase(0, 1)
         pre_hash = adapter.state_hash()
         res = await adapter.act(_cmd("move_unit", {
-            "unit_id": "u999", "dest": "5,4"}))
+            "unit_id": "u0:999", "dest": "5,4"}))
         assert res.status == "rejected" and res.rejection == "unknown_entity"
         assert res.mutations == () and adapter.drain_mutations() == []
         assert adapter.state_hash() == pre_hash
@@ -606,7 +606,7 @@ async def test_act_out_of_phase_refused():
     adapter, server = await _adapter_with()
     try:
         await adapter.setup({})
-        res = await adapter.act(_cmd("fortify", {"unit_id": "u2"}))
+        res = await adapter.act(_cmd("fortify", {"unit_id": "u0:2"}))
         assert res.status == "rejected" and res.rejection == "no_lease"
         # unknown tool with a VALID open phase -> not_implemented (the
         # no-lease guard is checked first by design)
@@ -796,7 +796,7 @@ def test_set_city_production_readback_requires_hash_match():
     cur == item.Hash — the old GetCurrentProductionType chain never
     existed in shipped Lua (cur stayed -1, every submission "passed",
     and housekeeping overwrote the agent's choice ten turns running)."""
-    lua = lua_translator.set_city_production("c1", "MONUMENT")
+    lua = lua_translator.set_city_production("c0:1", "MONUMENT")
     assert "GetCurrentProductionTypeHash" in lua
     assert "GetCurrentProductionType(" not in lua
     assert "cur ~= item.Hash" in lua          # 0 (nothing set) FAILS now
@@ -816,7 +816,7 @@ def test_cities_read_uses_production_type_hash():
 def test_current_production_read_shape():
     """B2: the housekeeping gate read — CURPROD|<hash>, 0 = idle,
     -1 = unknown city."""
-    lua = lua_translator.current_production_read("c1")
+    lua = lua_translator.current_production_read("c0:1")
     assert "CURPROD|" in lua
     assert "GetCurrentProductionTypeHash" in lua
 

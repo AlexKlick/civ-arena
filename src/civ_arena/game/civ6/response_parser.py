@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from civ_arena.game.civ6 import entity_ids
+
 # canonical ints only: a token that LOOKS numeric by any other spelling
 # (12.5, .5, 1., 1e3, nan, inf, +7) fails closed (Codex P2-9)
 _PLAIN_INT = re.compile(r"^-?\d+$")
@@ -81,7 +83,7 @@ def _coerce_strict(value: str) -> Any:
     return _coerce(value)
 
 
-def parse_ledger_lines(lines: list[str]) -> list[dict[str, Any]]:
+def parse_ledger_lines(lines: list[str], *, qualified: bool = False) -> list[dict[str, Any]]:
     """LEDGER|/AMBIENT| rows -> MutationRecord docs.
 
     Row shape (both ledgers): ``<PREFIX>|kind|entity_type|entity_id|attr|
@@ -101,6 +103,8 @@ def parse_ledger_lines(lines: list[str]) -> list[dict[str, Any]]:
         if len(parts) != 6:
             raise ValueError(f"malformed {prefix} row (want 6 fields): {line!r}")
         kind, entity_type, entity_id, attr, before, after = parts
+        if qualified and entity_type in ("unit", "city"):
+            entity_ids.decode(entity_id, "u" if entity_type == "unit" else "c")
         docs.append({
             "kind": kind,
             "entity_type": entity_type,
@@ -113,19 +117,32 @@ def parse_ledger_lines(lines: list[str]) -> list[dict[str, Any]]:
     return docs
 
 
-def parse_digest(lines: list[str]) -> str:
+def parse_digest(lines: list[str], *, qualified: bool = False) -> str:
     """The DIGEST| payload — the live state-hash source text."""
     for line in _split_lines(lines):
         line = line.strip()
         if line.startswith("DIGEST|"):
-            return line[len("DIGEST|"):]
+            value = line[len("DIGEST|"):]
+            if qualified:
+                seen = set()
+                for row in value.split(";"):
+                    parts = row.split("|")
+                    if parts[0].startswith(("u", "c")):
+                        if len(parts) < 2:
+                            raise ValueError("digest entity lacks owner")
+                        identity = entity_ids.observed(parts[0], _coerce_strict(parts[1]),
+                                                       parts[0][0], qualified=True)
+                        if identity in seen:
+                            raise ValueError("duplicate digest entity ID")
+                        seen.add(identity)
+            return value
     raise ValueError(f"no DIGEST| row in {lines!r}")
 
 
 # -- sim-shape observation parses (M14d: shape parity with SimulatorAdapter) --
 
 
-def parse_units(lines: list[str]) -> list[dict[str, Any]]:
+def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, Any]]:
     """UNITROW|uid|pid|type|q|r|hp|moves|maxmoves|combat|ranged|fortified ->
     the omniscient UNITS doc (projection consumes q/r/owner/hp/movement/
     max_movement/strength/ranged_strength/fortified; ownership checks read
@@ -144,7 +161,7 @@ def parse_units(lines: list[str]) -> list[dict[str, Any]]:
         (uid, pid, type_, q, r, hp, moves, maxmoves, combat, ranged,
          fortified) = parts
         out.append({
-            "unit_id": f"u{int(uid)}",
+            "unit_id": entity_ids.observed(uid, _coerce_strict(pid), "u", qualified=qualified),
             "owner": _coerce_strict(pid),
             "type": type_,
             "q": _coerce_strict(q),
@@ -156,10 +173,12 @@ def parse_units(lines: list[str]) -> list[dict[str, Any]]:
             "ranged_strength": _coerce_strict(ranged),
             "fortified": _coerce(fortified),
         })
-    return sorted(out, key=lambda u: int(u["unit_id"][1:]))
+    if qualified and len({u["unit_id"] for u in out}) != len(out):
+        raise ValueError("duplicate unit identity in observation")
+    return sorted(out, key=lambda u: entity_ids.sort_key(u["unit_id"]))
 
 
-def parse_cities(lines: list[str]) -> list[dict[str, Any]]:
+def parse_cities(lines: list[str], *, qualified: bool = False) -> list[dict[str, Any]]:
     """CITYROW|cid|pid|name|q|r|population|queue -> the omniscient CITIES
     doc. production_queue is a 0/1-length list (the sim's shape); the
     placeholder hp/buckets/buildings keys exist because foreign-city
@@ -178,7 +197,7 @@ def parse_cities(lines: list[str]) -> list[dict[str, Any]]:
             raise ValueError(f"malformed CITYROW (want 7 fields): {line!r}")
         cid, pid, name, q, r, pop, queue = parts
         out.append({
-            "city_id": f"c{int(cid)}",
+            "city_id": entity_ids.observed(cid, _coerce_strict(pid), "c", qualified=qualified),
             "owner": _coerce_strict(pid),
             "name": name,
             "q": _coerce_strict(q),
@@ -190,7 +209,9 @@ def parse_cities(lines: list[str]) -> list[dict[str, Any]]:
             "production_bucket": 0,
             "buildings": [],
         })
-    return sorted(out, key=lambda c: int(c["city_id"][1:]))
+    if qualified and len({c["city_id"] for c in out}) != len(out):
+        raise ValueError("duplicate city identity in observation")
+    return sorted(out, key=lambda c: entity_ids.sort_key(c["city_id"]))
 
 
 def parse_overview(lines: list[str]) -> dict[str, Any]:
@@ -318,7 +339,7 @@ def parse_visible_map(lines: list[str]) -> dict[str, Any]:
             raise ValueError(f"malformed TILEROW (want 6 fields): {line!r}")
         q, r, terrain, vis_flag, owner, city = parts
         key = f"{_coerce_strict(q)},{_coerce_strict(r)}"
-        sim_terrain = _TERRAIN_MAP.get(terrain)
+        sim_terrain = _TERRAIN_MAP.get(terrain.removeprefix("TERRAIN_"))
         if sim_terrain is None:
             sim_terrain = "PLAINS"
             unknown += 1
@@ -361,4 +382,3 @@ def parse_act(lines: list[str]) -> dict[str, Any]:
     if row is None:
         raise ValueError(f"no ACT row in act response: {lines!r}")
     return row
-
