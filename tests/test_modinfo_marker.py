@@ -34,11 +34,14 @@ def test_lua_carries_marker_and_rejected_pattern():
     # and the forbidden API is called out
     assert "SetCivic" in lua and "FORBIDDEN" not in lua  # documented, not used
     # find the actual calls: FinishMoves exists (freeze), RestoreMovement
-    # exists only inside RestoreUnit (per-unit), never in OnPlayerTurnStartComplete
-    start_complete = lua.split("function OnPlayerTurnStartComplete", 1)[1]
+    # exists only inside RestoreUnit (per-unit), never in the acquisition
+    # helper or its native hook caller.
+    acquire = lua.split("local function acquire_lease(", 1)[1]
+    acquire, start_complete = acquire.split("local function OnPlayerTurnStartComplete", 1)
     start_complete = start_complete.split("function ", 1)[0]
-    assert "FinishMoves" in start_complete
-    assert "RestoreMovement" not in start_complete, (
+    assert "UnitManager.FinishMoves(unit)" in acquire
+    assert "acquire_lease(playerID, nil)" in start_complete
+    assert "RestoreMovement" not in acquire + start_complete, (
         "the hook must freeze, never bulk-restore"
     )
 
@@ -48,9 +51,11 @@ def test_freeze_snapshots_the_frozen_state():
     must be taken AFTER the freeze — snapshotting first books our own
     movement-zeroing as an undeclared violation at release."""
     lua = (MODS / "PuppeteerMod.lua").read_text()
-    hook = lua.split("function OnPlayerTurnStartComplete", 1)[1]
-    hook = hook.split("function ", 1)[0]
-    assert hook.index("FinishMoves") < hook.index("snapshot_player"), (
+    acquire = lua.split("local function acquire_lease(", 1)[1]
+    acquire = acquire.split("local function OnPlayerTurnStartComplete", 1)[0]
+    assert acquire.index("UnitManager.FinishMoves(unit)") < acquire.index(
+        "snapshot = snapshot_player(playerID)"
+    ), (
         "freeze FIRST, then snapshot — else the freeze itself drifts"
     )
 
