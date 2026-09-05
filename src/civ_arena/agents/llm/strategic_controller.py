@@ -21,6 +21,14 @@ from civ_arena.arena.referee import MatchAborted
 SYSTEM = """You are the strategic commander of one Civilization seat. Submit exactly
 one submit_directive tool call containing one JSON directive. Do not request basic
 state, narrate analysis, or call game tools. Current projected state is supplied.
+Read movement_authority in the supplied metadata. When opening_units_frozen is
+true, the live mod temporarily zeroed the listed untouched owned units' movement.
+The controller may attempt one initial owned-unit action under the unit's natural
+allowance; its amount is unobserved and engine legality still applies. Opening
+zero alone does not rule out founding a city with an owned settler. This is not
+extra movement and does not authorize refilling an already attempted unit. When
+opening_units_frozen is false, ordinary zero remains observed spent movement;
+never assume a positive allowance or infer that a requested action is legal.
 The controller executes routine scouting, research preferences and production
 preferences without further model requests. Tactical overrides last this turn
 only; use them for specific battles or founding a city with an observed owned
@@ -164,7 +172,15 @@ class StrategicController:
         if posts >= runtime.llm.max_requests_per_match or runtime.llm.max_tool_rounds < 1:
             raise MatchAborted('strategic model request budget exhausted')
         metadata = _encode({'turn': runtime._turn, 'player_id': runtime.profile.player_id,
-                            'reasons': reasons, 'previous_directive': self.directive})
+                            'reasons': reasons, 'previous_directive': self.directive,
+                            'movement_authority': {
+                                'opening_units_frozen': self.opening_units_frozen,
+                                'untouched_owned_unit_ids': sorted(
+                                    u['unit_id'] for u in curator.own('get_units'))
+                                    if self.opening_units_frozen else [],
+                                'natural_allowance': 'unobserved' if self.opening_units_frozen
+                                    else 'use_projected_movement',
+                                'legality': 'engine_checked_not_proven_by_this_metadata'}})
         # The ENTIRE user content, including metadata and separators, shares the
         # existing character cap. Never silently trim IDs or leave invalid JSON.
         curator.budget = runtime.llm.max_result_chars - len(metadata) - 1
@@ -180,7 +196,9 @@ class StrategicController:
         runtime._report_usage(reply)
         uses = tool_uses(reply)
         if (reply.stop_reason == 'max_tokens' or len(uses) != 1
-                or any(block.get('type') == 'text' and block.get('text', '').strip()
+                or any(block.get('type') == 'text'
+                       and (not isinstance(block.get('text', ''), str)
+                            or block.get('text', '').strip())
                        for block in reply.content)
                 or uses[0].get('name') != 'submit_directive'):
             raise MatchAborted('model must submit exactly one complete strategic directive')

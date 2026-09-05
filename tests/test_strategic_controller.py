@@ -1,5 +1,6 @@
 """Controller request cadence, fresh-only custody, and honest closure; no network."""
 import copy
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -268,3 +269,38 @@ async def test_real_seeded_executor_facade_and_frozen_opening(setup, monkeypatch
     graph = next(row['graph'] for row in records if row['audit'] == 'strategy_graph')
     assert graph['identity']['configured_seed'] == 4
     assert len(graph['execution']) == expected_moves
+
+
+@pytest.mark.parametrize('frozen', [False, True])
+async def test_frozen_opening_authority_is_truthful_and_shares_whole_context_cap(setup, frozen):
+    from civ_arena.agents.llm.context_curator import CONTEXT_MARKER
+    controller, runtime, model, facade, records, scout = setup
+    controller.opening_units_frozen = frozen
+    facade.units[0]['movement'] = 0
+    facade.units.append({'unit_id': 'u1:2', 'owner_id': 1, 'type': 'SCOUT',
+                         'coord': '1,0', 'movement': 0})
+    await advance(controller, runtime, facade, 1)
+    request = model.requests[0]
+    content = request['messages'][0]['content']
+    metadata_text, context = content.split('\n', 1)
+    metadata = json.loads(metadata_text)
+    authority = metadata['movement_authority']
+    assert authority['opening_units_frozen'] is frozen
+    assert authority['untouched_owned_unit_ids'] == (['u0:1'] if frozen else [])
+    assert authority['natural_allowance'] == ('unobserved' if frozen else 'use_projected_movement')
+    observed = json.loads(context.removeprefix(CONTEXT_MARKER))
+    assert observed['own_units'][0]['movement'] == 0
+    assert len(content) <= runtime.llm.max_result_chars
+    assert 'engine legality still applies' in request['system']
+    assert 'ordinary zero remains observed spent movement' in request['system']
+
+
+@pytest.mark.parametrize('malformed', [None, False, {}, 42])
+async def test_malformed_text_block_is_bounded_match_abort(setup, malformed):
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [[{'type': 'text', 'text': malformed}, use('submit_directive')]]
+    with pytest.raises(MatchAborted, match='one complete strategic directive'):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 1
+    assert not scout.await_count
+    assert 'end_turn' not in facade.calls
