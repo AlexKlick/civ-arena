@@ -107,8 +107,8 @@ def test_translator_mod_commands():
     assert lua_translator.set_puppet(0, True) == "Puppeteer.SetPuppet(0, true)"
     assert lua_translator.set_puppet(1, False) == \
         "Puppeteer.SetPuppet(1, false)"
-    assert lua_translator.restore_unit("u0:7") == "Puppeteer.RestoreUnit(7, 0)"
-    assert lua_translator.restore_unit("u1:3") == "Puppeteer.RestoreUnit(3, 1)"
+    assert "Puppeteer.RestoreUnit(7, 0)" in lua_translator.restore_unit("u0:7")
+    assert "Puppeteer.RestoreUnit(3, 1)" in lua_translator.restore_unit("u1:3")
     assert "ACTION_ENDTURN" in lua_translator.request_end_turn(0)
     assert "SetCivic" not in lua_translator.request_end_turn(0)
 

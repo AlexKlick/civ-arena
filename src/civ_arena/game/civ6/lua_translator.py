@@ -594,7 +594,9 @@ def release(player_id: int, turn: int = -1) -> str:
 def restore_unit(unit_id: str) -> str:
     """Restore a full engine ID only under its owner's active lease."""
     owner, raw = decode(unit_id, "u")
-    return f"Puppeteer.RestoreUnit({raw}, {owner})"
+    return f'''local restored = Puppeteer.RestoreUnit({raw}, {owner})
+print("RESTORE_UNIT|{owner}|{raw}|" .. tostring(restored))
+print("---END---")'''
 
 
 def freeze_unit(unit_id: str) -> str:

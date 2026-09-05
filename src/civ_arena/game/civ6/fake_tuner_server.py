@@ -59,7 +59,7 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.4",
+        version: str = "0.3.5",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
@@ -560,16 +560,20 @@ class FakeMod:
             return []  # silent, like the mod (it prints FROZEN| live)
         if "Puppeteer.RestoreUnit" in code:
             m = re.search(r"Puppeteer\.RestoreUnit\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
-            if m and self.lease is not None and self.lease["player"] == int(m.group(2)):
-                uid = int(m.group(1))
-                # once per unit per lease (Codex P1-1): the SECOND restore
-                # for the same unit in one lease is a no-op
-                if uid not in self._restored:
-                    u = self.units.get(uid)
-                    if u is not None:
-                        u["moves"] = 2
+            if m is None:
+                return []
+            uid, owner = int(m.group(1)), int(m.group(2))
+            status = "wrong_lease"
+            if self.lease is not None and self.lease["player"] == owner:
+                if uid in self._restored:
+                    status = "already_restored"
+                elif uid not in self.units or self.units[uid]["owner"] != owner:
+                    status = "unknown_entity"
+                else:
+                    self.units[uid]["moves"] = 2
                     self._restored.add(uid)
-            return []  # silent, like the mod
+                    status = "restored"
+            return [f"RESTORE_UNIT|{owner}|{uid}|{status}"]
         m = re.search(r"Puppeteer\.FinishAllMoves\(\s*(\d+)\s*\)", code)
         if m:
             # D7-H2 rehearsal, now the M18 hotseat pre-end path too:
