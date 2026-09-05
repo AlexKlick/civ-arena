@@ -321,8 +321,49 @@ the independently reviewed isolated commit `3f3a11e`.
 [Release summary](../runs/sixty-round-development-20260905/guarded-handoff-release/summary.json),
 [Ruff](../runs/sixty-round-development-20260905/guarded-handoff-release-ruff.log),
 and [review and focused evidence](../runs/sixty-round-live-20260905T041339Z/guarded-handoff-evidence/).
-Fresh sixty-round validation is still pending; prior failed runs and the
-postmortem probe do not satisfy it.
+The following live attempt exercises this change but does not complete the
+sixty-round target.
+
+## Second strategic live attempt: directive response rejection
+
+Fresh run `minimax60-20260905T044417Z` used clean commit `30adf034` and mod
+0.3.7. Startup passed in 667.912 seconds. It completed 31 correctly ordered
+seat turns: fifteen complete rounds followed by player zero's turn sixteen.
+Player one's turn sixteen stopped at the strategic response validator. There
+were nine provider requests (four for player zero, five for player one), zero
+watchdog violations, and six observed informational-popup dismissals. The
+single `MATCH_END` matches the failed summary; cleanup completed with no errors.
+The player-one turn-sixteen lease remains explicitly unreleased. The final
+digest is cached, not a new shutdown observation.
+[Retained event accounting](../runs/sixty-round-live-20260905T044417Z/final-analysis.json).
+
+The error was `model must submit exactly one complete strategic directive`.
+That validator rejected several possible response shapes, including valid
+tool calls accompanied by prose. The failing response's block shape was not
+retained, so this run cannot establish which shape caused the rejection.
+No continuation or successful sixty-round claim is made for this run.
+
+Completed seat turns had a median of 9.968 seconds and a mean of 11.394 seconds.
+Twelve of those turns contained no accepted game action, so these timings are
+not a uniform measure of productive play. Eight model requests belong to
+completed turns; the ninth belongs to the failed active turn. The configured
+own-unit movement allowance admitted ten exact rows, retained across all 31
+completed-turn allowance audits. Foreign-unit and other drift remains outside
+the allowance.
+
+Actual physical-monitor browser evidence shows both model directives and a
+quiet player-one turn with six scouting candidates, a selected action and an
+observed coordinate change, using zero model requests for that turn. Selection
+weights are not calibrated outcome confidence. The current browser reload had
+zero console/page errors and zero failed requests.
+[Browser records and screenshots](../runs/sixty-round-live-20260905T044417Z/browser-proof/).
+
+The independently reviewed scouting follow-up also corrects a quiet-turn
+stall: an explicitly assigned scouting role supersedes old fortification,
+while a current tactical hold, unassigned standing orders and movement guards
+still apply. Its two-turn controller regression passed with zero additional
+model requests on the quiet turn.
+[Standing-order contract](scouting-standing-intent.md).
 
 ## Follow-up probes
 
