@@ -20,10 +20,10 @@ from __future__ import annotations
 from civ_arena.game.civ6.entity_ids import decode
 
 # ---------------------------------------------------------------------------
-# Coordinates. The sim speaks axial hex (q, r); Civ VI speaks offset (x, y)
-# with pointy-top hexes — the odd-q layout (odd columns staggered DOWN).
-# HYPOTHESIS (first live dispatch will confirm; a wrong stagger parity only
-# yields rejected moves — never corrupts state): q = x, r = y - floor(x/2).
+# Coordinates. The sim speaks axial hex (q, r); Civ VI uses odd-row offset.
+# Host-verified 2026-09-05: all six neighbors at four row/column parity
+# combinations have engine distance one (hex-row-frame-probe.log).
+# q = x - floor(y/2), r = y. Ledger/digest positions remain engine x,y.
 # ---------------------------------------------------------------------------
 
 
@@ -33,11 +33,11 @@ def _half_floor(v: int) -> int:
 
 
 def xy_to_axial(x: int, y: int) -> tuple[int, int]:
-    return x, y - _half_floor(x)
+    return x - _half_floor(y), y
 
 
 def axial_to_xy(q: int, r: int) -> tuple[int, int]:
-    return q, r + _half_floor(q)
+    return q + _half_floor(r), r
 
 
 def _strip_prefix_lua(name_expr: str, prefix: str) -> str:
@@ -152,7 +152,7 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         -- Explicit owner plus full engine ID: no arithmetic packing.
         print("UNITROW|u" .. p:GetID() .. ":" .. unit:GetID()
             .. "|" .. p:GetID() .. "|" .. name
-            .. "|" .. x .. "|" .. (y - math.floor(x / 2))
+            .. "|" .. (x - math.floor(y / 2)) .. "|" .. y
             .. "|" .. hp .. "|" .. moves .. "|" .. maxmoves
             .. "|" .. combat .. "|" .. ranged .. "|" .. tostring(fortified))
         end
@@ -217,7 +217,7 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
         local x = city:GetX() local y = city:GetY()
         print("CITYROW|c" .. p:GetID() .. ":" .. city:GetID()
             .. "|" .. p:GetID() .. "|" .. name
-            .. "|" .. x .. "|" .. (y - math.floor(x / 2))
+            .. "|" .. (x - math.floor(y / 2)) .. "|" .. y
             .. "|" .. pop .. "|" .. queue)
     end
 end
@@ -236,13 +236,13 @@ def visible_map_read(player_id: int, tiles: list[tuple[int, int]]) -> str:
     ever asked about, so the wire doc cannot carry unseen terrain.
 
     Coordinates are AXIAL (q, r); the engine's offset (x, y) with the
-    odd-q stagger is the inverse of the units/cities convention
-    (q = x, r = y - floor(x/2) => x = q, y = r + floor(q/2)). Terrain is
+    odd-row stagger is the inverse of the units/cities convention
+    (q = x - floor(y/2), r = y => x = q + floor(r/2), y = r). Terrain is
     the ENGINE TerrainType; the parser maps it into the sim vocabulary.
     plot:GetOwner IS live-verified — a visible tile's true ownership is
     read here; GetOwningCity is nil in this build, so city tagging is a
     Python-side join against the (already-omniscient) cities read."""
-    coords = ", ".join(f"{{{q},{r + _half_floor(q)}}}" for q, r in tiles)
+    coords = ", ".join(f"{{{x},{y}}}" for x, y in (axial_to_xy(q, r) for q, r in tiles))
     return f"""
 print("VMAP|3")
 print("TURN|" .. Game.GetCurrentGameTurn())
@@ -260,7 +260,7 @@ for _, c in ipairs(coords) do
         terrain = string.gsub(terrain, "%c", " ")
         local owner = -1
         pcall(function() owner = plot:GetOwner() end)
-        local q = c[1] local r = c[2] - math.floor(c[1] / 2)
+        local q = c[1] - math.floor(c[2] / 2) local r = c[2]
         print("TILEROW|" .. q .. "|" .. r .. "|" .. terrain
             .. "|true|" .. owner .. "|")
     end

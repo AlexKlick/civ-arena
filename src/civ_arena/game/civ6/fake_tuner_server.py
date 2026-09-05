@@ -384,14 +384,13 @@ class FakeMod:
         if 'print("VMAP|3")' in code:
             # the targeted read: the adapter derived the visible set and
             # asks for exactly those axial coords (offset-encoded in the
-            # Lua as {q, r + floor(q / 2)}). Answer only what was asked —
+            # Lua as {q + floor(r / 2), r}). Answer only what was asked —
             # a row for an unrequested tile would enter the belief as
             # sight it does not have.
             coords = re.findall(r"\{(-?\d+),(-?\d+)\}", code)
             rows = []
             for x_s, y_s in coords:
-                q, y = int(x_s), int(y_s)
-                r = y - (q - (q % 2)) // 2
+                q, r = _ax(int(x_s), int(y_s))
                 terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
                 owner = -1
                 city = ""

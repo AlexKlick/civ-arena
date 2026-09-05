@@ -381,11 +381,9 @@ def _cmd(tool: str, args: dict, player_id: int = 0) -> ActionCommand:
 
 
 def test_axial_offset_roundtrip():
-    """The odd-q hypothesis is at least a bijection for the whole map range
-    (which stagger parity is RIGHT is the live-dispatch question; a wrong
-    parity only yields rejected moves)."""
-    for x in range(0, 24):
-        for y in range(0, 24):
+    """The host-verified odd-row frame round-trips, including negative axes."""
+    for x in range(-24, 24):
+        for y in range(-24, 24):
             q, r = lua_translator.xy_to_axial(x, y)
             assert lua_translator.axial_to_xy(q, r) == (x, y)
 
