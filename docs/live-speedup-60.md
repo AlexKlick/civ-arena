@@ -110,6 +110,26 @@ Open <http://127.0.0.1:8788/> on this host to view the match room. It follows th
 latest run unless the user has pinned a different match. The observer has no
 tuner connection or game-control endpoint.
 
+## First live startup result and correction
+
+The first fresh attempt, `minimax60-20260905T020306Z` at `a582c012`, stopped
+before dispatch: its final engine census contained four majors, not two.
+Startup took 507.39 seconds, sent zero model requests, and preserved 22 save
+files plus the load-slot backup. Exactly one terminal event matches the
+aborted startup summary. This attempt is a failure, not a completed match.
+[Startup outcome](../runs/sixty-round-live-20260905T020306Z/startup-terminal-validation.log),
+[Actual census and launcher output](../runs/sixty-round-live-20260905T020306Z/launcher.log).
+
+The installed setup code compares all map capacity bounds with its database
+row. Forcing Tiny's maximum major count to two caused a later UI refresh to
+restore its default four-player roster. The correction preserves native map
+capacity and closes extra seats separately. The actual Ready controls now
+refresh native setup, enforce two seats, refresh again, verify stability and
+launch synchronously. Callback registration is only setup evidence; the final
+post-load engine census remains the authority. Sixty-one focused checks passed,
+including deferred refresh, refused closure and repeated roster reset.
+[Roster regression checks](../runs/sixty-round-development-20260905/roster-focused.log).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,

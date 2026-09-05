@@ -199,19 +199,12 @@ print("{SENTINEL}")
 CONFIG_HOTSEAT_LUA = f"""
 -- Open major slots can be filled with AI at launch despite Participating=2.
 -- Use the shipped stagingroom.lua OnSlotType closure semantics explicitly.
-function CivArenaCloseExtraMajorSlots()
-  MapConfiguration.SetMinMajorPlayers(2)
-  MapConfiguration.SetMaxMajorPlayers(2)
-  GameConfiguration.SetParticipatingPlayerCount(2)
+function CivArenaVerifyMajorSlots()
   for pid = 0, 63 do
     local pc = PlayerConfigurations[pid]
     if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
         CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then
       if pid > 1 then
-        if pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
-          pc:SetSlotStatus(SlotStatus.SS_CLOSED)
-          Network.BroadcastPlayerInfo(pid)
-        end
         if pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
           error("extra major slot did not close: " .. tostring(pid))
         end
@@ -233,11 +226,24 @@ function CivArenaCloseExtraMajorSlots()
   end
   print("MAJOR_ROSTER|0,1|humans=true|extra_slots=closed")
 end
+function CivArenaCloseExtraMajorSlots()
+  -- Keep the map's native min/max bounds. The shipped MapSize_ValueNeedsChanging
+  -- treats a forced Tiny MaxMajor=2 as stale setup and reopens four players.
+  GameConfiguration.SetParticipatingPlayerCount(2)
+  for pid = 2, 63 do
+    local pc = PlayerConfigurations[pid]
+    if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
+        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV
+        and pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
+      pc:SetSlotStatus(SlotStatus.SS_CLOSED)
+      Network.BroadcastPlayerInfo(pid)
+    end
+  end
+  CivArenaVerifyMajorSlots()
+end
 Network.SetLocalNetworkMode(GameModeTypes.HOTSEAT)
 GameConfiguration.SetGameMode(GameModeTypes.HOTSEAT)
 MapConfiguration.SetMapSize({lua_int(MAPSIZE_TINY)})
-MapConfiguration.SetMinMajorPlayers(2)
-MapConfiguration.SetMaxMajorPlayers(2)
 GameConfiguration.SetParticipatingPlayerCount(2)
 GameConfiguration.SetGameSpeedType({lua_int(GAMESPEED_STANDARD)})
 PlayerConfigurations[0]:SetSlotStatus(SlotStatus.SS_TAKEN)

@@ -116,23 +116,97 @@ assert(PlayerConfigurations[0].password=='' and PlayerConfigurations[1].password
         assert 'POSTHOST_ROSTER|' not in result.stdout
 
 
-@pytest.mark.parametrize('receipt', [True, False])
+@pytest.mark.parametrize('receipt', ['complete', 'missing_posthost', 'missing_guard'])
 async def test_ui_start_requires_posthost_receipt_without_dead_tuner_poll(receipt, monkeypatch):
     conn = SimpleNamespace(lua_states={1: 'StagingRoom'}, disconnect=AsyncMock())
     monkeypatch.setattr(launch, 'connect_state', AsyncMock(return_value=conn))
     configured = ['MAJOR_ROSTER|0,1|humans=true|extra_slots=closed']
     hosted = ['InSession|true']
-    if receipt:
+    if receipt != 'missing_posthost':
         hosted.append('POSTHOST_ROSTER|two_humans_no_extra_major_slots')
+    if receipt != 'missing_guard':
+        hosted.append('UI_START_GUARD|bound_ready_controls')
     run = AsyncMock(side_effect=[configured, hosted])
     monkeypatch.setattr(launch, 'run_lua', run)
     rediscover = AsyncMock(side_effect=AssertionError('must not poll the dead tuner'))
     monkeypatch.setattr(launch, '_rediscover', rediscover)
     result = await launch.run_full('127.0.0.1', 4318, 'StagingRoom', ui_start=True)
-    assert result == (0 if receipt else 12)
+    assert result == (0 if receipt == 'complete' else 12)
     assert run.await_count == 2
     rediscover.assert_not_awaited()
     conn.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize('variant', ['stable', 'refused_closure', 'unstable_refresh', 'demoted'])
+def test_ui_start_closes_deferred_map_defaults_and_verifies_before_launch(variant, tmp_path):
+    executable = shutil.which('texlua')
+    if executable is None:
+        pytest.skip('texlua unavailable for executable roster fixture')
+    fixture = LUA_FIXTURE + """
+-- Native Tiny bounds differ from a two-seat selection. MapSize_ValueNeedsChanging
+-- checks all four map bounds, and ValueChanged resets the default roster to four.
+local minMajor,maxMajor,minMinor,maxMinor = 2,2,0,0
+local cityStates = 0
+MapConfiguration.SetMinMajorPlayers=function(v) minMajor=v end
+MapConfiguration.SetMaxMajorPlayers=function(v) maxMajor=v end
+local refreshes = 0
+function RealizeGameSetup()
+  refreshes=refreshes+1
+  if minMajor~=2 or maxMajor~=6 or minMinor~=0 or maxMinor~=10 then
+    minMajor,maxMajor,minMinor,maxMinor=2,6,0,10
+    cityStates=6
+    PlayerConfigurations[2].slot=1; PlayerConfigurations[3].slot=1
+  end
+end
+Network.IsGameHost=function() return true end
+local launches=0
+Network.LaunchGame=function()
+  assert(PlayerConfigurations[0].slot==3 and PlayerConfigurations[1].slot==3)
+  assert(PlayerConfigurations[2].slot==0 and PlayerConfigurations[3].slot==0)
+  assert(minMajor==2 and maxMajor==6 and minMinor==0 and maxMinor==10)
+  assert(cityStates==6 and PlayerConfigurations[10].slot==1)
+  launches=launches+1
+end
+Mouse={eLClick=1}
+Controls={ReadyButton={},ReadyCheck={}}
+for _,control in pairs(Controls) do
+  function control:RegisterCallback(event,callback) self.callback=callback end
+end
+"""
+    source = fixture + launch.CONFIG_HOTSEAT_EMPTY_LUA + launch.HOST_HOTSEAT_LUA
+    source += launch.UI_START_GUARD_LUA
+    source += """
+assert(CIV_ARENA_START_GUARD_STATUS=='armed' and launches==0)
+-- The previously untested async OnShow path: roster reset AFTER the receipt.
+RealizeGameSetup()
+assert(PlayerConfigurations[2].slot==1 and PlayerConfigurations[3].slot==1)
+"""
+    if variant == 'refused_closure':
+        source += 'PlayerConfigurations[2].SetSlotStatus=function() end\n'
+    elif variant == 'unstable_refresh':
+        source += """
+local native=RealizeGameSetup
+RealizeGameSetup=function() native(); PlayerConfigurations[2].slot=1 end
+"""
+    elif variant == 'demoted':
+        source += 'PlayerConfigurations[1].slot=1\n'
+    source += 'Controls.ReadyButton.callback()\n'
+    if variant == 'stable':
+        source += """
+assert(launches==1 and CIV_ARENA_START_GUARD_STATUS=='launched')
+assert(refreshes==3, 'must verify stability through a second native refresh')
+Controls.ReadyCheck.callback()
+assert(launches==1, 'duplicate UI input must not relaunch')
+"""
+    else:
+        source += """
+assert(launches==0)
+assert(string.sub(CIV_ARENA_START_GUARD_STATUS,1,7)=='failed:')
+"""
+    path = tmp_path / 'ui-start-roster.lua'
+    path.write_text(source)
+    result = subprocess.run([executable, str(path)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 async def test_failed_prehost_roster_never_calls_host(monkeypatch):
