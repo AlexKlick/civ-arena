@@ -365,6 +365,33 @@ still apply. Its two-turn controller regression passed with zero additional
 model requests on the quiet turn.
 [Standing-order contract](scouting-standing-intent.md).
 
+## Strategic response release and current preflight
+
+At clean commit `b54c9ec`, the full local gate collected 1,069 identities and ran
+each exactly once: **1,068 passed, one skipped, zero failures/errors**. Ruff
+passed. The integrated response/client files match independently reviewed
+`96e32ca`; scouting matches independently reviewed `2ef5407`.
+[Full gate](../runs/sixty-round-development-20260905/strategic-response-release/summary.json),
+[Ruff](../runs/sixty-round-development-20260905/strategic-response-release-ruff.log),
+[review binding](../runs/sixty-round-development-20260905/strategic-response-review-binding.log).
+
+A provider-only preflight on the retained opening-state fixture used two
+MiniMax-M3 requests in 5.260 seconds. Despite named-tool selection, the first
+reply contained one text block and zero tools. The single bounded format retry
+returned one valid directive tool call. Both exact curated inputs and response
+shapes are retained. No game or facade action ran. This proves one actual repair
+case; it does not establish universal provider format compliance or reconstruct
+the earlier turn-sixteen response.
+[Provider evidence](../runs/sixty-round-development-20260905/strategic-response-provider-probe.json).
+
+The fresh thirty-round acceptance configuration is
+`configs/live-hotseat-strategic-minimax2-030.yaml`. It preserves the sixty-round
+provider, request, seed and allowance settings, changing only the match name and
+round limit. After sixty-round validation, run two separate fresh launches using
+that configuration and `--rounds 30`, with distinct run IDs and the same reviewed
+implementation. Both must independently satisfy the structural and live gates;
+one longer run cannot substitute for two fresh starts.
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
