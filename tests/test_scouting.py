@@ -271,9 +271,17 @@ async def test_real_adapter_rejection_refreezes_before_executor_observes_and_sto
     state = snapshot([unit(movement=0)])
     adapter = FireTunerAdapter()
     adapter._phase_open = 0
+    adapter._turn_mirror = 1
     adapter._conn = AsyncMock()
     trace = []
     async def read(lua):
+        if "BeginRewardCommand" in lua:
+            trace.append("begin_reward")
+            nonce = lua.split("'")[1]
+            return [f"REWARD_BEGIN|{nonce}|accepted", "---END---"]
+        if "CancelRewardCommand" in lua:
+            trace.append("cancel_reward")
+            return ["---END---"]
         if "RestoreUnit" in lua:
             trace.append("restore")
             state["get_units"][0]["movement"] = 2
@@ -297,6 +305,7 @@ async def test_real_adapter_rejection_refreezes_before_executor_observes_and_sto
     result = await run_scouting(copy.deepcopy(state), directive={}, **IDENTITY,
                                 execute=execute, refresh=refresh,
                                 frozen_unit_ids={"u0:131073"})
-    assert trace == ["execute", "restore", "refreeze", "refresh"]
+    assert trace == ["execute", "begin_reward", "restore", "refreeze",
+                     "cancel_reward", "refresh"]
     assert result["execution"][0]["after"]["movement"] == 0
     assert adapter._conn.execute_write.await_count == 1
