@@ -463,3 +463,35 @@ def test_lost_settler_terminal_does_not_reopen_on_later_reappearance():
     s['get_units'].append(settler)
     g.begin_turn(s, turn=3)
     assert g.mission == terminal
+
+
+def test_armed_builder_hybrid_is_military_and_cannot_exceed_cap():
+    legion = option('ROMAN_LEGION', power=40)
+    legion['unit_capabilities']['build_charges'] = 1
+    s = state([unit(f'guard{i}') for i in range(8)])
+    g = policy(s, catalogs={'c0:1': [*CATALOG, legion]})
+    out = choose(g, s, options=[legion])
+    assert out['item_id'] is None
+    assert out['candidates'][0]['growth_role'] == 'military'
+    assert out['candidates'][0]['reason'] == 'empire_military_capacity_satisfied'
+
+
+def test_armed_builder_hybrid_can_supply_observed_land_guard_and_escort():
+    legion = option('ROMAN_LEGION', power=40)
+    legion['unit_capabilities']['build_charges'] = 1
+    s = state([unit('legion1', kind='ROMAN_LEGION', power=40),
+               unit('legion2', kind='ROMAN_LEGION', power=40)])
+    g = policy(s, catalogs={'c0:1': [*CATALOG, legion]})
+    assert g.mission['status'] == 'awaiting_settler'
+    assert g.mission['escort_id'] == 'legion2'
+    assert g.assessment['healthy_local_defender_ids'] == ['legion1', 'legion2']
+
+
+def test_armed_founder_hybrid_never_bypasses_global_combat_cap():
+    founder = option('ARMED_FOUNDER', power=40)
+    founder['unit_capabilities']['found_city'] = True
+    s = state([unit(f'guard{i}') for i in range(8)])
+    g = policy(s, catalogs={'c0:1': [*CATALOG, founder]})
+    out = choose(g, s, options=[founder])
+    assert out['item_id'] is None
+    assert out['candidates'][0]['reason'] == 'empire_military_capacity_satisfied'
