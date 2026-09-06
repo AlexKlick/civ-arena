@@ -127,6 +127,10 @@ are under `runs/observed-dependency-projection-20260906/`, with `summary.json` a
 `checks.json`. No broad repository suite or live game action was run for this
 isolated addition.
 
+A [standalone browser preview](dependency-browser-preview.md) renders explicitly
+supplied artifacts with selectable examples and inspectable provenance. It does
+not connect this overlay to current live model thinking.
+
 ## Bounds and follow-up
 
 Query bounds remain 512 nodes, 2,000 supporting rows and depth 0–8. Observation

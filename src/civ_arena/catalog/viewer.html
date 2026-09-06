@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-<!-- SCRIPT_HASH -->'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Dependency atlas · synthetic preview</title>
+<style><!-- STYLE --></style>
+</head>
+<body>
+<header>
+  <div class="eyebrow">CIV ARENA / DEPENDENCY ATLAS <span class="badge">OFFLINE · SYNTHETIC PREVIEW</span></div>
+  <h1>Explore the path. Keep the unknowns.</h1>
+  <p>Source dependencies with supplied observations. This is not current live model thinking.</p>
+</header>
+<main>
+  <section class="toolbar" aria-label="Graph controls">
+    <label for="examples">Supplied example / root<select id="examples"></select></label>
+    <div class="controls"><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit graph</button><button id="artifact">Artifact &amp; digests</button></div>
+  </section>
+  <div class="legend" aria-label="Evidence legend"><span><i class="source"></i>Source fact</span><span><i class="observed"></i>Supplied observation · true or false</span><span><i class="unknown"></i>Unknown / outside depth</span></div>
+  <div class="workspace">
+    <section class="canvas-panel" aria-label="Dependency graph">
+      <div class="canvas-heading"><span id="graph-summary"></span><span>Drag to pan · select a node or edge</span></div>
+      <svg id="graph" role="img" aria-label="Source dependency graph"></svg>
+      <div class="graph-note">Arrows point from a subject to its dependency or relation target. Multiple prerequisite edges do not establish AND or OR.</div>
+    </section>
+    <aside id="inspector" aria-label="Selected graph detail" aria-live="polite"></aside>
+  </div>
+  <section class="uncertainty" aria-label="Unresolved conditions">
+    <div><span class="eyebrow">EFFECTIVE RULES</span><strong>Unverified</strong><p>Installed base declarations do not prove the active ruleset.</p></div>
+    <div><span class="eyebrow">CITY &amp; ACTION FEASIBILITY</span><strong>Unknown</strong><p>Unlocked does not mean built, affordable, placed or legal now.</p></div>
+    <div><span class="eyebrow">SOURCE CONNECTIVE</span><strong>Unverified</strong><p>Pair and field declarations do not establish engine AND/OR rules.</p></div>
+  </section>
+  <section class="frontier"><h2>Depth frontier</h2><p id="frontier-summary"></p><div id="frontier-list"></div></section>
+</main>
+<footer>Static artifact preview · no network requests or game actions · no success probabilities</footer>
+<script id="projection-data" type="application/json"><!-- DATA --></script>
+<script><!-- SCRIPT --></script>
+</body>
+</html>
