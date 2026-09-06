@@ -3,7 +3,8 @@
 Design proposal, 2026-09-06. Source binding: `b1af7086c5b5046bc46e22cf2ad5cb2b64e14491`,
 tree `35bf8e1a92ac4df401911d5b72eb537f970b740c`. This document adds no runtime
 behavior and does not change the running 60-round match. The first implementation
-slice is an offline, deterministic protocol and evidence projection. Live engine,
+slice is an offline, deterministic protocol and evidence projection. The subsequent
+[D1 foundation](diplomacy-offline-protocol.md) records its implemented subset. Live engine,
 provider, browser, and full-match acceptance remain separate gates.
 
 The models should negotiate outside Civ VI's limited diplomacy interface: exchange
@@ -258,7 +259,9 @@ policy rather than repeating the entire batch blindly.
 Proposed starting bounds, to be made explicit configuration in implementation:
 
 - At most 4 diplomatic operations per decision, 2 new offers per own turn,
-  8 open offers and 8 active treaties per seat, and 8 obligations per treaty.
+  8 open offers and 8 active treaties per private channel, and 8 obligations per
+  treaty. Channel-local admission avoids exposing the load of unrelated private
+  negotiations through a capacity rejection; the first live match has two seats.
 - Each offer's complete consent document at most 1,600 characters; each message
   at most 600 characters; literal claim text remains separate from exact terms.
 - Curate due/active obligations, actionable offers, then new messages in a
