@@ -14,6 +14,7 @@ import random
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from civ_arena.agents.recovery import RecoveryPolicy, observed_health
 from civ_arena.agents.strategy_directive import coordinate, validate_directive
 from civ_arena.game.sim.state import hex_dist, neighbors, tiles_within
 
@@ -146,7 +147,7 @@ class ScoutingFeedback:
 
 
 def _decision(unit, units, tiles, directive, identity, directive_hash, opening_frozen,
-              nonprogress):
+              nonprogress, recovery=None, recovery_policy=None):
     uid, origin = unit["unit_id"], coordinate(unit["coord"])
     seed = _digest(["frontier-v1", identity, uid, directive_hash])
     decision = {"unit_id": uid, "origin": unit["coord"], "movement": _remaining(unit),
@@ -155,10 +156,24 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
                 else "observed_remaining"}
     if decision["movement"] <= 0 and not opening_frozen:
         return {**decision, "reason": "movement_spent"}
+    active_recovery = recovery.get(uid) if recovery else None
+    health = observed_health(unit)
+    # A later refreshed read may be unavailable or newly damaged even when the
+    # opening observation was healthy. Never allow that to bypass the hold.
+    if active_recovery is None and recovery_policy is not None and (
+            not health["health_valid"] or health["hp"] * 100
+            < health["max_hp"] * recovery_policy.enter_below_percent):
+        active_recovery = {"unit_id": uid, **health, "observed_turn": identity["turn"],
+            "started_turn": identity["turn"], "recovering": health["health_valid"],
+            "state": "recovering" if health["health_valid"] else "health_unavailable",
+            "no_gain_turns": 0, "no_gain_reported": False}
     override = next((row for row in directive["tactical_overrides"] if row["unit_id"] == uid),
                     None)
     if override is not None:
         decision["override"] = True
+        if active_recovery:
+            decision["recovery_resolution"] = "one_turn_tactical_interruption"
+            decision["recovery"] = copy.deepcopy(active_recovery)
         action = override["action"]
         if action == "move":
             # No unseen destination or automatic long route. Tactical movement
@@ -182,6 +197,13 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
                         "reason": "explicit_tactical_override_engine_checks_site"}
         else:
             selected = _hold(unit, "explicit_tactical_hold")
+        return {**decision, "selected": selected, "reason": selected["reason"]}
+    if active_recovery:
+        decision["recovery"] = copy.deepcopy(active_recovery)
+        decision["health_observation"] = observed_health(unit)
+        if unit.get("fortified"):
+            return {**decision, "reason": "recovery_existing_standing_order"}
+        selected = _hold(unit, "persistent_recovery_hold")
         return {**decision, "selected": selected, "reason": selected["reason"]}
     assigned = unit.get("type") in directive["scouting"]["unit_types"]
     if unit.get("fortified") and not assigned:
@@ -264,7 +286,8 @@ def _decision(unit, units, tiles, directive, identity, directive_hash, opening_f
 def plan_scouting(snapshot: dict, *, directive: dict, player_id: int,
                   match_id: str, agent_id: str, turn: int, seed: int = 0,
                   frozen_unit_ids: frozenset[str] | set[str] = frozenset(),
-                  nonprogress: dict | None = None) -> dict:
+                  nonprogress: dict | None = None, recovery: dict | None = None,
+                  recovery_policy: RecoveryPolicy | None = None) -> dict:
     """Produce JSON audit with selection probabilities, not success probabilities."""
     units, tiles = _snapshot(snapshot)
     nonprogress = {} if nonprogress is None else nonprogress
@@ -282,7 +305,15 @@ def plan_scouting(snapshot: dict, *, directive: dict, player_id: int,
                 "turn": turn, "configured_seed": seed}
     digest = _digest(normalized)
     overrides = {row["unit_id"] for row in normalized["tactical_overrides"]}
-    owned.sort(key=lambda unit: (unit["unit_id"] not in overrides, unit["unit_id"]))
+    recovery = {} if recovery is None else recovery
+    if (not isinstance(recovery, dict)
+            or not set(recovery) <= {unit["unit_id"] for unit in owned}):
+        raise ValueError("recovery overlay must reference currently owned units")
+    # Explicit actions first, then recovery needing a standing order. Already
+    # held units do not displace actionable tasks within the existing unit cap.
+    owned.sort(key=lambda unit: (unit["unit_id"] not in overrides,
+        not (unit["unit_id"] in recovery and not unit.get("fortified")),
+        unit["unit_id"] in recovery and bool(unit.get("fortified")), unit["unit_id"]))
     return {"version": 1, "kind": "heuristic_frontier_plan", "identity": identity,
             "directive_sha256": digest, "directive": normalized,
             "seed_spec": "sha256(canonical_json([frontier-v1,identity,unit_id,directive_sha256]))",
@@ -291,9 +322,11 @@ def plan_scouting(snapshot: dict, *, directive: dict, player_id: int,
             "limits": {"units": MAX_UNITS, "attempts_per_unit": MAX_ATTEMPTS},
             "opening_frozen_unit_ids": sorted(frozen_unit_ids),
             "nonprogress_suppression": copy.deepcopy(nonprogress),
+            "recovery_overlay": copy.deepcopy(recovery),
             "deferred_units": max(0, len(owned) - MAX_UNITS),
             "decisions": [_decision(unit, units, tiles, normalized, identity, digest,
-                                     unit["unit_id"] in frozen_unit_ids, nonprogress)
+                                     unit["unit_id"] in frozen_unit_ids, nonprogress, recovery,
+                                     recovery_policy)
                           for unit in owned[:MAX_UNITS]]}
 
 
@@ -305,7 +338,8 @@ def _observed(snapshot, uid, player_id):
     if _owner(unit) != player_id:
         return {"present": True, "owned": False}
     return {"present": True, "owned": True, "coord": unit["coord"],
-            "movement": _remaining(unit), "fortified": unit.get("fortified", False)}
+            "movement": _remaining(unit), "fortified": unit.get("fortified", False),
+            "health": observed_health(unit)}
 
 
 async def run_scouting(
@@ -315,6 +349,8 @@ async def run_scouting(
     seed: int = 0,
     frozen_unit_ids: frozenset[str] | set[str] = frozenset(),
     nonprogress: dict | None = None,
+    recovery: dict | None = None,
+    recovery_policy: RecoveryPolicy | None = None,
 ) -> dict:
     """At most two distinct attempts per unit, using audited caller callbacks.
 
@@ -329,8 +365,10 @@ async def run_scouting(
     kwargs = {"directive": directive, "player_id": player_id, "match_id": match_id,
               "agent_id": agent_id, "turn": turn, "seed": seed}
     plan = plan_scouting(snapshot, **kwargs, frozen_unit_ids=frozen_unit_ids,
-                         nonprogress=nonprogress)
+                         nonprogress=nonprogress, recovery=recovery,
+                         recovery_policy=recovery_policy)
     nonprogress = plan["nonprogress_suppression"]
+    recovery = plan["recovery_overlay"]
     untouched_frozen = set(frozen_unit_ids)
     plan["execution"] = []
     # Recompute each unit's candidates from the preceding action's fresh view.
@@ -346,7 +384,10 @@ async def run_scouting(
         # when a prior override consumed its settler. Only this owned unit's
         # decision is recomputed; no repeated all-roster planning or wire reads.
         decision = _decision(current_unit, units, tiles, plan["directive"], plan["identity"],
-                             plan["directive_sha256"], uid in untouched_frozen, nonprogress)
+                             plan["directive_sha256"], uid in untouched_frozen, nonprogress,
+                             recovery, recovery_policy)
+        if "recovery" in decision:
+            recovery.setdefault(uid, copy.deepcopy(decision["recovery"]))
         if decision["selected"] is None:
             continue
         action = decision["selected"]
@@ -396,7 +437,8 @@ async def run_scouting(
             units, tiles = _snapshot(snapshot)
             current_unit = next(unit for unit in units if unit["unit_id"] == uid)
             decision = _decision(current_unit, units, tiles, plan["directive"], plan["identity"],
-                                 plan["directive_sha256"], False, nonprogress)
+                                 plan["directive_sha256"], False, nonprogress, recovery,
+                                 recovery_policy)
             alternatives = [row for row in decision["candidates"]
                             if row["excluded"] is None and row["dest"] not in tried]
             if not alternatives:
