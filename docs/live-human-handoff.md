@@ -82,9 +82,22 @@ Each helper uses one connection, one dispatch and an exact receipt.
 No ambiguous command is reconnected or replayed. Each five-second bound
 includes lock wait. The transition clock begins before end-turn helper
 execution and remains shared with release/engagement recovery. Successful
-receipts are event-log audits; the wire remains supporting evidence.
+receipts are event-log audits persisted before the next operation. A later
+failure records its exact operation and identity with final effects explicitly
+unavailable. The wire remains supporting evidence.
 The existing mod's legacy freeze-and-switch helper remains for legacy
 adapter callers, but the two-seat hotseat runner no longer invokes it.
+
+The final affected repository gate reports 155 passed, zero failed/skipped,
+in 160.76 seconds (`/tmp/civ-human-handoff-affected-r4.log`). The initial
+64-test gate and subsequent 153-test gate passed. Independent review of
+`5226adb` found a P2: batching audit emission lost a successful switch
+receipt when reflag failed. Per-operation emission fixes that gap. The
+first correction gate caught an event-envelope `turn` keyword collision
+(154 passed, one failed); the receipt is now nested under its own payload
+field. The failed log remains `/tmp/civ-human-handoff-affected-r3.log`.
+The 155-test gate includes executable Lua control-transfer probes and the
+fake TCP driver; it is not the full release gate or native match proof.
 
 ## Follow-up probes
 

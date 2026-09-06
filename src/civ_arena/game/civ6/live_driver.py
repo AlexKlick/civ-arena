@@ -848,8 +848,7 @@ async def phase_dispatch_hotseat(
         adapter.handoff_wait = wait_release
         adapter.handoff_start = start_handoff
         adapter.human_seats = tuple(ledger.order)
-        adapter.human_handoff_audit = lambda receipts: audit(
-            "human_handoff", receipts=receipts)
+        adapter.human_handoff_audit = lambda receipt: audit("human_handoff", receipt=receipt)
         play_started = time.monotonic()
         async with asyncio.timeout(limits.match), asyncio.TaskGroup() as tasks:
             watcher = tasks.create_task(popups.watch(lambda: stage == "active_turn"))
