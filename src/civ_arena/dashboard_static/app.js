@@ -119,7 +119,7 @@
       const timings = element('div', 'seat-timings');
       [['First accepted action', duration(firstDelay)],
         [turn?.ended_at ? 'Turn completed in' : 'Turn elapsed', duration(elapsed)],
-        ['Model requests', count(turn?.requests)]].forEach(([label, value]) => {
+        ['Provider requests', count(turn?.requests)]].forEach(([label, value]) => {
         append(timings, append(element('div'), element('span', '', label), element('strong', '', value)));
       });
       append(card, timings);
@@ -286,8 +286,30 @@
     });
     $('strategyChoices').replaceChildren(...panels);
   }
+  let lastMapURL = '';
+  function renderMap(force = false) {
+    if (!state.runId || state.turn == null) {
+      $('observedMap').hidden = true; $('openMap').removeAttribute('href');
+      $('mapState').textContent = 'Select a match and turn to load recorded observations.';
+      lastMapURL = ''; return;
+    }
+    const perspective = $('mapPerspective').value;
+    const query = new URLSearchParams({id: state.runId, turn: String(state.turn)});
+    if (perspective === 'spectator') query.set('spectator', '1');
+    else query.set('player', perspective);
+    const url = '/map?' + query.toString();
+    $('openMap').href = url;
+    $('observedMap').hidden = false;
+    if (force || url !== lastMapURL) {
+      lastMapURL = url; $('observedMap').src = url;
+      $('mapState').textContent = `Recorded map through turn ${state.turn}. ` +
+        (perspective === 'spectator' ? 'Combined seats may have different packet ages. ' :
+          'Only this player’s projected packets are embedded. ') +
+        'Refresh explicitly for new packets in the same turn; zoom and pan survive journal polling.';
+    }
+  }
   function render() {
-    renderMetrics(); renderTurnSelect(); renderCards(); renderGraph(); renderStrategy();
+    renderMetrics(); renderTurnSelect(); renderCards(); renderGraph(); renderStrategy(); renderMap();
     $('emptyState').hidden = Boolean(state.data);
   }
   async function request(path) {
@@ -343,9 +365,11 @@
   });
   $('turnSelect').addEventListener('change', event => {
     state.turn = event.target.value; state.follow = false; $('followLive').checked = false;
-    state.selectedCall = null; renderCards(); renderGraph(); renderStrategy();
+    state.selectedCall = null; renderCards(); renderGraph(); renderStrategy(); renderMap();
     $('graphTurn').textContent = ` / ${state.turn}`;
   });
+  $('mapPerspective').addEventListener('change', () => renderMap());
+  $('refreshMap').addEventListener('click', () => renderMap(true));
   $('followLive').addEventListener('change', event => { state.follow = event.target.checked; render(); });
   document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => {
     state.filter = button.dataset.filter;

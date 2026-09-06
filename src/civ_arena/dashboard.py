@@ -63,6 +63,10 @@ class Redactor:
                                (SENSITIVE.search(k) or k.upper().endswith('_TOKEN'))},
                               key=len, reverse=True)
 
+    @staticmethod
+    def sensitive(key):
+        return bool(SENSITIVE.search(key) or key.lower() in ('key', 'token'))
+
     def text(self, value):
         for secret in self.secrets:
             value = value.replace(secret, '[redacted]')
@@ -240,6 +244,15 @@ class DashboardStore:
         payload.update(id=redactor.text(run_id), status=status,
                        last_event_at=redactor.text(last_ts) if last_time is not None else None)
         return bound_response(payload)
+
+    def load_map(self, run_id, *, player=None, spectator=False, turn):
+        from civ_arena.dashboard_map import materialize
+        run = self.resolve_run(run_id)
+        raw, limited = read_artifact(run, 'events.jsonl', MAX_LOG_BYTES)
+        if raw is None or limited:
+            raise InvalidRun('map event log unavailable or exceeds read limit')
+        return materialize(raw, player=player, spectator=spectator, turn=turn,
+                           redactor=Redactor())
 
     def list_runs(self):
         candidates = []
@@ -524,13 +537,14 @@ def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=N
             return
 
         def respond(self, code, body, content_type='application/json; charset=utf-8',
-                    *, head=False):
+                    *, head=False, csp=None):
             self.send_response(code)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Content-Security-Policy', "default-src 'self'; object-src 'none'; "
+            self.send_header('Content-Security-Policy', csp or
+                             "default-src 'self'; object-src 'none'; "
                              "frame-ancestors 'none'; base-uri 'none'")
             self.end_headers()
             if not head:
@@ -543,6 +557,43 @@ def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=N
                     self.respond(403, b'{"error":"loopback Host required"}', head=head)
                     return
                 parsed = urlsplit(self.path)
+                if parsed.path == '/map':
+                    from civ_arena import minimap
+                    query = parse_qs(parsed.query, max_num_fields=4, keep_blank_values=True)
+                    if (set(query) not in ({'id', 'turn', 'player'},
+                                          {'id', 'turn', 'spectator'})
+                            or any(len(values) != 1 for values in query.values())):
+                        raise InvalidRun('explicit map scope and turn required')
+                    turn = query['turn'][0]
+                    player = query.get('player', [None])[0]
+                    if (not re.fullmatch(r'[1-9][0-9]{0,8}', turn)
+                            or (player is not None and not re.fullmatch(r'[0-9]{1,2}', player))
+                            or ('spectator' in query and query['spectator'] != ['1'])):
+                        raise InvalidRun('invalid map scope or turn')
+                    try:
+                        bundle = store.load_map(query['id'][0], turn=int(turn),
+                            player=None if player is None else int(player),
+                            spectator='spectator' in query)
+                        html = minimap.render(bundle)
+                    except (InvalidRun, ValueError, OSError, TypeError, KeyError, RecursionError):
+                        body = (b'<!doctype html><html lang="en"><title>Map unavailable</title>'
+                                b'<h1>Observed map unavailable</h1><p>No valid retained '
+                                b'observation '
+                                b'packets can be shown for this match, turn and perspective. '
+                                b'The event log may be missing, malformed or beyond the read limit.'
+                                b'</p><p>No map knowledge has been inferred. Change the selected '
+                                b'turn or refresh after new observation packets are recorded.</p>')
+                        self.respond(422, body, 'text/html; charset=utf-8', head=head,
+                                     csp="default-src 'none'; frame-ancestors 'self'; "
+                                         "base-uri 'none'")
+                        return
+                    # The generated page already pins its one static script by
+                    # hash. Permit same-origin dashboard framing, no fetches.
+                    policy = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"',
+                                       html)[1] + "; frame-ancestors 'self'; object-src 'none'"
+                    self.respond(200, html.encode(), 'text/html; charset=utf-8',
+                                 head=head, csp=policy)
+                    return
                 if parsed.path == '/api/runs':
                     payload = store.list_runs()
                 elif parsed.path == '/api/run':
@@ -566,6 +617,9 @@ def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=N
                 else:
                     raise InvalidRun('route unavailable')
                 self.respond(200, json.dumps(payload, allow_nan=False).encode(), head=head)
+            except (BrokenPipeError, ConnectionResetError):
+                # Navigating away from a large map can cancel its response.
+                return
             except (InvalidRun, ValueError, OSError, TypeError, KeyError, RecursionError):
                 self.respond(404, b'{"error":"resource unavailable"}', head=head)
 

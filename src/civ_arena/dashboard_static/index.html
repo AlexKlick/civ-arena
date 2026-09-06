@@ -23,7 +23,7 @@
       <section class="metrics" aria-label="Match progress">
         <article><span class="metric-label">COMPLETE ROUNDS</span><strong id="roundCount">—</strong><span class="metric-foot">Both seats finished</span></article>
         <article><span class="metric-label">SEAT TURNS</span><strong id="turnCount">—</strong><span class="metric-foot">Completed turns</span></article>
-        <article><span class="metric-label">MODEL REQUESTS</span><strong id="requestCount">—</strong><span class="metric-foot">Recorded in this match</span></article>
+        <article><span class="metric-label">PROVIDER REQUESTS</span><strong id="requestCount">—</strong><span class="metric-foot">Recorded POST attempts</span></article>
         <article><span class="metric-label">WATCHDOG VIOLATIONS</span><strong id="violationCount">—</strong><span id="violationFoot" class="metric-foot">Awaiting match records</span></article>
       </section>
       <section class="controls" aria-label="Match navigation">
@@ -33,6 +33,12 @@
       </section>
       <div id="warnings" class="warnings" role="status" hidden></div>
       <div id="emptyState" class="empty-state" hidden><span aria-hidden="true">◈</span><h2>No match records yet</h2><p>This room will update when a match starts producing events.</p></div>
+      <section class="panel observed-map-panel" aria-label="Recorded observed map">
+        <div class="panel-heading"><div><p class="eyebrow">OBSERVED ATLAS</p><h2>Explore the recorded board</h2><p class="subtle">Partial player observations, not a complete world map. The atlas updates when the selected match, turn or perspective changes.</p></div></div>
+        <div class="map-navigation"><label>Perspective <select id="mapPerspective"><option value="0">Player 0</option><option value="1">Player 1</option><option value="spectator">Spectator · combined private views</option></select></label><button id="refreshMap" type="button">Refresh map snapshot</button><a id="openMap" target="_blank" rel="noopener">Open large atlas ↗</a></div>
+        <p id="mapState" class="subtle" role="status">Select a match to load recorded map data.</p>
+        <iframe id="observedMap" title="Zoomable retained-observation atlas" hidden></iframe>
+      </section>
       <section id="seatCards" class="seat-grid" aria-label="Agents and recorded plans"></section>
       <section class="workspace" aria-label="Turn activity">
         <div class="graph-panel panel">

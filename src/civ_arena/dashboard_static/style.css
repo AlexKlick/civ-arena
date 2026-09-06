@@ -8,3 +8,15 @@
 .graph-node.seat-gold{--node-color:var(--gold)}.graph-node.seat-teal{--node-color:var(--teal)}.metrics strong.has-violations{color:var(--red)}
 
 .strategy-choices{display:grid;grid-template-columns:1fr 1fr;gap:24px;padding:20px}.strategy-seat{min-width:0}.strategy-seat h3{margin-top:0}.strategy-json{margin:12px 0;color:var(--muted);font-size:12px}.strategy-json summary{cursor:pointer}.strategy-json pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font-size:11px}.scout-decision{border-top:1px solid var(--line);padding-top:12px;margin-top:16px}.scout-decision h4{font-size:13px;margin:0}.scout-decision svg{width:100%;min-height:70px}.scout-decision p{overflow-wrap:anywhere}.strategy-panel .panel-heading p:last-child{max-width:620px;font-size:11px;line-height:1.5}@media(max-width:780px){.strategy-choices{grid-template-columns:1fr}}
+
+/* The atlas is an independently scoped, read-only same-origin document. */
+.observed-map-panel { margin: 20px 0; padding-bottom: 18px; }
+.map-navigation { display: flex; align-items: end; gap: 16px; flex-wrap: wrap; padding: 0 22px; }
+.map-navigation label { display: flex; flex-direction: column; gap: 6px; }
+.map-navigation select, .map-navigation button { background: #14262e; color: #dfebe8;
+  border: 1px solid #3c525d; border-radius: 5px; padding: 9px; }
+.map-navigation a { color: #9ed9c9; padding: 10px 0; }
+#mapState { padding: 0 22px; }
+#observedMap { border: 0; width: 100%; height: 980px; display: block; }
+#observedMap[hidden] { display: none; }
+@media(max-width:760px) { #observedMap { height: 1500px; } }
