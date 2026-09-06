@@ -146,3 +146,20 @@ watchdog, timeout or recovery failure, stop new agent/UI actions, allow
 bounded disconnect/cleanup, and preserve the event log, summary, wire,
 native logs and game. Verify process identity before signaling. Never
 restart Steam/X or overwrite a save to conceal the failed transition.
+
+## Normal command native follow-up
+
+On integration commit `5e6cc51`, a bounded postmortem deterministic facade probe
+completed P1 turn38 using the normal checked-in EndTurn command. Research and
+fortify commands were accepted; native and logical lease release were observed,
+with zero watchdog violations and zero provider calls. The harness incorrectly
+asserted immediate next-seat engagement while nonmajor native players were still
+processing, and its failed terminal remains preserved. The production driver
+already polls for engagement under the recovery deadline.
+
+A separate bounded follow-up observed P0 turn39, activated it through the same
+checked-in helper, and verified both GameCore human flags. It sent no EndTurn or
+unit order. The game remained parked there after disconnect. This qualifies that
+native command/release/switch sequence, not an uninterrupted full driver run or
+fresh-match acceptance. The full source and receipts are retained in
+`/home/alexk/civ-arena-growth-live-20260906/runs/native-normal-handoff-20260906/`.
