@@ -461,6 +461,64 @@ historical turn-21 reward, whose event was not retained.
 [GameCore API and active rules](../runs/60-round-live-20260905T052156Z/poststop-camp-api.log),
 [Receipt contract](live-goody-reward-receipts.md).
 
+## September 6 resumed live attempt and subtype evidence
+
+The September 5 `minimax60-20260905T063949Z` launch stopped at display preflight,
+with all physical outputs disconnected and zero seat turns. Its startup terminal
+and save/mod backups were preserved. On September 6, DP-2 was verified connected
+at 3440x1440, the old game was observed at turn 22, and no driver/tuner client was
+active. The provider-only preflight returned a validated MiniMax-M3 directive in
+two requests (3.55 seconds), without game actions.
+
+Fresh `minimax60-20260906T172847Z` used clean `b1af708`, source tree `35bf8e1`,
+mod 0.3.9, and the unchanged sixty-round strategic configuration. The bound full
+local gate had 1,142 passing tests and one optional skip; Ruff passed. Startup
+completed in 666.926 seconds within the 2,700-second budget. The game completed
+50 correctly ordered, released seat turns (25 rounds), then stopped with one
+population `3 -> 4` watchdog row for `c1:65536`. This run failed acceptance.
+
+There is exactly one final `MATCH_END`, equal to the failed summary. Cleanup
+completed with no errors; the coordinator lease is closed and final observations
+are explicitly cached. No timeout or observed deadline excess was recorded.
+The controller used 14 MiniMax-M3 requests, seven per seat. All 14 saved request
+contexts match their hashes and lengths (maximum 5,281 characters). Both seats
+submitted accepted game actions. The configured own-unit movement allowance
+admitted 65 exact in-policy rows across all 50 turn audits, with no other drift
+silently admitted. Thirteen informational popup dismissals were recorded.
+[Independent final audit](../runs/60-round-live-20260906T172847Z/independent-audit-compact.json).
+
+Unlike the prior failure, this run retained a native reward event at P1 turn 25:
+`GoodyHutReward` type `1892398955`, subtype `1038837136`, classified
+`unsupported_or_unmatched`. A subsequent read-only host probe established that
+the subtype is `DB.MakeHash('GOODYHUT_ADD_POP')`, while direct numeric lookup of
+that hash in `GameInfo.GoodyHutSubTypes` is absent. The row resolves by its name
+or ordinal 16. The prospective 0.3.10 correction binds the event hash to the named
+active row; all other causal and population checks remain. The historical failed
+window lacks a complete causal receipt and is not reclassified.
+[Host binding probe](../runs/60-round-live-20260906T172847Z/poststop-native-subtype.log),
+[Native terminal audit](../runs/60-round-live-20260906T172847Z/native-reward-terminal.json),
+[Receipt correction](live-goody-reward-receipts.md).
+
+Actual browser evidence at three rounds shows both opening directives and quiet
+turn graphs, zero additional requests on the four captured quiet seats, and both
+observed displacement and honestly unconfirmed movement. Browser console, page,
+and request failure counts were zero in that capture. A separate clean hex-map
+prototype renders one retained player-scoped packet with source hashes and
+explicit missing cells; its old normalized terrain labels cannot recover lost
+native tundra/snow. This is a visual prototype, not model-vision benefit proof.
+[Browser evidence](../runs/60-round-live-20260906T172847Z/browser-proof/verified-browser-checkpoint.md),
+[Observation map prototype](../runs/60-round-live-20260906T172847Z/observation-map-prototype/index.html).
+
+The opening audit confirms both models explicitly preferred Pottery, Mining, and
+Animal Husbandry in that order, and Monument first, despite different terrain
+packets. It establishes neither an optimal opening nor why the models shared
+those preferences. Resources, yields, freshwater, and dependency/effect facts
+were missing. The curator and native-terrain follow-ups address explicit packet
+states and terrain identity; forward optimization and calibrated confidence
+remain separate work.
+[Exact opening inputs and choices](../runs/60-round-live-20260906T172847Z/opening-policy-audit.json),
+[Context packet](context-decision-packet.md).
+
 ## Follow-up probes
 
 During the fresh match, compare first accepted action, requests per seat turn,
