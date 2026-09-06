@@ -33,6 +33,38 @@ class TokenCount:
     source: str = 'provider_count_tokens'
 
 
+@dataclass(frozen=True)
+class GenerationAdmission:
+    """Immutable serialized dispatch body bound to an exact counter receipt.
+
+    This is an in-process admission, not a replay authorization. Parsing yields
+    a fresh copy, so callers cannot mutate the body admitted for transport.
+    """
+    request_json: str
+    receipt: TokenCount
+    provider_context_tokens: int
+
+    def body(self) -> dict:
+        body = json.loads(self.request_json)
+        if not isinstance(body, dict) or encoded(body) != self.request_json:
+            raise ValueError('noncanonical admitted request')
+        required = {'model', 'system', 'messages', 'tools', 'max_tokens'}
+        if not required <= body.keys() or body.keys() - (required | {'tool_choice'}):
+            raise ValueError('unsupported admitted request fields')
+        reserve = body['max_tokens']
+        receipt = self.receipt
+        if (not isinstance(receipt, TokenCount) or type(receipt.input_tokens) is not int
+                or receipt.input_tokens <= 0 or type(reserve) is not int or reserve <= 0
+                or type(self.provider_context_tokens) is not int
+                or receipt.input_tokens + reserve > self.provider_context_tokens
+                or receipt.source not in ('provider_count_tokens', 'injected_token_counter')
+                or receipt.model != body['model']
+                or receipt.input_payload_sha256 != payload_hash(
+                    {key: value for key, value in body.items() if key != 'max_tokens'})):
+            raise ValueError('admitted request does not match token count/window')
+        return body
+
+
 class TokenCounter(Protocol):
     async def count_tokens(self, *, system: str, messages: list[dict], tools: list[dict],
                            tool_choice: dict | None = None) -> TokenCount: ...

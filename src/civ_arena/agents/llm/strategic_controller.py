@@ -18,7 +18,9 @@ from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
 from civ_arena.agents.llm.request_budget import (
+    GenerationAdmission,
     TokenCount,
+    encoded,
     input_payload,
     measurements,
     payload_hash,
@@ -304,7 +306,8 @@ class StrategicController:
         finally:
             client.on_request_post = previous
 
-    async def _count_request(self, runtime: Any, kwargs: dict, *, task: str) -> dict:
+    async def _count_request(self, runtime: Any, kwargs: dict, *, task: str
+                             ) -> GenerationAdmission:
         policy = runtime.llm.adaptive_context
         client_spec = getattr(runtime.client, 'spec', None)
         if client_spec is not None and (client_spec.model_id != runtime.llm.model_id
@@ -321,6 +324,8 @@ class StrategicController:
             self._emit(runtime, 'strategy_token_count_result', outcome='unavailable',
                        reason='counter_not_supported', **report)
             raise ModelUnavailable('adaptive context unavailable: token counter not supported')
+        if not callable(getattr(runtime.client, 'create_admitted', None)):
+            raise ModelUnavailable('adaptive context unavailable: bound generation not supported')
         before = getattr(runtime.client, 'posts_sent', 0)
         try:
             async with asyncio.timeout(runtime.llm.request_timeout_s):
@@ -333,16 +338,16 @@ class StrategicController:
                        **report)
             raise ModelUnavailable('adaptive context unavailable: token counter failed') from exc
         valid = (isinstance(receipt, TokenCount) and type(receipt.input_tokens) is int
-                 and receipt.input_tokens > 0 and receipt.model == runtime.llm.model_id
+                 and receipt.input_tokens > 0 and receipt.model == body['model']
                  and receipt.input_payload_sha256 == report['input_payload_sha256']
                  and receipt.source in ('provider_count_tokens', 'injected_token_counter')
-                 and payload_hash(input_payload(runtime.llm.model_id, **kwargs))
+                 and payload_hash(input_payload(body['model'], **kwargs))
                  == report['input_payload_sha256'])
         if not valid:
             self._emit(runtime, 'strategy_token_count_result', outcome='invalid_receipt', **report)
             raise ModelUnavailable('adaptive context unavailable: token count identity mismatch')
-        total = receipt.input_tokens + runtime.llm.max_tokens
-        admitted = total <= policy.provider_context_tokens
+        total = receipt.input_tokens + report['output_reserve_tokens']
+        admitted = total <= report['provider_context_tokens']
         self._emit(runtime, 'strategy_token_count_result',
                    outcome='admitted' if admitted else 'provider_window_exceeded',
                    input_tokens=receipt.input_tokens, total_reserved_tokens=total,
@@ -352,7 +357,11 @@ class StrategicController:
         if not admitted:
             raise ModelUnavailable(
                 'provider-counted input plus output reserve exceeds declared window')
-        return report
+        admission = GenerationAdmission(
+            encoded({**body, 'max_tokens': report['output_reserve_tokens']}), receipt,
+            report['provider_context_tokens'])
+        admission.body()
+        return admission
 
     async def _decide(self, runtime: Any, curator: ContextCurator,
                       reasons: list[str], *, opening_actions_pending: bool = True) -> dict:
@@ -411,7 +420,7 @@ class StrategicController:
                       'tools': [schema],
                       'tool_choice': {'type': 'tool', 'name': 'submit_directive'}}
             if adaptive:
-                await self._count_request(runtime, kwargs, task=task)
+                admission = await self._count_request(runtime, kwargs, task=task)
                 if getattr(runtime.client, 'posts_sent', 0) >= runtime.llm.max_requests_per_match:
                     raise ModelUnavailable('request budget exhausted after token count')
             posts = getattr(runtime.client, 'posts_sent', 0)
@@ -419,9 +428,14 @@ class StrategicController:
                        request_kind='generation', named_tool='submit_directive',
                        user_context=context,
                        context_sha256=hashlib.sha256(context.encode('utf-8')).hexdigest(),
-                       context_chars=len(context))
+                       context_chars=len(context),
+                       **({'admitted_request_payload_sha256': payload_hash(admission.body()),
+                           'admitted_input_payload_sha256':
+                               admission.receipt.input_payload_sha256}
+                          if adaptive else {}))
             self._turn_strategy_requests += 1
-            reply = (await self._provider_call(runtime, 'generation', runtime.client.create, kwargs)
+            reply = (await self._provider_call(
+                runtime, 'generation', runtime.client.create_admitted, {'admission': admission})
                      if adaptive else await runtime.client.create(**kwargs))
             runtime._report_usage(reply)
             usage_in += reply.input_tokens
