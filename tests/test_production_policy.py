@@ -186,3 +186,21 @@ def test_default_other_unit_target_does_not_repeat_forever():
                     options=("SUMERIAN_WAR_CART", "MONUMENT"), prefs=("SUMERIAN_WAR_CART",))
     assert result["item_id"] == "MONUMENT"
     assert candidate(result, "SUMERIAN_WAR_CART")["target"] == 1
+
+
+@pytest.mark.parametrize("native_hash", [123, -123, 9007199254740991, -9007199254740991])
+def test_opaque_native_active_queue_never_blocks_or_counts_as_unit(native_hash):
+    token = f"UNKNOWN_PRODUCTION_{native_hash}"
+    result = choose(cities=[city(), city("c0:2", [token])])
+    assert result["item_id"] == "SCOUT"
+    assert candidate(result, "SCOUT")["queued"] == 0
+    assert result["opaque_active_queues"] == [{"city_id": "c0:2", "token": token}]
+    with pytest.raises(ValueError, match="never replaces an active queue"):
+        choose(cities=[city(queue=[token])])
+
+
+@pytest.mark.parametrize("suffix", ["0", "-0", "01", "-01", "+1", "1.0", "1e3", "abc",
+                                   "9007199254740992", "-9007199254740992", "123;INJECT"])
+def test_malformed_opaque_native_hash_does_not_relax_queue_validation(suffix):
+    with pytest.raises(ValueError, match="invalid opaque native hash"):
+        choose(cities=[city(), city("c0:2", [f"UNKNOWN_PRODUCTION_{suffix}"])])

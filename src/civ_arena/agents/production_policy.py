@@ -16,6 +16,7 @@ from civ_arena.agents.strategy_directive import MAX_UNIT_TARGET, coordinate
 DEFENDERS = ("ARCHER", "SUMERIAN_WAR_CART", "SPEARMAN", "WARRIOR", "SLINGER")
 _ID = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 THREAT_RADIUS = 5
+_OPAQUE_QUEUE = re.compile(r"UNKNOWN_PRODUCTION_(-?[1-9][0-9]{0,15})")
 
 
 def _owner(row):
@@ -39,6 +40,12 @@ def _owned(state, field, player_id, identity):
     return owned
 
 
+def _opaque_queue_item(value):
+    """Native unresolved production hash, not a unit/building type identity."""
+    match = _OPAQUE_QUEUE.fullmatch(value) if isinstance(value, str) else None
+    return bool(match and abs(int(match[1])) < 2**53)
+
+
 def _queue(city):
     value = city.get("production_queue")
     # Retain the existing facade's legacy single-string queue representation.
@@ -46,7 +53,13 @@ def _queue(city):
         value = [value] if value else []
     if not isinstance(value, list) or len(value) > 32:
         raise ValueError("production queue unavailable or exceeds bounded queue size")
-    return [_item(item) for item in value]
+    for item in value:
+        if isinstance(item, str) and item.startswith("UNKNOWN_PRODUCTION_"):
+            if not _opaque_queue_item(item):
+                raise ValueError("production queue has invalid opaque native hash")
+        else:
+            _item(item)
+    return list(value)
 
 
 def _near_city(unit, cities):
@@ -93,7 +106,10 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
             raise ValueError("production catalog has duplicate exact item ID")
         catalog[item] = row["kind"]
     owned = Counter(_item(unit.get("type")) for unit in units)
-    queued = Counter(item for queue in queues.values() for item in queue)
+    # Preserve opaque tokens as occupied queues, but never guess their item kind
+    # or count an unresolved native hash toward any desired unit inventory.
+    queued = Counter(item for queue in queues.values() for item in queue
+                     if not _opaque_queue_item(item))
     reserved = Counter()
     for cid, item in sorted((reservations or {}).items()):
         if cid in queues and _item(item) not in queues[cid]:
@@ -152,6 +168,9 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
     return {"version": 1, "city_id": city_id, "item_id": selected, "reason": reason,
             "count_basis": "owned_plus_observed_queues_plus_unobserved_accepted_reservations",
             "candidates": candidates, "nearby_confirmed_barbarians": threats,
+            "opaque_active_queues": [{"city_id": cid, "token": item}
+                                     for cid, queue in sorted(queues.items()) for item in queue
+                                     if _opaque_queue_item(item)],
             "defenders_owned_queued_reserved": defenders, "defense_goal": defense_goal,
             "scout_role_assigned": assigned,
             "unavailable_preferences": [item for item in prefs if item not in catalog],
