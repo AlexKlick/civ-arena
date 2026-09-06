@@ -1,0 +1,11 @@
+E501 Line too long (102 > 100)
+   --> tests/test_strategic_controller.py:698:101
+    |
+697 | @pytest.mark.parametrize("native_hash", [123, -123])
+698 | async def test_native_unknown_active_production_preserved_while_other_city_builds(setup, native_hash):
+    |                                                                                                     ^^
+699 |     from civ_arena.game.civ6.response_parser import parse_cities
+700 |     controller, runtime, model, facade, records, scout = setup
+    |
+
+Found 1 error.

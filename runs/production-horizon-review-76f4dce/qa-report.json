@@ -1,0 +1,19 @@
+{
+  "claim_bearing_docs": 1,
+  "documents": [
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/runs/production-horizon-review-76f4dce/horizon-review.md",
+      "warnings": []
+    }
+  ],
+  "markdown_files_scanned": 1,
+  "normalization_warnings": 0,
+  "root": "/home/alexk"
+}

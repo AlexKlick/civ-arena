@@ -695,3 +695,26 @@ async def test_late_format_repair_qualifies_action_claim_after_earlier_economy(s
     assert metadata["movement_authority"]["untouched_owned_unit_ids"] == []
     assert ("set_city_production", "c0:1", "SCOUT") in facade.calls
     assert facade.calls[-1] == "end_turn"
+
+
+@pytest.mark.parametrize("native_hash", [123, -123])
+async def test_native_unknown_active_production_preserved_while_other_city_builds(
+        setup, native_hash):
+    from civ_arena.game.civ6.response_parser import parse_cities
+    controller, runtime, model, facade, records, scout = setup
+    token = f"UNKNOWN_PRODUCTION_{native_hash}"
+    facade.cities = parse_cities([
+        f"CITYROW|c0:1|0|Active|0|0|3|{token}",
+        "CITYROW|c0:2|0|Idle|1|0|3|-"], qualified=True)
+    for city in facade.cities:
+        city["coord"] = f"{city['q']},{city['r']}"
+    model.script = [[use('submit_directive', {"production_preferences": ["SCOUT"]})]]
+    await advance(controller, runtime, facade, 1)
+    actions = [call for call in facade.calls if isinstance(call, tuple)
+               and call[0] == "set_city_production"]
+    assert actions == [("set_city_production", "c0:2", "SCOUT")]
+    assert facade.cities[0]["production_queue"] == [token]
+    policy = next(row["production_policy"] for row in records if row.get("production_policy"))
+    assert policy["opaque_active_queues"] == [{"city_id": "c0:1", "token": token}]
+    assert model.posts_sent == 1
+    assert records[-1]["audit"] == "strategy_turn_closed"
