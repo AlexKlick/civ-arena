@@ -172,7 +172,14 @@ class PlannerBelief:
         own: dict[str, dict[str, Any]] = {}
         for u in docs:
             if u["owner_id"] == self.player_id:
-                if set(u) != OWN_UNIT_FIELDS:
+                fields = set(u)
+                health_fields = {"max_hp", "health_valid"}
+                if (fields not in (OWN_UNIT_FIELDS, OWN_UNIT_FIELDS | health_fields)
+                        or (fields & health_fields and (
+                            u["health_valid"] is not True or type(u["max_hp"]) is not int
+                            or type(u["hp"]) is not int
+                            or not 0 <= u["hp"] <= u["max_hp"] <= 1_000_000
+                            or u["max_hp"] == 0))):
                     raise ValueError(
                         f"own unit {u.get('unit_id')} does not match the "
                         f"own-projection shape — refusing")

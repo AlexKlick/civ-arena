@@ -6,7 +6,8 @@ from typing import Any
 
 from civ_arena.agents.llm.context_curator import ContextCurator, selected
 
-UNIT_FIELDS = ('type', 'coord', 'movement', 'max_movement', 'hp', 'hp_bucket', 'fortified')
+UNIT_FIELDS = ('type', 'coord', 'movement', 'max_movement', 'hp', 'max_hp',
+               'health_valid', 'hp_bucket', 'fortified')
 CITY_FIELDS = ('coord', 'population', 'production_queue', 'hp')
 CHANGE_LIMIT = 16
 

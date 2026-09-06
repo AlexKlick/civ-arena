@@ -232,8 +232,9 @@ class ContextCurator:
             raise MatchAborted('controller context requires post-action refresh')
         units = self.state['get_units']
         cities = self.state['get_cities']
-        unit_fields = ('unit_id', 'type', 'coord', 'movement', 'max_movement', 'hp',
-                       'hp_bucket', 'strength', 'ranged_strength', 'fortified', 'is_barbarian')
+        unit_fields = ('unit_id', 'type', 'coord', 'movement', 'max_movement', 'hp', 'max_hp',
+                       'health_valid', 'hp_bucket', 'strength', 'ranged_strength', 'fortified',
+                       'is_barbarian')
         city_fields = ('city_id', 'coord', 'population', 'production_queue', 'hp')
         mine_u = self.own('get_units')
         mine_c = self.own('get_cities')
