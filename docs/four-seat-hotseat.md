@@ -68,3 +68,14 @@ PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m civ_arena.gam
 ```
 
 This validates event structure and outcome consistency. It does not establish live engine-state replay or victory.
+
+## Independent review corrections
+
+Review of `1c78520` found two P2 defects despite its green focused checks: the browser still truncated the roster to two seats, and dashboard round counting accepted four observed seats without an authoritative configuration. That reviewed implementation was NO-GO. The review is preserved at `/home/alexk/civ-arena-reliability-20260904/runs/60-round-live-20260906T172847Z/four-seat-review/review-1c78520.md`.
+
+- Frontend correction `7434c6d`: every supplied seat has a card, scouting panel, distinct color, action lane, and generated legend entry. Additional lanes use horizontal scrolling without overlap; the UI explains that navigation. Roster-only updates invalidate the graph/scouting render caches. No placeholder players or two-seat-only labels remain.
+- Authority correction `a244bd1`: audited round counts require a complete valid roster from `MATCH_START.config.agents` or `run_identity.identity.config.agents`. Missing, partial, duplicate, malformed, conflicting, or expanded declarations cannot certify a round. Observed actions do not define or enlarge the configured roster. The historical two-seat `TURN_END` display remains separate with an explicit missing-driver-audit warning; it cannot invent four-seat rounds.
+- Current focused regressions: `runs/four-seat-review-fixes/review-regressions-final.log` records **110 passed, 1 deliberately deselected long fake-driver integration test, zero failed/skipped, in 0.92 seconds**. This includes execution of the production JavaScript for two, three, and four seats and the missing/invalid/config-conflict backend cases. `runs/four-seat-review-fixes/ruff-settled.log` reports `All checks passed!` for `ruff check src scripts tests`.
+- Browser-visible fixture proof: `runs/four-seat-review-fixes/browser-proof.json` and `browser-probe-final.log` bind the actual frontend source hashes. A separately launched headless Chrome rendered four cards, four scouting panels, four legend entries, and nonoverlapping action lanes at 1440 px and 390 px; each seat's call opened the matching details. A roster-only refresh also updated all four panels/lanes. No page overflow, console/page errors, or failed requests were observed. Screenshots are `four-seat-1440.png` and `four-seat-390.png` in the same directory. The browser used intercepted local fixture responses; it did not access the parent dashboard, live game, provider, tuner, or desktop.
+
+Narrow independent re-review and the parent's integrated release gate remain pending. This correction adds browser fixture proof; native four-seat startup and four-seat live progression remain unexecuted. Earlier failed Ruff formatting checks and the corrected summaries are retained separately, without replacing failed logs.
