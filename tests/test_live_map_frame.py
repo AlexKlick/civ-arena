@@ -90,10 +90,11 @@ local unit={{GetID=function() return 131073 end,GetX=function() return {x} end,
 local city={{GetID=function() return 65536 end,GetX=function() return {x} end,
  GetY=function() return {y} end,GetName=function() return 'Frame City' end,
  GetBuildQueue=function() return {{GetCurrentProductionTypeHash=function() return 0 end}} end}}
-local player={{GetID=function() return 1 end,
+local player={{GetID=function() return 1 end,IsBarbarian=function() return false end,
  GetUnits=function() return {{Members=function() return ipairs({{unit}}) end}} end,
  GetCities=function() return {{Members=function() return ipairs({{city}}) end}} end}}
-PlayerManager={{GetAliveMajors=function() return {{player}} end}}
+PlayerManager={{GetAlive=function() return {{player}} end,
+ GetAliveMajors=function() return {{player}} end}}
 GameInfo={{Units={{[1]={{UnitType='UNIT_WARRIOR'}}}},Buildings={{}},
  Terrains={{[7]={{TerrainType='TERRAIN_GRASS'}}}}}}
 Locale={{Lookup=function(value) return value end}}
