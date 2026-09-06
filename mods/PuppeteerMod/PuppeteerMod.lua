@@ -45,7 +45,7 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.9"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.3.10"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and type(Puppeteer.GuardedHandoff) == "function"
     and type(Puppeteer.BeginRewardCommand) == "function"
@@ -56,7 +56,7 @@ if type(Puppeteer) == "table" and Puppeteer.version == "0.3.9"
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.9"
+Puppeteer.version = "0.3.10"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
@@ -251,6 +251,7 @@ function Puppeteer.Handshake()
     print("SUPPORTS_DIGEST|" .. boolstr(Puppeteer.supports_digest))
     print("SUPPORTS_COMMAND_DIFF|" .. boolstr(Puppeteer.supports_command_diff))
     print("SUPPORTS_REWARD_RECEIPTS|" .. boolstr(reward_hook_registered
+        and type(DB) == "table" and type(DB.MakeHash) == "function"
         and type(Puppeteer.BeginRewardCommand) == "function"
         and type(Puppeteer.FinishRewardCommand) == "function"))
     print("SUPPORTS_GUARDED_HANDOFF|" .. boolstr(type(Puppeteer.GuardedHandoff) == "function"))
@@ -573,7 +574,11 @@ local function OnGoodyHutReward(playerID, unitID, rewardType, rewardSubType)
     local ok, valid = pcall(function()
         if not reward_identity(w) or w.events ~= 1 then return false end
         local kind = GameInfo.GoodyHuts[rewardType]
-        local sub = GameInfo.GoodyHutSubTypes[rewardSubType]
+        -- Native events use a subtype hash; this table has no hash index.
+        -- Resolve the active named row only after checking the engine's hash.
+        if type(DB) ~= 'table' or type(DB.MakeHash) ~= 'function'
+            or rewardSubType ~= DB.MakeHash('GOODYHUT_ADD_POP') then return false end
+        local sub = GameInfo.GoodyHutSubTypes['GOODYHUT_ADD_POP']
         local unit = Players[playerID]:GetUnits():FindID(unitID)
         local modifier = GameInfo.Modifiers['GOODY_SURVIVORS_ADD_POPULATION']
         local amount, amount_count = nil, 0

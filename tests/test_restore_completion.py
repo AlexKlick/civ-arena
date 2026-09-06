@@ -104,5 +104,5 @@ async def test_previous_mod_is_rejected_at_preflight():
     adapter.mod_handshake = AsyncMock(return_value={
         'mod_version': '0.3.4', 'supports_freeze': True, 'supports_ledger': True,
         'supports_digest': True, 'supports_command_diff': True})
-    with pytest.raises(RuntimeError, match='0.3.9'):
+    with pytest.raises(RuntimeError, match='0.3.10'):
         await adapter.require_mod()

@@ -8,7 +8,7 @@ drained there. The event timing does not support a post-deactivation growth
 explanation. A tribal-village reward remains a hypothesis for that historical
 run: no reward event was captured and the failed run cannot be reclassified.
 
-Mod 0.3.9 prospectively binds native `Events.GoodyHutReward` observations to a
+Mod 0.3.10 prospectively binds native `Events.GoodyHutReward` observations to a
 single move window. The native event supplies player, raw unit ID, reward type,
 and reward subtype. The controller assigns the turn and command nonce when it
 opens that window; those are not native event fields. The adapter opens the
@@ -64,3 +64,25 @@ exercise the Python adapter and parser. They establish implementation behavior,
 not delivery of a real native reward event. Registration capability is required
 at preflight. Actual event delivery/order and receipt production still require
 a fresh live game; unavailable causal proof must preserve an honest failure.
+
+## Native subtype hash binding correction
+
+Run `minimax60-20260906T172847Z` stopped after 25 rounds / 50 completed seats.
+It retained one native event: reward type `1892398955`, subtype `1038837136`,
+followed by an undeclared population `3 -> 4` row. The event was classified
+`unsupported_or_unmatched`; it did not carry an authorized causal receipt.
+The failed run remains failed.
+
+A subsequent read-only GameCore probe verified that
+`DB.MakeHash('GOODYHUT_ADD_POP') == 1038837136`, while
+`GameInfo.GoodyHutSubTypes[1038837136]` is absent. The table's string key and
+ordinal 16 both resolve the active population reward row. Version 0.3.10 checks
+the native event against the engine-computed hash, then resolves the named row
+and retains all modifier, identity, destination, and exact-delta checks.
+The numeric row ordinal is not accepted as a native event subtype. Missing hash
+capability fails preflight. No population drift allowance is added.
+
+Evidence: `runs/60-round-live-20260906T172847Z/poststop-native-subtype.log`,
+`native-reward-terminal.json`, and `independent-audit-compact.json`.
+This establishes the identifier mismatch, not every missing causal condition
+in the preserved run. A fresh event and matching receipt remain live checks.

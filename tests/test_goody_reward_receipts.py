@@ -40,9 +40,17 @@ GameInfo={Improvements={[1]={ImprovementType='IMPROVEMENT_GOODY_HUT'}},GoodyHuts
       ModifierId='GOODY_SURVIVORS_ADD_POPULATION',Name='Amount',Value='1'} end end
   end}
 '''
+NATIVE += '''
+-- The live subtype table has string/ordinal access but no hash lookup.
+GameInfo.GoodyHutSubTypes.GOODYHUT_ADD_POP = GameInfo.GoodyHutSubTypes[16]
+DB={MakeHash=function(name)
+  if name=='GOODYHUT_ADD_POP' then return 1038837136 end
+  return -1
+end}
+'''
 BEGIN = f"Puppeteer.BeginRewardCommand(0,1,10,'{NONCE}',1,0,1)\n"
 FINISH = f"Puppeteer.FinishRewardCommand('{NONCE}','{ATTRS}',1)\n"
-GROW = 'improvement=0; units[1].x=1; cities[1].pop=4; hooks.reward(0,10,1892398955,16)\n'
+GROW = 'improvement=0; units[1].x=1; cities[1].pop=4; hooks.reward(0,10,1892398955,1038837136)\n'
 ROW = 'LEDGER|city.growth|city|c0:30|population|3|4'
 
 
@@ -72,10 +80,10 @@ def test_native_exact_population_reward_is_one_causal_command_and_finish_retry(n
 
 
 @pytest.mark.parametrize('event', [
-    '', 'hooks.reward(1,10,1892398955,16)', 'hooks.reward(0,20,1892398955,16)',
-    'hooks.reward(0,10,123,16)', 'hooks.reward(0,10,1892398955,17)',
-    'hooks.reward(0,10,1892398955,16); hooks.reward(0,10,1892398955,16)',
-    'units[1].x=0; hooks.reward(0,10,1892398955,16)',
+    '', 'hooks.reward(1,10,1892398955,1038837136)', 'hooks.reward(0,20,1892398955,1038837136)',
+    'hooks.reward(0,10,123,1038837136)', 'hooks.reward(0,10,1892398955,17)',
+    'hooks.reward(0,10,1892398955,1038837136); hooks.reward(0,10,1892398955,1038837136)',
+    'units[1].x=0; hooks.reward(0,10,1892398955,1038837136)',
 ])
 def test_native_unmatched_or_duplicate_events_never_authorize_growth(native, event):
     rows = native(BEGIN + 'units[1].x=1; cities[1].pop=4; ' + event + '\n' + FINISH
@@ -105,7 +113,7 @@ def test_native_ambiguous_target_or_nonexact_delta_stays_uncommanded(native, set
 
 def test_prior_population_drift_cannot_be_covered_by_later_reward(native):
     rows = native('cities[1].pop=4\n' + BEGIN
-                  + 'units[1].x=1; cities[1].pop=5; hooks.reward(0,10,1892398955,16)\n'
+                  + 'units[1].x=1; cities[1].pop=5; hooks.reward(0,10,1892398955,1038837136)\n'
                   + FINISH + 'Puppeteer.DumpLedger()')
     assert not any(r.startswith('REWARD_CAUSE|') for r in rows)
     assert 'LEDGER|city.growth|city|c0:30|population|3|5' in rows
@@ -145,7 +153,7 @@ def test_native_capability_requires_event_registration_and_functions(native):
 
 def completion(nonce=NONCE, seq=1):
     return [f'REWARD_FINISH|{nonce}|{seq}',
-            f'REWARD_OBSERVATION|{nonce}|1|1892398955|16|matched_add_population',
+            f'REWARD_OBSERVATION|{nonce}|1|1892398955|1038837136|matched_add_population',
             f'REWARD_CAUSE|{nonce}|0|1|10|GOODYHUT_SURVIVORS|GOODYHUT_ADD_POP|30|3|4|'
             'IMPROVEMENT_GOODY_HUT', ROW]
 
@@ -208,7 +216,7 @@ async def test_adapter_begin_failure_sends_no_move_or_restore():
 @pytest.mark.parametrize('cap', [None, False])
 async def test_preflight_refuses_missing_reward_hook(cap):
     adapter = FireTunerAdapter()
-    doc = {'mod_version': '0.3.9', 'supports_freeze': True, 'supports_ledger': True,
+    doc = {'mod_version': '0.3.10', 'supports_freeze': True, 'supports_ledger': True,
            'supports_digest': True, 'supports_command_diff': True, 'supports_guarded_handoff': True}
     if cap is not None:
         doc['supports_reward_receipts'] = cap
@@ -229,7 +237,7 @@ def test_builders_preserve_identity_and_coordinate_frame():
 def test_missing_consumption_event_quarantines_across_lease_change_and_late_event(native):
     rows = native(BEGIN + "improvement=0; units[1].x=1; cities[1].pop=4\n" + FINISH
                   + "Puppeteer.Release(0,1); currentTurn=2; hooks.start(0)\n"
-                  + "hooks.reward(0,10,1892398955,16); improvement=1\n"
+                  + "hooks.reward(0,10,1892398955,1038837136); improvement=1\n"
                   + BEGIN.replace(NONCE, 'b' * 64).replace('(0,1,10', '(0,2,10')
                   + 'Puppeteer.DumpLedger()')
     assert f'REWARD_OBSERVATION|{NONCE}|0|0|0|missing_consumption_event' in rows
@@ -395,3 +403,32 @@ def test_sumerian_camp_without_native_event_still_aborts(native):
     end = rows.index('---END---', start)
     with pytest.raises(RuntimeError, match='consumed village lacked native event'):
         rp.parse_reward_finish(rows[start:end], NONCE, 1, 0, 1, 'u0:10')
+
+
+@pytest.mark.parametrize('setup,event', [
+    ('', 'hooks.reward(0,10,1892398955,16)'),  # row ordinal is not a native hash
+    ('', 'hooks.reward(0,10,1892398955,1038837137)'),
+    ('DB=nil', 'hooks.reward(0,10,1892398955,1038837136)'),
+    ('DB.MakeHash=nil', 'hooks.reward(0,10,1892398955,1038837136)'),
+    ('DB.MakeHash=function() return 7 end', 'hooks.reward(0,10,1892398955,1038837136)'),
+    ('GameInfo.GoodyHutSubTypes.GOODYHUT_ADD_POP=nil',
+     'hooks.reward(0,10,1892398955,1038837136)'),
+])
+def test_native_subtype_hash_is_required_and_cannot_be_replaced_by_row_index(native, setup, event):
+    rows = native(BEGIN + 'improvement=0; units[1].x=1; cities[1].pop=4; '
+                  + event + '\n' + FINISH + "print('UNDECLARED'); Puppeteer.DumpLedger()", setup)
+    assert not any(row.startswith('REWARD_CAUSE|') for row in rows)
+    assert ROW in rows[rows.index('UNDECLARED'):]
+
+
+def test_native_live_hash_resolves_named_row_without_numeric_hash_lookup(native):
+    rows = native("assert(GameInfo.GoodyHutSubTypes[1038837136]==nil)\n"
+                  + BEGIN + GROW + FINISH)
+    assert any(row.startswith('REWARD_CAUSE|') for row in rows)
+    assert f'REWARD_OBSERVATION|{NONCE}|1|1892398955|1038837136|matched_add_population' in rows
+
+
+@pytest.mark.parametrize('setup', ['DB=nil', 'DB.MakeHash=nil'])
+def test_reward_capability_requires_engine_hash_binding(native, setup):
+    rows = native('Puppeteer.Handshake()', setup)
+    assert 'SUPPORTS_REWARD_RECEIPTS|false' in rows
