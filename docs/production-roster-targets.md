@@ -161,3 +161,36 @@ checks were rerun for this narrow source delta.
 PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m pytest -q tests/test_strategic_controller.py -k 'repair or budget or cap or closure or completeness or late_production_refresh' > runs/production-targets-local/p3-focused.log 2>&1
 PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m ruff check src/civ_arena/agents/llm/strategic_controller.py tests/test_strategic_controller.py > runs/production-targets-local/p3-ruff.log 2>&1
 ```
+
+## Opaque native production follow-up, 2026-09-06
+
+A read-only horizon review of the running implementation at
+`76f4dce0a344f749d6ddbea42b4f92dcba9d649e` reproduced a conditional queue
+defect: an active unresolved negative production hash in one city caused another
+idle city's otherwise valid production pass to fail exact-item validation. The
+source emits `UNKNOWN_PRODUCTION_<hash>` when an active native item is absent
+from its unit/building catalogs. An unsupported inherited or captured queue could
+therefore trigger the defect. The fresh controller cannot currently create
+district/project queues, and no evidence shows the current live run is affected.
+
+The isolated correction recognizes only canonical nonzero signed integer opaque
+hash markers with magnitude below 2^53. It preserves them as active queues,
+excludes them from unit inventory counts, and reports their exact tokens in
+`production_policy.opaque_active_queues`. It does not resolve the hidden item,
+replace the active queue, add district/project support, or relax real unit IDs.
+Malformed opaque markers still fail. The running game and main branch remain
+unchanged by this correction.
+
+Captured focused checks: `runs/production-horizon-review-76f4dce/opaque-queue-focused-final.log`
+records 187 passed, zero failed/skipped/deselected;
+`runs/production-horizon-review-76f4dce/opaque-queue-ruff-final.log` records Ruff
+passing on the three changed Python files. The first Ruff pass found one test
+line-length issue; it is retained in `opaque-queue-ruff.log` and corrected.
+The separate `probes.log` contains 10 passing source/fake-facade probes against
+unchanged main, including the original defect reproduction. Those probe passes
+establish the reported behavior, not a clean native game outcome.
+
+```bash
+PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m pytest -q tests/test_production_policy.py tests/test_strategic_controller.py tests/test_strategy_directive.py > runs/production-horizon-review-76f4dce/opaque-queue-focused-final.log 2>&1
+PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m ruff check src/civ_arena/agents/production_policy.py tests/test_production_policy.py tests/test_strategic_controller.py > runs/production-horizon-review-76f4dce/opaque-queue-ruff-final.log 2>&1
+```
