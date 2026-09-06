@@ -87,6 +87,27 @@ The exact commands and complete logs are retained under
 logs are retained separately, including a mistyped test filename (no tests ran)
 and two corrected Ruff findings.
 
+## Upstream observability gap
+
+The parent's retained opening audit for `minimax60-20260906T172847Z`
+shows both seats preferring Pottery, Mining, then Animal Husbandry and building
+Monument first despite different terrain. Egypt's 24 retained tiles were four
+hills, 15 plains and five grassland; Sumeria's were seven desert, five hills,
+three coast, three grassland and six plains. Both contexts provided only tile
+coordinate, terrain, owner and city tags; research options contained IDs/costs,
+and no city existed yet to supply production options at that request. The copied
+processed audit is `runs/context-packet-evidence-20260906/opening-policy-audit.json`,
+with the parent's event-prefix hash and sequence boundary. It is evidence about
+those observed model preferences, not evidence that the openings were optimized
+or that the model's internal cause is known.
+
+The present packet cannot synthesize absent resources, yields, freshwater,
+features, local prerequisites or economic rates. The next observability slice
+should add only engine-supported, player-visible fields with explicit unknown
+states. A later alternative comparison should record observed benefits,
+assumptions, uncertainty and switch conditions against current feasible choices;
+it should not present model prose or hidden reasoning as optimization proof.
+
 ## Follow-up probes
 
 - Read-only review of this exact local commit before integration.
