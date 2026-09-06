@@ -135,3 +135,29 @@ prove calibrated strategy quality, battle tactics, native map wrapping, or a
 completed 100-round game. Repository checks do not replace the two-fresh-30-round
 operational acceptance contract; the user-requested 100-round stage remains a
 separate live objective.
+
+## P3 repair-prompt follow-up, 2026-09-06
+
+Review of `7705a601b6d7b8f989e66329c828c13971b72cd0` identified one
+nonblocking prompt defect: a late format repair claimed that no game action had
+executed, after scouting or earlier economy actions could already have run. The
+repair now states that no action from the rejected response was executed, which
+is accurate for both malformed replies and rejected directive arguments in both
+phases. Late movement authority continues to expose no untouched frozen units.
+
+The earlier 241-test result and `source-custody.json` describe the original
+implementation commit. This wording-only source follow-up has a separate captured
+regression result: `runs/production-targets-local/p3-focused.log` records
+35 passed, 31 deselected, zero failed/skipped in 0.22s;
+`runs/production-targets-local/p3-ruff.log` records Ruff passing on the two changed
+Python files. `runs/production-targets-local/source-custody-p3.json` binds the
+current source/test hashes. New tests inspect a real late repair request after an
+accepted facade research action, including malformed text and foreign-ID argument
+rejection, and confirm honest instructions, unchanged movement authority, and
+successful closure within the shared request budget. No broad suite or live
+checks were rerun for this narrow source delta.
+
+```bash
+PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m pytest -q tests/test_strategic_controller.py -k 'repair or budget or cap or closure or completeness or late_production_refresh' > runs/production-targets-local/p3-focused.log 2>&1
+PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m ruff check src/civ_arena/agents/llm/strategic_controller.py tests/test_strategic_controller.py > runs/production-targets-local/p3-ruff.log 2>&1
+```

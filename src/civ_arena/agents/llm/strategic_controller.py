@@ -335,7 +335,7 @@ class StrategicController:
                 'attempt': 2, 'previous_category': category, 'previous_reason': reason,
                 'instruction': 'Return exactly one complete submit_directive tool call '
                                'matching its schema and the currently owned IDs. '
-                               'No game action has been executed. '
+                               'No action from this rejected response has been executed. '
                                'This is the final format attempt.'}
         raise MatchAborted('strategic directive format attempts exhausted')
 

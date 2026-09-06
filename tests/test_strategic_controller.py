@@ -345,6 +345,8 @@ async def test_one_fresh_format_repair_before_any_game_action(setup, bad, stop, 
     metadata = json.loads(model.requests[1]['messages'][0]['content'].split('\n', 1)[0])
     assert metadata['format_repair']['previous_category'] == category
     assert metadata['format_repair']['attempt'] == 2
+    assert 'No action from this rejected response has been executed.' in (
+        metadata['format_repair']['instruction'])
     assert 'private argument' not in json.dumps(model.requests[1])
     decision = next(r for r in records if r['audit'] == 'strategy_decision')
     assert decision['format_attempts'] == decision['posts_attempted'] == 2
@@ -657,3 +659,36 @@ async def test_late_format_repair_cannot_exceed_shared_turn_cap(setup):
         await advance(controller, runtime, facade, 1)
     assert model.posts_sent == 2
     assert "end_turn" not in facade.calls
+
+
+@pytest.mark.parametrize("rejected", [[text("invalid directive")],
+                                    [use('submit_directive', {"tactical_overrides": [
+                                        {"unit_id": "u1:9", "action": "hold"}]})]])
+async def test_late_format_repair_qualifies_action_claim_after_earlier_economy(setup, rejected):
+    controller, runtime, model, facade, records, scout = setup
+    controller.opening_units_frozen = True
+    runtime.llm = replace(runtime.llm, max_tool_rounds=3)
+    facade.you["researching"] = None
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})], rejected,
+                    [use('submit_directive', {"unit_targets": {"SCOUT": 2}})]]
+    create = model.create
+
+    async def after_prior_actions(**kwargs):
+        if model.posts_sent:
+            assert scout.await_count == 1
+            assert ("set_research", "MINING") in facade.calls
+        return await create(**kwargs)
+
+    model.create = after_prior_actions
+    await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 3
+    metadata = json.loads(model.requests[2]["messages"][0]["content"].split("\n", 1)[0])
+    instruction = metadata["format_repair"]["instruction"]
+    assert "No action from this rejected response has been executed." in instruction
+    assert "No game action has been executed." not in instruction
+    assert metadata["movement_authority"]["opening_units_frozen"] is False
+    assert metadata["movement_authority"]["untouched_owned_unit_ids"] == []
+    assert ("set_city_production", "c0:1", "SCOUT") in facade.calls
+    assert facade.calls[-1] == "end_turn"
