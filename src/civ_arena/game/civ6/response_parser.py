@@ -310,6 +310,10 @@ _TERRAIN_MAP: dict[str, str] = {
     "DESERT": "DESERT", "DESERT_HILLS": "HILL",
     "TUNDRA": "PLAINS", "TUNDRA_HILLS": "HILL",
     "SNOW": "DESERT", "SNOW_HILLS": "HILL",
+    # Exact base-game names. A known mountain must not fall back to walkable plains.
+    "GRASS_MOUNTAIN": "MOUNTAIN", "PLAINS_MOUNTAIN": "MOUNTAIN",
+    "DESERT_MOUNTAIN": "MOUNTAIN", "TUNDRA_MOUNTAIN": "MOUNTAIN",
+    "SNOW_MOUNTAIN": "MOUNTAIN",
     "COAST": "COAST", "OCEAN": "OCEAN",
 }
 
