@@ -10,6 +10,7 @@ from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.response_parser import parse_kv_lines
 from civ_arena.game.civ6.vendor import tuner_client
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
+from civ_arena.game.terrain_metadata import native_terrain
 
 TURN_LINES = ["TURN|7", "LOCAL|0", "PUPPET_ACTIVE|false"]
 
@@ -120,16 +121,19 @@ async def test_parser_visible_map_mapping_and_failclosed():
         "---END---"])
     assert parsed["turn"] == 9
     assert parsed["tiles"]["1,0"] == {"terrain": "HILL", "owner": 0,
-                                      "city": "c1"}
-    assert parsed["tiles"]["2,0"] == {"terrain": "PLAINS"}
-    assert parsed["tiles"]["3,0"] == {"terrain": "PLAINS"}
+                                      "city": "c1", "native_terrain": native_terrain("GRASS_HILLS")}
+    assert parsed["tiles"]["2,0"] == {"terrain": "PLAINS",
+                                      "native_terrain": native_terrain("TUNDRA")}
+    assert parsed["tiles"]["3,0"] == {"terrain": "PLAINS",
+                                      "native_terrain": native_terrain("WEIRD_MARS")}
     assert parsed["unknown_terrain"] == 1
     assert parsed["visible"] == frozenset({"1,0"})
     # fog rows never materialize ownership even when the wire sends one
     parsed = parse_visible_map([
         "VMAP|2", "TURN|2",
         "TILEROW|0|0|DESERT|false|3|c999", "---END---"])
-    assert parsed["tiles"]["0,0"] == {"terrain": "DESERT"}
+    assert parsed["tiles"]["0,0"] == {"terrain": "DESERT",
+                                      "native_terrain": native_terrain("DESERT")}
     # fail-closed shapes
     for bad in (["TILEROW|1|0|GRASS|maybe|-1|"],           # non-boolean flag
                 ["TILEROW|1|0|GRASS|true|-1"],             # 5 fields
@@ -176,7 +180,7 @@ async def test_visible_map_feeds_visibility_cache():
         assert obs2 & rem2 == frozenset()
         assert obs2 | rem2 == frozenset(doc2["tiles"])
         for key in rem2:
-            assert set(doc2["tiles"][key]) == {"terrain"}
+            assert set(doc2["tiles"][key]) == {"terrain", "native_terrain"}
         # the second player has NOT observed: still the safe empty sets
         assert adapter.visibility_for(1) == (frozenset(), frozenset())
         await adapter.teardown()
