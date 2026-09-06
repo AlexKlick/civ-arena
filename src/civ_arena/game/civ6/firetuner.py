@@ -52,6 +52,10 @@ from civ_arena.game.adapter import (
 )
 from civ_arena.game.civ6 import lua_translator, response_parser
 from civ_arena.game.civ6.entity_ids import decode
+from civ_arena.game.civ6.framed_observations import (
+    FramedObservationError,
+    FramedUnitObservations,
+)
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
 from civ_arena.game.terrain_metadata import terrain_fields
 
@@ -267,12 +271,18 @@ class FireTunerAdapter:
         poll_timeout_s: float = 10.0,
         turn_wait_s: float = 120.0,
         simulate_hook: SimulateHook | None = None,
+        framed_units: bool = False,
+        framed_units_audit: Callable[[dict], None] | None = None,
     ) -> None:
         if end_phase_strategy not in ("h1", "h2", "h3"):
             raise ValueError(
                 f"end_phase_strategy must be h1|h2|h3, got "
                 f"{end_phase_strategy!r}")
+        if type(framed_units) is not bool:
+            raise ValueError("framed_units must be an explicit boolean")
         self._conn = conn if conn is not None else GameConnection(host, port)
+        self._framed_units = (FramedUnitObservations(self._conn, audit=framed_units_audit)
+                              if framed_units else None)
         self._strategy = end_phase_strategy
         self._poll_interval_s = poll_interval_s
         self._poll_timeout_s = poll_timeout_s
@@ -584,6 +594,14 @@ class FireTunerAdapter:
             self._simulate(event, player_id, turn))
 
     # -- observation ----------------------------------------------------------
+    async def _observe_units(self) -> list[dict[str, Any]]:
+        if self._framed_units is not None:
+            if not self._framed_units.bound_to(self._conn):
+                raise FramedObservationError('adapter_connection_replaced')
+            return await self._framed_units.read_units()
+        lines = await self._conn.execute_read(lua_translator.units_read())
+        return response_parser.parse_units(lines, qualified=True)
+
     async def observe(self, req: ObserveRequest) -> Any:
         # OMNISCIENT by seam contract — the referee projects scope AFTER this
         # returns. City queues and AVAILABLE_PRODUCTION use InGame; the
@@ -593,8 +611,7 @@ class FireTunerAdapter:
                 lua_translator.overview_read())
             return response_parser.parse_overview(lines)
         if req.kind is ObserveKind.UNITS:
-            lines = await self._conn.execute_read(lua_translator.units_read())
-            return response_parser.parse_units(lines, qualified=True)
+            return await self._observe_units()
         if req.kind is ObserveKind.CITIES:
             lines = await self._conn.execute_write(lua_translator.cities_read())
             return response_parser.parse_cities(lines, qualified=True)
@@ -609,8 +626,7 @@ class FireTunerAdapter:
             # the ACCUMULATION of every previously-visible set (the M11
             # no-expiry epistemics, adapter-side), served from cache with
             # their last-seen terrain — never re-read from the wire.
-            units = response_parser.parse_units(await self._conn.execute_read(
-                lua_translator.units_read()), qualified=True)
+            units = await self._observe_units()
             cities = response_parser.parse_cities(
                 await self._conn.execute_write(lua_translator.cities_read()), qualified=True)
             visible: set[str] = set()
