@@ -66,10 +66,13 @@ def _role(cap):
         return 'unsupported_domain' if cap['domain'] else 'unknown'
     if cap['found_city'] is True:
         return 'settler'
+    if (cap['combat'] is not None and cap['ranged'] is not None
+            and max(cap['combat'], cap['ranged']) > 0):
+        return 'military'
     if cap['build_charges'] is not None and cap['build_charges'] > 0:
         return 'builder'
     if cap['combat'] is not None and cap['ranged'] is not None:
-        return 'military' if max(cap['combat'], cap['ranged']) > 0 else 'other_civilian'
+        return 'other_civilian'
     return 'unknown'
 
 
@@ -442,6 +445,9 @@ class GrowthPolicy:
                             and self._mission['status'] == 'awaiting_settler'
                             and civilian['settler'] == 0)
                 reason = 'feasible_escorted_expansion' if eligible else 'expansion_not_ready'
+            if (row['kind'] == 'unit' and _armed(capability(catalog[item]))
+                    and occupied_slots >= self.controls.military_cap):
+                eligible, reason = False, 'empire_military_capacity_satisfied'
             cap = directive.get('unit_targets', {}).get(item) if row['kind'] == 'unit' else None
             if cap is not None and row['effective'] >= cap:
                 eligible, reason = False, 'explicit_unit_target_satisfied'
