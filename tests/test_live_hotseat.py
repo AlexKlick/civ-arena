@@ -138,13 +138,13 @@ def test_driver_hotseat_fires_local_switch_after_engagement():
            / "live_driver.py").read_text()
     hotseat = src[src.index("async def phase_dispatch_hotseat"):
                   src.index("_TECH_PREFERENCE")]
-    assert "switch_local_player(agent.player_id)" in hotseat
+    assert "activate_human_seat(agent.player_id, turn)" in hotseat
     assert "unpause_local()" in hotseat
     # the switch fires AFTER the begin_turn retry block, BEFORE the
     # ENGAGE-TIME digest (the earlier refresh_digest near the top is the
     # match_start seeding — a different call)
     i_begin = hotseat.index("await driver.referee.begin_turn(")
-    i_switch = hotseat.index("switch_local_player(agent.player_id)")
+    i_switch = hotseat.index("activate_human_seat(agent.player_id, turn)")
     i_digest = hotseat.index("refresh_digest()", i_switch)
     assert i_begin < i_switch < i_digest
     # Return-first stall sweep on the hotseat path only

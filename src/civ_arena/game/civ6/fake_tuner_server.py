@@ -119,6 +119,7 @@ class FakeMod:
 
     # -- the mini engine ---------------------------------------------------
     def reset_board(self) -> None:
+        self.humans = {pid: True for pid in (self.hotseat or [0, 1])}
         self.players = {
             0: {"gold": 100, "researching": "", "researched": []},
             1: {"gold": 100, "researching": "", "researched": []},
@@ -497,6 +498,32 @@ class FakeMod:
                 self._hotseat_next(pid)
             self._handoff_receipts.add(key)
             return [prefix + "accepted|frozen_then_switched", "---END---"]
+        m = re.search(r"-- arena:human_handoff=(activate|reflag|verify|end),"
+                      r"(\d+),(\d+),([0-9a-f]{32})", code)
+        if m:
+            operation, pid, turn, token = m.groups()
+            pid, turn = int(pid), int(turn)
+            roster = re.search(r"local seats=\{([0-9,]+)\}", code)
+            seats = [int(p) for p in roster.group(1).split(',')] if roster else []
+            if self.turn != turn or self.lease != {'player': pid, 'turn': turn}:
+                return ['HUMAN_HANDOFF_REJECTED|wrong_turn_or_lease']
+            if operation in {'activate', 'verify', 'end'} and not all(
+                    self.humans.get(p) is True for p in seats):
+                return ['HUMAN_HANDOFF_REJECTED|nonhuman_seat']
+            if operation == 'activate':
+                if self.local_player != pid:
+                    outgoing = self.local_player
+                    self._switch_local_player(pid)
+                    self.humans[outgoing] = False
+            elif self.local_player != pid:
+                return ['HUMAN_HANDOFF_REJECTED|wrong_local']
+            if operation == 'reflag':
+                for p in seats:
+                    if p != pid:
+                        self.humans[p] = True
+            elif operation == 'end':
+                self.respond('UI.RequestAction(ActionTypes.ACTION_ENDTURN)')
+            return [f'HUMAN_HANDOFF|{token}|{operation}|{pid}|{turn}|observed']
         m = re.search(r"SetLocalPlayerAndObserver\(\s*(\d+)\s*\)", code)
         if m:
             # A2: the driver's lease-engagement local-player switch — the

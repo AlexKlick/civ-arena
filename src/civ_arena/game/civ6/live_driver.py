@@ -702,6 +702,12 @@ async def phase_dispatch_hotseat(
         audit("engine_status", status=status)
         return status
 
+    def start_handoff():
+        nonlocal stage
+        stage = "recovery"
+        recovery.start()
+        return recovery.remaining()
+
     async def wait_release(player, turn):
         nonlocal stage
         stage = "recovery"
@@ -840,6 +846,10 @@ async def phase_dispatch_hotseat(
             await _attach_initial_hotseat_turn(adapter, ledger.order[0], audit)
             await adapter.refresh_digest()
         adapter.handoff_wait = wait_release
+        adapter.handoff_start = start_handoff
+        adapter.human_seats = tuple(ledger.order)
+        adapter.human_handoff_audit = lambda receipts: audit(
+            "human_handoff", receipts=receipts)
         play_started = time.monotonic()
         async with asyncio.timeout(limits.match), asyncio.TaskGroup() as tasks:
             watcher = tasks.create_task(popups.watch(lambda: stage == "active_turn"))
@@ -852,11 +862,7 @@ async def phase_dispatch_hotseat(
                     agent = seat["agent"]
                     lease = driver.referee.grant_lease(agent.player_id, agent.agent_id, turn)
                     async with asyncio.timeout(limits.agent_turn):
-                        sw = await adapter.read_raw(
-                            lua_translator.switch_local_player(agent.player_id))
-                        want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
-                        if not any(ln.strip() == want for ln in sw):
-                            raise RuntimeError("local-player switch did not take")
+                        await adapter.activate_human_seat(agent.player_id, turn)
                         await adapter.read_raw(lua_translator.unpause_local())
                         digest_open = await adapter.refresh_digest()
                         await _resolve_blockers(
