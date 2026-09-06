@@ -18,7 +18,7 @@ PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m civ_arena.cat
   --output /tmp/library-source-graph.json
 ```
 
-The artifact is labeled `scope=base_source_catalog`,
+The artifact uses `catalog_version=2` and is labeled `scope=base_source_catalog`,
 `effective_ruleset=unverified`, and `current_feasibility=unknown`. Stable node IDs
 retain the full source vocabulary such as `TECH_WRITING`, with a separate typed
 kind. Graph edges point **from a subject to its source-declared relation target**;
@@ -51,6 +51,16 @@ rules. Explicit `RequirementSetType` ALL/ANY tags are preserved in supporting
 rows and never transferred to unrelated prerequisite tables. Modifier and
 requirement references remain source records, not evaluated conditions.
 
+Supporting-row traversal follows declared foreign keys to actual source rows in
+both directions. Every composite reference is matched as one complete typed
+column tuple. A shared argument name, a partial primary key or references to an
+absent common target cannot connect unrelated rows. Schema foreign-key records
+retain their constraint `id` and within-constraint `sequence`. Unresolved
+composite references expose ordered `columns`, `target_columns` and
+`target_values`; single-column references retain the singular fields. Version 1
+catalogs are explicitly rejected and must be regenerated. Implicit foreign-key
+target columns are unsupported and reject rather than being guessed.
+
 The query returns a bounded outgoing-relation neighborhood, edge provenance,
 relevant supporting rows, schema/default provenance and unresolved source
 references. Rows from `Types`, resources, traits, eras or other unmodeled tables
@@ -73,7 +83,9 @@ included here.
 Only six fixed relative input paths are resolved. Case-insensitive component
 resolution rejects ambiguity and paths whose symlinks escape the supplied asset
 root. Each file is limited to 4 MiB, the bundle to 20,000 XML rows, and values to
-4,096 characters. XML entity/DOCTYPE declarations reject. Contradictory duplicate
+4,096 characters. Only UTF-8 XML, with an optional UTF-8 BOM, is accepted.
+Other encodings or encoding declarations reject before XML parsing. Entity and
+DOCTYPE declarations are checked after decoding and reject without expansion. Contradictory duplicate
 row keys, missing required values, unsupported scalar types, duplicate fields,
 unknown declared columns and missing entity tables reject. Identical duplicate
 node declarations preserve all source occurrences.
@@ -89,7 +101,7 @@ modification; it does not authenticate a wholly rewritten source bundle.
 
 ## Verified findings
 
-The final isolated fixture gate passed **19 tests, zero failed/skipped**, 0.41 s;
+The corrected isolated fixture gate passed **31 tests, zero failed/skipped**, 0.46 s;
 focused Ruff passed. Tests cover deterministic extraction and source/schema
 change invalidation, complete edge/default provenance, repeated table occurrences,
 XML child fields, unsupported updates/deletes/replacements, contradictory and
@@ -112,16 +124,26 @@ Current installed-source extraction was repeated with identical canonical bytes:
 The artifact has **317 nodes, 526 source edges, 529 supporting rows and 841
 unresolved selected-source references**. These are extractor coverage counts,
 not active-game totals or errors. Catalog digest:
-`635f33b227474e8dc7bfb60c722cdd3672ce9b3d369d4f738b8c8e9268f1d711`.
+`374e0d0ac07db839deb4f86ddf8da955da874757d97609a806a354107fa982ff`.
 
 The installed Library query contains exactly Library, Campus, Writing and
 Pottery, with four source edges. Separate checks verified Archer → Archery →
 Animal Husbandry, Craftsmanship → Code of Laws, and Armory's two prerequisite
 rows plus mutual exclusion. Full source hashes, repeated artifacts, all four
 query artifacts, commands and logs are retained under
-`runs/base-catalog-evidence-20260906/`, including `installed-summary.json` and
-`checks.json`. Early development logs retain corrected source-path quoting,
+`runs/base-catalog-corrections-final-20260906/`, including
+`installed-summary.json` and `checks.json`. Prior evidence is preserved under
+`runs/base-catalog-evidence-20260906/`. Early development logs retain corrected source-path quoting,
 case-insensitive boolean parsing and lint findings; those are not final failures.
+
+Independent review of `867fb5f` identified two confirmed defects: decomposed
+composite keys included unrelated supporting rows, and raw-byte declaration
+scanning allowed UTF-16 entity expansion. This correction adds regressions for
+both, full composite foreign-key joins and unresolved tuples, absent shared
+targets, six rejected UTF-16/32 variants, accepted UTF-8/BOM with declaration
+rejection, and explicit old-version refusal. The first correction lint check
+found one long SQL fixture line; its corrected check passed. Original independent
+review evidence remains in `/tmp/civ-catalog-independent-probes-867fb5f.log`.
 
 ## Follow-up probes
 

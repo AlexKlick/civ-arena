@@ -6,7 +6,7 @@ import hashlib
 import re
 import sqlite3
 import xml.etree.ElementTree as ET
-from collections import Counter
+from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -113,8 +113,9 @@ def _schema(data: bytes, tables: set[str], identity: dict) -> dict:
                     raise CatalogError('empty schema declaration')
                 output[table] = {'source': identity, 'statement_sha256': _sha(statement.encode()),
                                  'columns': columns, 'foreign_keys': [
-                                     {'table': target, 'from': source, 'to': column}
-                                     for _, _, target, source, column, *_ in
+                                     {'id': constraint, 'sequence': sequence,
+                                      'table': target, 'from': source, 'to': column}
+                                     for constraint, sequence, target, source, column, *_ in
                                      db.execute(f'PRAGMA foreign_key_list("{table}")')]}
             except sqlite3.Error as exc:
                 raise CatalogError(f'unsupported schema declaration: {table}') from exc
@@ -126,10 +127,17 @@ def _sha(data: bytes) -> str:
 
 
 def _rows(data: bytes, identity: dict) -> tuple[list[dict], list[dict]]:
-    if b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
+    try:
+        text = data.decode('utf-8-sig')
+    except UnicodeDecodeError as exc:
+        raise CatalogError('XML must use UTF-8 encoding') from exc
+    declaration = re.match(r'<\?xml\s+[^?]*encoding\s*=\s*[\"\']([^\"\']+)', text)
+    if '\x00' in text or (declaration and declaration[1].casefold() != 'utf-8'):
+        raise CatalogError('XML must use UTF-8 encoding')
+    if '<!DOCTYPE' in text.upper() or '<!ENTITY' in text.upper():
         raise CatalogError('XML declarations/entities unsupported')
     try:
-        root = ET.fromstring(data)
+        root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise CatalogError('invalid XML') from exc
     if root.tag != 'GameInfo' or root.attrib:
@@ -233,18 +241,22 @@ def extract(asset_root: Path) -> dict:
         if edge['source'] not in nodes or edge['target'] not in nodes:
             raise CatalogError('unresolved entity reference inside declared slice')
     unresolved = []
-    observed_values = {(row['table'], column, args_digest(value))
-                       for row in observed for column, value in row['values'].items()}
+    reference_indexes = _reference_indexes(observed, schema)
     for row in observed:
-        for foreign in schema[row['table']]['foreign_keys']:
-            value = row['values'][foreign['from']]
-            if value is not None and (foreign['table'], foreign['to'], args_digest(value)) \
-                    not in observed_values:
-                unresolved.append({'provenance': row['provenance'], 'column': foreign['from'],
+        for foreign in _foreign_constraints(schema[row['table']]):
+            values = [row['values'][column] for column in foreign['from']]
+            if any(value is None for value in values):
+                continue
+            key = (foreign['table'], tuple(foreign['to']), args_digest(values))
+            if key not in reference_indexes:
+                detail = ({'column': foreign['from'][0], 'target_column': foreign['to'][0],
+                           'target_value': values[0]} if len(values) == 1 else
+                          {'columns': foreign['from'], 'target_columns': foreign['to'],
+                           'target_values': values})
+                unresolved.append({'provenance': row['provenance'], **detail,
                                    'target_table': foreign['table'],
-                                   'target_column': foreign['to'], 'target_value': value,
                                    'status': 'not_defined_in_selected_source_rows'})
-    result = {'catalog_version': 1, 'scope': 'base_source_catalog',
+    result = {'catalog_version': 2, 'scope': 'base_source_catalog',
               'effective_ruleset': 'unverified', 'current_feasibility': 'unknown',
               'schema_scope': 'selected_CREATE_TABLE_declarations_only',
               'source_files': sorted(sources, key=lambda source: source['path']),
@@ -258,6 +270,38 @@ def extract(asset_root: Path) -> dict:
                          'Supporting references may be outside these five files.']}
     result['catalog_digest'] = args_digest(result)
     return result
+
+
+def _foreign_constraints(definition: dict) -> list[dict]:
+    """Keep all columns of each declared foreign key in one ordered constraint."""
+    groups: dict[int, list[dict]] = defaultdict(list)
+    for link in definition['foreign_keys']:
+        groups[link['id']].append(link)
+    result = []
+    for _, links in sorted(groups.items()):
+        links.sort(key=lambda link: link['sequence'])
+        if any(link['to'] is None for link in links):
+            raise CatalogError('implicit foreign-key target columns unsupported')
+        result.append({'table': links[0]['table'], 'from': [link['from'] for link in links],
+                       'to': [link['to'] for link in links]})
+    return result
+
+
+def _reference_indexes(records: list[dict], schema: dict) -> dict:
+    """Index complete referenced tuples, keeping typed values and row identity."""
+    referenced: dict[str, set[tuple[str, ...]]] = defaultdict(set)
+    for definition in schema.values():
+        for foreign in _foreign_constraints(definition):
+            referenced[foreign['table']].add(tuple(foreign['to']))
+    indexes = defaultdict(list)
+    for index, row in enumerate(records):
+        for columns in referenced[row['table']]:
+            if any(column not in row['values'] for column in columns):
+                raise CatalogError('foreign-key target column missing from declared schema')
+            values = [row['values'][column] for column in columns]
+            if not any(value is None for value in values):
+                indexes[(row['table'], columns, args_digest(values))].append(index)
+    return indexes
 
 
 def _edge(source: str, target: str, relation: str, provenance: dict,
@@ -274,7 +318,7 @@ def query(catalog: dict, node_id: str, depth: int = 3) -> dict:
     if not isinstance(catalog, dict) or type(catalog.get('catalog_version')) is not int:
         raise CatalogError('invalid catalog envelope')
     payload = {key: value for key, value in catalog.items() if key != 'catalog_digest'}
-    if catalog.get('catalog_digest') != args_digest(payload) or catalog.get('catalog_version') != 1:
+    if catalog.get('catalog_digest') != args_digest(payload) or catalog.get('catalog_version') != 2:
         raise CatalogError('catalog digest or version mismatch')
     nodes = {node['id']: node for node in catalog['nodes']}
     if node_id not in nodes:
@@ -290,31 +334,41 @@ def query(catalog: dict, node_id: str, depth: int = 3) -> dict:
              if edge['source'] in selected and edge['target'] in selected]
     unexpanded = [edge for edge in catalog['edges']
                   if edge['source'] in selected and edge['target'] not in selected]
-    # Traverse only declared keys/foreign keys inside the selected supporting tables.
-    # External common types are unresolved facts, not joins that pull in unrelated rows.
-    known = {(nodes[key]['schema_table'], ENTITIES[nodes[key]['schema_table']][1], key)
-             for key in selected}
-    supporting, picked = [], set()
-    changed = True
-    while changed:
-        changed = False
-        for index, row in enumerate(catalog['supporting_rows']):
-            if index in picked:
+    # Traverse concrete row-to-row foreign-key joins, never independent pieces
+    # of a composite primary key or two references to an absent shared target.
+    records = [{'table': nodes[key]['schema_table'], 'values': nodes[key]['attributes']}
+               for key in sorted(selected)] + catalog['supporting_rows']
+    seed_count = len(selected)
+    indexes = _reference_indexes(records, catalog['schema'])
+    references: dict[int, set[tuple]] = defaultdict(set)
+    referencing: dict[tuple, set[int]] = defaultdict(set)
+    identities: dict[int, set[tuple]] = defaultdict(set)
+    for key, targets in indexes.items():
+        for target in targets:
+            identities[target].add(key)
+    for index, row in enumerate(records):
+        for foreign in _foreign_constraints(catalog['schema'][row['table']]):
+            values = [row['values'][column] for column in foreign['from']]
+            if any(value is None for value in values):
                 continue
-            definition = catalog['schema'][row['table']]
-            handles = {(row['table'], column, row['values'][column])
-                       for column, declaration in definition['columns'].items()
-                       if declaration['primary_key']}
-            handles.update((link['table'], link['to'], row['values'][link['from']])
-                           for link in definition['foreign_keys']
-                           if link['table'] in SELECTED)
-            if handles & known:
-                picked.add(index)
-                supporting.append(row)
-                known.update(handles)
-                changed = True
-                if len(supporting) > 2000:
-                    raise CatalogError('query supporting-row bound exceeded')
+            key = (foreign['table'], tuple(foreign['to']), args_digest(values))
+            references[index].add(key)
+            referencing[key].add(index)
+    picked, frontier = set(range(seed_count)), set(range(seed_count))
+    while frontier:
+        following = set()
+        for index in frontier:
+            for key in references[index]:
+                following.update(indexes.get(key, ()))
+            for key in identities[index]:
+                following.update(referencing.get(key, ()))
+        following.difference_update(picked)
+        picked.update(following)
+        if len(picked) - seed_count > 2000:
+            raise CatalogError('query supporting-row bound exceeded')
+        frontier = following
+    supporting = [row for index, row in enumerate(catalog['supporting_rows'], seed_count)
+                  if index in picked]
     provenance_ids = {args_digest(row['provenance']) for row in supporting}
     provenance_ids.update(args_digest(declaration['provenance'])
                           for key in selected for declaration in nodes[key]['declarations'])

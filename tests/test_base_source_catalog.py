@@ -288,3 +288,96 @@ def test_bundle_file_bounds_and_missing_definitions_fail(assets, monkeypatch):
         (assets / relative).write_text('<GameInfo/>')
     with pytest.raises(CatalogError, match='missing entity table'):
         extract(assets)
+
+
+@pytest.mark.parametrize('encoding', ['utf-16', 'utf-16-le', 'utf-16-be',
+                                     'utf-32', 'utf-32-le', 'utf-32-be'])
+def test_non_utf8_xml_entities_reject_before_parser(assets, encoding):
+    path = assets / XML_FILES[0]
+    body = path.read_text().replace('Cost="25"', 'Cost="&cost;"', 1)
+    document = ('<?xml version="1.0" encoding="UTF-16"?>'
+                '<!DOCTYPE GameInfo [<!ENTITY cost "25">]>' + body)
+    path.write_bytes(document.encode(encoding))
+    with pytest.raises(CatalogError, match='UTF-8 encoding'):
+        extract(assets)
+
+
+@pytest.mark.parametrize('declaration,bom', [('UTF-8', False), ('utf-8', True)])
+def test_declared_utf8_and_bom_remain_supported(assets, declaration, bom):
+    path = assets / XML_FILES[0]
+    body = path.read_text()
+    path.write_bytes((f'<?xml version="1.0" encoding="{declaration}"?>' + body).encode(
+        'utf-8-sig' if bom else 'utf-8'))
+    extract(assets)
+    path.write_bytes((f'<?xml version="1.0" encoding="{declaration}"?>'
+                     '<!DOCTYPE GameInfo [<!ENTITY cost "25">]>' + body).encode(
+        'utf-8-sig' if bom else 'utf-8'))
+    with pytest.raises(CatalogError, match='declarations/entities'):
+        extract(assets)
+
+
+def test_other_xml_encoding_declaration_rejected_even_when_bytes_are_ascii(assets):
+    path = assets / XML_FILES[0]
+    path.write_text('<?xml version="1.0" encoding="ISO-8859-1"?>' + path.read_text())
+    with pytest.raises(CatalogError, match='UTF-8 encoding'):
+        extract(assets)
+
+
+def test_support_query_joins_complete_foreign_keys_without_partial_primary_key_bleed(assets):
+    schema = assets / SCHEMA_FILE
+    schema.write_text(schema.read_text() + '''
+CREATE TABLE RequirementArguments (RequirementId TEXT, Name TEXT, Value TEXT,
+ PRIMARY KEY (RequirementId, Name),
+ FOREIGN KEY(RequirementId) REFERENCES Requirements(RequirementId),
+ FOREIGN KEY(Name, Value) REFERENCES ModifierArguments(Name, Value));
+CREATE TABLE ModifierArguments (Name TEXT, Value TEXT, PRIMARY KEY(Name, Value));
+''')
+    path = assets / PREFIX / 'buildings.xml'
+    path.write_text(path.read_text().replace('</GameInfo>', '''<RequirementArguments>
+<Row RequirementId="REQ_ONE" Name="Shared" Value="wanted"/>
+<Row RequirementId="REQ_TWO" Name="Shared" Value="unrelated"/>
+<Row RequirementId="REQ_ONE" Name="Other" Value="missing"/>
+</RequirementArguments><ModifierArguments>
+<Row Name="Shared" Value="wanted"/><Row Name="Shared" Value="other"/>
+<Row Name="Other" Value="wanted"/>
+</ModifierArguments></GameInfo>'''))
+    catalog = extract(assets)
+    view = query(catalog, 'BUILDING_LIBRARY')
+    arguments = [row['values'] for row in view['supporting_rows']
+                 if row['table'] == 'RequirementArguments']
+    assert len(arguments) == 2
+    assert {row['RequirementId'] for row in arguments} == {'REQ_ONE'}
+    requirements = [row['values']['RequirementId'] for row in view['supporting_rows']
+                    if row['table'] == 'Requirements']
+    assert requirements == ['REQ_ONE']
+    assert [row['values'] for row in view['supporting_rows']
+            if row['table'] == 'ModifierArguments'] == [{'Name': 'Shared', 'Value': 'wanted'}]
+    missing = [row for row in view['unresolved_source_references']
+               if row['target_table'] == 'ModifierArguments']
+    assert len(missing) == 1
+    assert missing[0]['target_columns'] == ['Name', 'Value']
+    assert missing[0]['target_values'] == ['Other', 'missing']
+    # Both individual components exist in the source, but their tuple does not.
+    assert query(catalog, 'BUILDING_LIBRARY') == view
+
+
+def test_missing_shared_foreign_target_is_not_a_row_join(assets):
+    path = assets / PREFIX / 'buildings.xml'
+    path.write_text(path.read_text().replace('SubjectRequirementSetId="SET_ALL"',
+        'SubjectRequirementSetId="SET_MISSING"').replace('</GameInfo>',
+        '<Modifiers><Row ModifierId="MOD_UNRELATED" '
+        'SubjectRequirementSetId="SET_MISSING"/></Modifiers></GameInfo>'))
+    view = query(extract(assets), 'BUILDING_LIBRARY')
+    assert [row['values']['ModifierId'] for row in view['supporting_rows']
+            if row['table'] == 'Modifiers'] == ['MOD_LIBRARY']
+    assert any(row.get('target_value') == 'SET_MISSING'
+               for row in view['unresolved_source_references'])
+
+
+def test_prior_catalog_version_rejected_explicitly(assets):
+    catalog = extract(assets)
+    catalog['catalog_version'] = 1
+    catalog['catalog_digest'] = args_digest({key: value for key, value in catalog.items()
+                                            if key != 'catalog_digest'})
+    with pytest.raises(CatalogError, match='version mismatch'):
+        query(catalog, 'BUILDING_LIBRARY')
