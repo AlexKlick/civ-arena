@@ -44,6 +44,11 @@ for (const line of data.limits) text('p', line, $('custody'));
 text('p', data.axis, $('custody'));
 text('pre', pretty(data.event_binding), $('custody'));
 text('p', `Artifact SHA-256 ${data.digest}`, $('custody'));
+if (data.dashboard_source) {
+  text('pre', pretty(data.dashboard_source), $('custody'));
+  $('scope').append(document.createTextNode(' Dashboard snapshot: refresh explicitly for newer packets.' +
+    (data.dashboard_source.partial_trailing_record_ignored ? ' An incomplete trailing event was ignored; only the complete prefix is shown.' : '')));
+}
 function perspective() {
   const union = $('perspective').value === 'union';
   $('snapshot').replaceChildren();
@@ -186,4 +191,6 @@ $('map').addEventListener('pointermove',e=>{if(drag){view=[drag[2]-(e.clientX-dr
 $('map').addEventListener('pointerup',()=>drag=null);$('map').addEventListener('pointercancel',()=>drag=null);
 $('mini').addEventListener('click',e=>{const p=$('mini').createSVGPoint();p.x=e.clientX;p.y=e.clientY;
   const w=p.matrixTransform($('mini').getScreenCTM().inverse());view=[w.x-view[2]/2,w.y-view[3]/2,view[2],view[3]];setView();});
-window.addEventListener('resize',fit);perspective();
+window.addEventListener('resize',fit);
+if (data.dashboard_source && data.scope === 'combined_observation_preview') $('perspective').value='union';
+perspective();
