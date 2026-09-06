@@ -43,7 +43,7 @@ class Facade:
         return [{'tech_id': 'MINING'}, {'tech_id': 'POTTERY'}]
 
     async def get_available_production(self, city_id):
-        return [{'item_id': 'SCOUT'}, {'item_id': 'WARRIOR'}]
+        return [{'item_id': 'SCOUT', 'kind': 'unit'}, {'item_id': 'WARRIOR', 'kind': 'unit'}]
 
     async def set_research(self, tech_id):
         self.calls.append(('set_research', tech_id))
@@ -465,3 +465,195 @@ async def test_exact_projected_request_is_audited_before_each_model_call(setup, 
     model.create = checked_create
     await advance(controller, runtime, facade, 1)
     assert len([r for r in records if r['audit'] == 'strategy_request']) == (2 if repair else 1)
+
+
+@pytest.mark.parametrize("queue_observed", [False, True])
+async def test_production_targets_cover_two_cities_even_before_queue_is_observed(setup,
+                                                                               queue_observed):
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": cid, "owner": 0, "coord": "0,0", "production_queue": []}
+                     for cid in ("c0:2", "c0:1")]
+    facade.get_available_production = AsyncMock(return_value=[
+        {"item_id": "SCOUT", "kind": "unit"}, {"item_id": "MONUMENT", "kind": "building"}])
+    original = facade.set_city_production
+
+    async def produce(city_id, item_id):
+        if queue_observed:
+            return await original(city_id, item_id)
+        facade.calls.append(('set_city_production', city_id, item_id))
+        return {"status": "accepted"}
+
+    facade.set_city_production = produce
+    model.script = [[use('submit_directive', {"production_preferences": ["SCOUT"]})]]
+    await advance(controller, runtime, facade, 1)
+    actions = [call for call in facade.calls if isinstance(call, tuple)
+               and call[0] == "set_city_production"]
+    assert actions == [("set_city_production", "c0:1", "SCOUT"),
+                       ("set_city_production", "c0:2", "MONUMENT")]
+    policies = [r["production_policy"] for r in records if r.get("production_policy")]
+    last_scout = next(row for row in policies[-1]["candidates"] if row["item_id"] == "SCOUT")
+    assert last_scout["owned"] == 1
+    assert last_scout["queued"] == int(queue_observed)
+    assert last_scout["reserved"] == int(not queue_observed)
+    assert last_scout["effective"] == 2
+    assert model.posts_sent == 1
+
+
+async def test_rejected_production_does_not_reserve_inventory_or_retry_same_city(setup):
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": cid, "owner": 0, "coord": "0,0", "production_queue": []}
+                     for cid in ("c0:1", "c0:2")]
+    facade.set_city_production = AsyncMock(return_value={"status": "rejected"})
+    model.script = [[use('submit_directive', {"production_preferences": ["SCOUT"]})]]
+    await advance(controller, runtime, facade, 1)
+    assert [call.kwargs for call in facade.set_city_production.await_args_list] == [
+        {"city_id": "c0:1", "item_id": "SCOUT"}, {"city_id": "c0:2", "item_id": "SCOUT"}]
+    policies = [r["production_policy"] for r in records if r.get("production_policy")]
+    assert all(row["reserved"] == 0 for policy in policies for row in policy["candidates"])
+
+
+async def test_exhausted_production_refresh_updates_targets_and_discards_late_tactics(setup):
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})],
+                    [use('submit_directive', {"unit_targets": {"SCOUT": 3},
+                                             "tactical_overrides": [{"unit_id": "u0:1",
+                                                                      "action": "hold"}]})]]
+    await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2
+    assert controller.directive["unit_targets"] == {"SCOUT": 3}
+    assert controller.directive["tactical_overrides"] == []
+    assert controller._last_decision == 1
+    assert scout.await_count == 1
+    assert ("set_city_production", "c0:1", "SCOUT") in facade.calls
+    late = next(row for row in records if row.get("phase") == "economy")
+    assert late["reasons"] == ["production_targets_satisfied"]
+    assert late["discarded_late_tactical_override_ids"] == ["u0:1"]
+    await advance(controller, runtime, facade, 2)
+    assert model.posts_sent == 2
+    assert scout.await_args.kwargs["directive"]["tactical_overrides"] == []
+
+
+async def test_repeated_target_exhaustion_stops_after_one_refresh_without_closure(setup):
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})]]
+    with pytest.raises(MatchAborted, match="no eligible production"):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2
+    assert not any(isinstance(call, tuple) and call[0] == "set_city_production"
+                   for call in facade.calls)
+    assert "end_turn" not in facade.calls
+    assert records[-1]["audit"] == "strategy_failed"
+    assert not any(row["audit"] == "strategy_turn_closed" for row in records)
+
+
+async def test_refresh_once_for_entire_economy_pass_not_once_per_city(setup):
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": cid, "owner": 0, "coord": "0,0", "production_queue": []}
+                     for cid in ("c0:1", "c0:2")]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})],
+                    [use('submit_directive', {"unit_targets": {"SCOUT": 2}})]]
+    with pytest.raises(MatchAborted, match="no eligible production"):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2
+    assert ("set_city_production", "c0:1", "SCOUT") in facade.calls
+    assert "end_turn" not in facade.calls
+
+
+@pytest.mark.parametrize("cap", ["turn", "match"])
+async def test_production_refresh_respects_existing_request_caps(setup, cap):
+    controller, runtime, model, facade, records, scout = setup
+    runtime.llm = replace(runtime.llm, **({"max_tool_rounds": 1} if cap == "turn"
+                                         else {"max_requests_per_match": 1}))
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})]]
+    with pytest.raises(MatchAborted, match="budget exhausted"):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 1
+    assert "end_turn" not in facade.calls
+
+
+async def test_empty_production_catalog_never_asks_model_to_invent_available_item(setup):
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[])
+    with pytest.raises(MatchAborted, match="no eligible production"):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 1
+    assert "end_turn" not in facade.calls
+
+
+async def test_scout_exclusion_is_visible_in_real_graph_and_preserves_explicit_role(setup,
+                                                                               monkeypatch):
+    from civ_arena.agents.scouting import run_scouting
+    monkeypatch.setattr('civ_arena.agents.llm.strategic_controller.run_scouting', run_scouting)
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [[use('submit_directive', {"scouting": {"unit_types": ["WARRIOR"]}})]]
+    await advance(controller, runtime, facade, 1)
+    assert ("fortify", "u0:1") in facade.calls
+    assert not any(isinstance(call, tuple) and call[0] == "move_unit" for call in facade.calls)
+    graph = next(row["graph"] for row in records if row["audit"] == "strategy_graph")
+    assert graph["unassigned_scout_ids"] == ["u0:1"]
+    assert graph["decisions"][0]["assignment_warning"] == "SCOUT omitted from scouting.unit_types"
+    assert (graph["execution"][0]["decision"]["assignment_warning"]
+            == graph["decisions"][0]["assignment_warning"])
+
+
+@pytest.mark.parametrize("round_cap,repair_initial,expected_posts,success", [
+    (1, False, 1, False), (2, False, 2, True), (2, True, 2, False), (3, True, 3, True)])
+async def test_initial_repair_and_economy_refresh_share_logical_turn_cap(setup, round_cap,
+                                                                      repair_initial,
+                                                                      expected_posts, success):
+    controller, runtime, model, facade, records, scout = setup
+    runtime.llm = replace(runtime.llm, max_tool_rounds=round_cap)
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = ([[text("not a directive")]] if repair_initial else []) + [
+        [use('submit_directive', {"unit_targets": {"SCOUT": 0}})],
+        [use('submit_directive', {"unit_targets": {"SCOUT": 2}})]]
+    if success:
+        await advance(controller, runtime, facade, 1)
+        assert "end_turn" in facade.calls
+        await advance(controller, runtime, facade, 2)
+        assert controller._turn_strategy_requests == 0
+    else:
+        with pytest.raises(MatchAborted, match="budget exhausted"):
+            await advance(controller, runtime, facade, 1)
+        assert "end_turn" not in facade.calls
+    assert model.posts_sent == expected_posts
+
+
+async def test_late_production_refresh_never_advertises_scouted_units_as_untouched(setup):
+    controller, runtime, model, facade, records, scout = setup
+    controller.opening_units_frozen = True
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})],
+                    [use('submit_directive', {"unit_targets": {"SCOUT": 2}})]]
+    await advance(controller, runtime, facade, 1)
+    authority = [json.loads(request["messages"][0]["content"].split("\n", 1)[0])
+                 ["movement_authority"]
+                 for request in model.requests]
+    assert authority[0]["opening_units_frozen"] is True
+    assert authority[0]["untouched_owned_unit_ids"] == ["u0:1"]
+    assert authority[1]["opening_units_frozen"] is False
+    assert authority[1]["untouched_owned_unit_ids"] == []
+    assert authority[1]["natural_allowance"] == "use_projected_movement"
+
+
+async def test_late_format_repair_cannot_exceed_shared_turn_cap(setup):
+    controller, runtime, model, facade, records, scout = setup
+    runtime.llm = replace(runtime.llm, max_tool_rounds=2)
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})], [text("invalid")],
+                    [use('submit_directive', {"unit_targets": {"SCOUT": 2}})]]
+    with pytest.raises(MatchAborted, match="no format repair budget"):
+        await advance(controller, runtime, facade, 1)
+    assert model.posts_sent == 2
+    assert "end_turn" not in facade.calls

@@ -1,0 +1,23 @@
+E501 Line too long (113 > 100)
+  --> src/civ_arena/agents/llm/strategic_controller.py:54:101
+   |
+52 | until the empire has two defenders per city; explicit unit_targets still apply.
+53 | scouting.unit_types assigns persistent roles; include SCOUT to send built scouts
+54 | exploring. Explicit omission holds those scouts and suppresses new scout production; tactical orders still apply.
+   |                                                                                                     ^^^^^^^^^^^^^
+55 | If production_targets_satisfied requests a late economic adjustment, scouting has
+56 | already executed. Adjust available production targets or preferences; tactical
+   |
+
+E501 Line too long (103 > 100)
+   --> src/civ_arena/agents/production_policy.py:115:101
+    |
+113 |         if kind == "unit":
+114 |             default = (2 if item == "SCOUT" else len(cities) if item == "BUILDER" else
+115 |                        min(MAX_UNIT_TARGET, max(1, effective[item] + max(0, defense_goal - defenders)))
+    |                                                                                                     ^^^
+116 |                        if threats and item in DEFENDERS else 1)
+117 |             target = targets.get(item, default)
+    |
+
+Found 2 errors.

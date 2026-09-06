@@ -17,6 +17,7 @@ from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
+from civ_arena.agents.production_policy import choose_production
 from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
 from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
 from civ_arena.arena.referee import MatchAborted
@@ -40,6 +41,21 @@ The controller executes routine scouting, research preferences and production
 preferences without further model requests. Tactical overrides last this turn
 only; use them for specific battles or founding a city with an observed owned
 settler. Persisted preferences govern later quiet turns until the next decision.
+Production preferences are recurring rankings for empty queues, not a one-time
+build order. Owned units plus all owned cities' queued units count toward desired
+inventory. Default targets are two SCOUTs empire-wide, one BUILDER per owned city,
+and one of each other unit type. Optional unit_targets overrides use exact available
+unit item IDs and integer counts 0 through 32 (zero disables new production).
+Available buildings provide fallback when a preferred unit has reached its target.
+Use SUMERIAN_WAR_CART only if that exact item is offered; WAR_CART is not an alias.
+Confirmed nearby is_barbarian=true contacts can prioritize available defenders
+until the empire has two defenders per city; explicit unit_targets still apply.
+scouting.unit_types assigns persistent roles; include SCOUT to send built scouts
+exploring. Explicit omission holds those scouts and suppresses new scout production;
+tactical orders still apply.
+If production_targets_satisfied requests a late economic adjustment, scouting has
+already executed. Adjust available production targets or preferences; tactical
+overrides from that late request will be discarded.
 Only observed IDs and coordinates may be used. Visible contacts are not proof of
 war. Probabilities in the controller graph are seeded action-selection weights,
 not calibrated success predictions. No prose or hidden reasoning is required."""
@@ -61,6 +77,7 @@ class StrategicController:
     _previous: dict | None = field(default=None, init=False)
     _decision_observation: dict | None = field(default=None, init=False)
     _failed: bool = field(default=False, init=False)
+    _turn_strategy_requests: int = field(default=0, init=False)
     _scouting_feedback: ScoutingFeedback = field(default_factory=ScoutingFeedback, init=False)
 
     def __post_init__(self) -> None:
@@ -128,6 +145,7 @@ class StrategicController:
             raise ValueError('tactical_requested must be boolean')
         # Poison until the entire turn, including closure and audit, succeeds.
         self._failed = True
+        self._turn_strategy_requests = 0
         try:
             curator = ContextCurator(facade, runtime.profile.player_id,
                                      runtime.llm.max_result_chars)
@@ -163,6 +181,17 @@ class StrategicController:
                 execute=curator.execute, refresh=refresh, seed=runtime.profile.seed,
                 frozen_unit_ids=frozen_ids, nonprogress=feedback["suppressed"])
             graph["nonprogress_feedback"] = feedback
+            # Retain explicit role exclusions, but make otherwise idle scouts
+            # visible in the graph details consumed by the existing dashboard.
+            excluded = ({u['unit_id'] for u in curator.own('get_units')
+                         if u.get('type') == 'SCOUT'}
+                        if 'SCOUT' not in directive['scouting']['unit_types'] else set())
+            excluded -= {order['unit_id'] for order in directive['tactical_overrides']}
+            graph['unassigned_scout_ids'] = sorted(excluded)
+            for decision in [*graph.get('decisions', []),
+                             *(row.get('decision', {}) for row in graph.get('execution', []))]:
+                if decision.get('unit_id') in excluded:
+                    decision['assignment_warning'] = 'SCOUT omitted from scouting.unit_types'
             self._emit(runtime, 'strategy_graph', source='autopilot', graph=graph,
                        probability_meaning='seeded action selection; not calibrated success')
             await self._economy(runtime, curator, directive)
@@ -212,18 +241,19 @@ class StrategicController:
                 'text_blocks': counts.get('text', 0), 'text_chars': text_chars}, uses
 
     async def _decide(self, runtime: Any, curator: ContextCurator,
-                      reasons: list[str]) -> dict:
+                      reasons: list[str], *, opening_actions_pending: bool = True) -> dict:
+        opening_authority = self.opening_units_frozen and opening_actions_pending
         initial_posts = getattr(runtime.client, 'posts_sent', 0)
         observation = decision_snapshot(curator, runtime._turn)
         metadata = {'turn': runtime._turn, 'player_id': runtime.profile.player_id,
                     'reasons': reasons, 'previous_directive': self.directive,
                     'decision_packet': decision_packet(observation, self._decision_observation),
                     'movement_authority': {
-                        'opening_units_frozen': self.opening_units_frozen,
+                        'opening_units_frozen': opening_authority,
                         'untouched_owned_unit_ids': sorted(
                             u['unit_id'] for u in curator.own('get_units'))
-                            if self.opening_units_frozen else [],
-                        'natural_allowance': 'unobserved' if self.opening_units_frozen
+                            if opening_authority else [],
+                        'natural_allowance': 'unobserved' if opening_authority
                             else 'use_projected_movement',
                         'legality': 'engine_checked_not_proven_by_this_metadata'}}
         schema = {'name': 'submit_directive',
@@ -231,7 +261,7 @@ class StrategicController:
                   'input_schema': DIRECTIVE_SCHEMA}
         # One normal attempt plus at most one format repair, both charged to the
         # existing turn/request caps. Client transport retries still count every POST.
-        limit = min(2, runtime.llm.max_tool_rounds)
+        limit = min(2, runtime.llm.max_tool_rounds - self._turn_strategy_requests)
         if limit < 1:
             raise MatchAborted('strategic model request budget exhausted')
         usage_in = usage_out = 0
@@ -250,6 +280,7 @@ class StrategicController:
                        named_tool='submit_directive', user_context=context,
                        context_sha256=hashlib.sha256(context.encode('utf-8')).hexdigest(),
                        context_chars=len(context))
+            self._turn_strategy_requests += 1
             reply = await runtime.client.create(
                 system=SYSTEM, messages=[{'role': 'user', 'content': context}], tools=[schema],
                 tool_choice={'type': 'tool', 'name': 'submit_directive'})
@@ -328,15 +359,54 @@ class StrategicController:
         cities = curator.own('get_cities')
         if len(cities) > 32:
             raise MatchAborted('strategic economy exceeds 32-city action bound')
-        for city in cities:
-            if city.get('production_queue'):
+        reservations: dict[str, str] = {}
+        refreshed_strategy = False
+        for initial in sorted(cities, key=lambda city: city['city_id']):
+            cid = initial['city_id']
+            # An earlier action may have changed a later city. Consult its current
+            # observation and all current empire queues before every choice.
+            city = next((city for city in curator.own('get_cities')
+                         if city['city_id'] == cid), None)
+            if city is None or city.get('production_queue'):
                 continue
-            cid = city['city_id']
-            item = pick(curator.production.get(cid, []), 'item_id',
-                        directive['production_preferences'])
-            if item:
-                args = {'city_id': cid, 'item_id': item}
-                result = await curator.execute('set_city_production', args)
+            policy = choose_production(curator.state, player_id=runtime.profile.player_id,
+                                       city_id=cid, options=curator.production.get(cid, []),
+                                       directive=directive, reservations=reservations)
+            item = policy['item_id']
+            if item is None and policy['candidates'] and not refreshed_strategy:
                 self._emit(runtime, 'strategy_economy', source='autopilot',
-                           tool='set_city_production', args=args, result=result)
-                await curator.refresh()
+                           tool='set_city_production', production_policy=policy,
+                           outcome='requesting_one_strategy_refresh')
+                # Current owned roster and all observed queues are already fresh.
+                # This uses the existing request/format budgets, with no extra
+                # discovery loop or change to context serialization.
+                directive = await self._decide(runtime, curator, ['production_targets_satisfied'],
+                                               opening_actions_pending=False)
+                discarded = sorted(order['unit_id'] for order in directive['tactical_overrides'])
+                directive['tactical_overrides'] = []
+                self.directive = copy.deepcopy(directive)
+                self._last_decision = runtime._turn
+                refreshed_strategy = True
+                self._emit(runtime, 'strategy_execution', source='model',
+                           reasons=['production_targets_satisfied'], phase='economy',
+                           directive=directive, discarded_late_tactical_override_ids=discarded,
+                           last_decision_turn=self._last_decision)
+                policy = choose_production(curator.state, player_id=runtime.profile.player_id,
+                                           city_id=cid, options=curator.production.get(cid, []),
+                                           directive=directive, reservations=reservations)
+                item = policy['item_id']
+            if item is None:
+                self._emit(runtime, 'strategy_economy', source='autopilot',
+                           tool='set_city_production', production_policy=policy,
+                           outcome='no_eligible_production')
+                raise MatchAborted(f'no eligible production within unit targets for {cid}')
+            args = {'city_id': cid, 'item_id': item}
+            result = await curator.execute('set_city_production', args)
+            self._emit(runtime, 'strategy_economy', source='autopilot',
+                       tool='set_city_production', args=args, result=result,
+                       production_policy=policy)
+            if result.get('status') not in ('accepted', 'rejected'):
+                raise MatchAborted('production action returned no canonical status')
+            if result['status'] == 'accepted':
+                reservations[cid] = item
+            await curator.refresh()

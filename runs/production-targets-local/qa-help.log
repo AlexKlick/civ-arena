@@ -1,0 +1,14 @@
+usage: qa_normalize_scan.py [-h] [--root ROOT] [--focus FOCUS]
+                            [--all-markdown] [--format {markdown,json}]
+                            [--self-test]
+
+Read-only scanner for QA evidence normalization warnings.
+
+options:
+  -h, --help            show this help message and exit
+  --root ROOT           Workspace root for scanning and evidence resolution.
+  --focus FOCUS         Optional narrower path to scan under --root.
+  --all-markdown        Scan all Markdown files, not just report-like paths.
+  --format {markdown,json}
+                        Output format.
+  --self-test           Run scanner self-test and exit.

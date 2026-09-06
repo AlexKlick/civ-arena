@@ -1,0 +1,1 @@
+Made persistent role schema explicit and reject oversized integer targets before float conversion
