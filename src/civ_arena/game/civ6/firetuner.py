@@ -295,7 +295,17 @@ class FireTunerAdapter:
         self._sealed_hash: str | None = None
         self._diff_seq = 0
         self._pre_end_switch: int | None = None
+        self.human_seats: tuple[int, ...] = ()
+        self.human_handoff_audit = None
+        self.handoff_start = None
         self.state = _LiveStateView(self)
+
+    async def activate_human_seat(self, player_id: int, turn: int) -> None:
+        from civ_arena.game.civ6 import human_handoff
+        receipts = await human_handoff.activate(
+            self._conn, player_id, turn, self.human_seats)
+        if self.human_handoff_audit is not None:
+            self.human_handoff_audit(receipts)
 
     def set_pre_end_switch(self, player_id: int | None) -> None:
         """M18 hotseat: switch local to THIS seat before the driven seat's
@@ -483,7 +493,15 @@ class FireTunerAdapter:
         # post-processing.
         await self._refresh_digest()
         self._sealed_hash = self.state_hash()
-        if self._pre_end_switch is not None \
+        if self.human_seats:
+            from civ_arena.game.civ6 import human_handoff
+            remaining = self.handoff_start() if self.handoff_start else 180
+            async with asyncio.timeout(remaining):
+                receipts = await human_handoff.end_current(
+                    self._conn, player_id, turn, self.human_seats)
+                if self.human_handoff_audit is not None:
+                    self.human_handoff_audit(receipts)
+        elif self._pre_end_switch is not None \
                 and self._pre_end_switch != player_id:
             # M18 both-seats (live-proven 2026-09-03): a LOCAL seat's next
             # slice only holds when local == that seat at the boundary
