@@ -46,7 +46,9 @@ class ContextCurator:
         self.dirty = {'get_visible_map', 'get_units', 'get_cities', 'get_overview'}
         self.production: dict[str, list] = {}
         self.production_dirty: set[str] = set()
+        self.production_focus: set[str] = set()
         self.research_dirty = True
+        self.research_source = 'deferred'
         self.research_force = False
         self.revision = 0
         self.focus: str | None = None
@@ -62,14 +64,17 @@ class ContextCurator:
         return [row for row in self.state.get(kind, [])
                 if row.get('owner', row.get('owner_id')) == self.player_id]
 
-    async def refresh(self) -> dict:
+    async def refresh(self, *, include_options: bool = True,
+                      include_overview: bool = True) -> dict:
+        if include_options and not include_overview:
+            raise ValueError('option refresh requires current overview')
         previous_cities = {city['city_id'] for city in self.own('get_cities')}
         # Map reads update the live adapter's sight cache. Every subsequent
         # projected entity read must use that refreshed sight, including cities.
         if 'get_visible_map' in self.dirty:
             self.dirty.update({'get_units', 'get_cities'})
         for name in ('get_visible_map', 'get_units', 'get_cities', 'get_overview'):
-            if name not in self.dirty:
+            if name not in self.dirty or (name == 'get_overview' and not include_overview):
                 continue
             value = await self.read(name)
             expected = list if name in ('get_units', 'get_cities') else dict
@@ -78,33 +83,48 @@ class ContextCurator:
             if isinstance(value, list) and any(not isinstance(row, dict) for row in value):
                 raise MatchAborted(f'context {name} has invalid entity rows')
             self.state[name] = value
-        self.dirty.clear()
+            self.dirty.discard(name)
         cities = self.own('get_cities')
         own_ids = {city['city_id'] for city in cities}
         self.production = {key: value for key, value in self.production.items() if key in own_ids}
+        self.production_dirty.intersection_update(own_ids)
+        self.production_focus.intersection_update(own_ids)
         for city in cities:
             cid = city['city_id']
             if (self.revision and cid not in previous_cities):
                 self.production_dirty.add(cid)
-            if cid in self.production_dirty or (not city.get('production_queue')
-                                                 and cid not in self.production):
+            wanted = not city.get('production_queue') or cid in self.production_focus
+            if not wanted:
+                self.production.pop(cid, None)
+                self.production_dirty.discard(cid)
+            if include_options and wanted and (cid in self.production_dirty
+                                                or cid not in self.production):
+                self.production.pop(cid, None)
                 options = await self.read('get_available_production', city_id=cid)
                 if not isinstance(options, list):
                     raise MatchAborted('context production options have invalid shape')
                 self.production[cid] = options
-        self.production_dirty.clear()
+                self.production_dirty.discard(cid)
+        # Do not expose a pre-action catalog as current while its refresh is deferred.
+        for cid in self.production_dirty:
+            self.production.pop(cid, None)
         researching = self.state.get('get_overview', {}).get('you', {}).get('researching')
-        if self.research_dirty:
+        if self.research_dirty and include_options:
             # An existing choice does not need a repeated full technology catalog.
             if not researching or self.research_force:
+                self.state.pop('get_available_research', None)
                 options = await self.read('get_available_research')
                 if not isinstance(options, list):
                     raise MatchAborted('context research options have invalid shape')
                 self.state['get_available_research'] = options
+                self.research_source = 'observed'
             else:
                 self.state['get_available_research'] = []
+                self.research_source = 'not_requested_active_choice'
             self.research_dirty = False
             self.research_force = False
+        elif self.research_dirty:
+            self.state.pop('get_available_research', None)
         self.state['get_available_production'] = {'by_city': self.production}
         self.revision += 1
         return self.state
@@ -119,7 +139,11 @@ class ContextCurator:
     def action_result(self, name: str, args: dict, result: Any) -> dict:
         """Invalidate on attempts, not acceptance; raw engine detail stays in the audit."""
         if name in ('move_unit', 'attack', 'found_city', 'purchase'):
-            self.dirty.add('get_visible_map')
+            self.dirty.update({'get_visible_map', 'get_overview'})
+            # Native rewards, combat and purchases may change economic choices.
+            # Defer these catalogs during scouting, then query only current demand.
+            self.production_dirty.update(self.production)
+            self.research_dirty = True
         if name in ('found_city', 'purchase', 'set_research'):
             self.dirty.add('get_overview')
         if name == 'fortify':
@@ -132,7 +156,8 @@ class ContextCurator:
                 self.production.pop(args['city_id'], None)
         if name == 'set_research':
             self.research_dirty = True
-            self.research_force = True
+            self.research_force = (isinstance(result, dict)
+                                   and result.get('status') == 'rejected')
         if name == 'purchase':
             self.production_dirty.update(self.production)
         if not isinstance(result, dict):
@@ -150,6 +175,7 @@ class ContextCurator:
             cid = args['city_id']
             if cid not in {city['city_id'] for city in self.own('get_cities')}:
                 return {'status': 'rejected', 'rejection': 'not_an_observed_owned_city'}
+            self.production_focus.add(cid)
             if cid not in self.production:
                 self.production_dirty.add(cid)
         elif set(args) == {'coord'} and isinstance(args['coord'], str):
@@ -163,8 +189,20 @@ class ContextCurator:
     def cached_read(self, name: str, args: dict) -> dict:
         # Old model habits remain harmless: no new RPC and no stale intermediate
         # state after an action. The next request carries the refreshed snapshot.
-        if self.dirty or self.production_dirty or self.research_dirty:
+        if self.dirty or self.research_dirty or (
+                name == 'get_available_production' and args.get('city_id')
+                in self.production_dirty):
             return {'source': 'controller_context', 'state': 'Refresh follows this action batch.'}
+        option_source = None
+        if name == 'get_available_production':
+            option_source = self.choice_status()['production'].get(
+                args.get('city_id'), 'not_an_observed_owned_city')
+        elif name == 'get_available_research':
+            option_source = self.choice_status()['research']
+        if option_source is not None and option_source != 'observed':
+            return {'source': 'controller_cache', 'revision': self.revision,
+                    'option_source': option_source,
+                    'hint': 'Unqueried options are not an observed empty list.'}
         value = self.production.get(args.get('city_id'), []) if name == 'get_available_production' \
             else self.state.get(name)
         if name == 'get_visible_map':
@@ -176,7 +214,19 @@ class ContextCurator:
             payload['state'] = 'Full current decision state is in controller context.'
         return payload
 
+    def choice_status(self) -> dict:
+        """Distinguish queried-empty from deliberately unqueried active choices."""
+        research = 'deferred' if self.research_dirty else self.research_source
+        return {'research': research, 'production': {
+            city['city_id']: ('deferred' if city['city_id'] in self.production_dirty else
+                             'observed' if city['city_id'] in self.production else
+                             'not_requested_active_choice' if city.get('production_queue')
+                             else 'deferred')
+            for city in self.own('get_cities')}}
+
     def render(self) -> str:
+        if self.dirty:
+            raise MatchAborted('controller context requires post-action refresh')
         units = self.state['get_units']
         cities = self.state['get_cities']
         unit_fields = ('unit_id', 'type', 'coord', 'movement', 'max_movement', 'hp',
@@ -193,6 +243,7 @@ class ContextCurator:
                                           for x in cities if x not in mine_c],
                'you': overview.get('you', {}), 'public': overview.get('public', {}),
                'research_options': self.state.get('get_available_research', []),
+               'option_sources': self.choice_status(),
                'production_options': {cid: [selected(x, ('item_id', 'kind', 'cost', 'turns'))
                                             for x in options]
                                       for cid, options in sorted(self.production.items())},

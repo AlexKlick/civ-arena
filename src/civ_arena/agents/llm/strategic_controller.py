@@ -15,6 +15,7 @@ from typing import Any
 
 from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
+from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
 from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
@@ -23,6 +24,10 @@ from civ_arena.arena.referee import MatchAborted
 SYSTEM = """You are the strategic commander of one Civilization seat. Submit exactly
 one submit_directive tool call containing one JSON directive. Do not request basic
 state, narrate analysis, or call game tools. Current projected state is supplied.
+The decision_packet lists outstanding choices and changes since the prior strategy
+request, including quiet turns. option_sources distinguishes observed empty lists
+from catalogs not requested because a choice is already active. Do not infer that
+those unqueried catalogs are empty or that a disappeared contact was destroyed.
 Read movement_authority in the supplied metadata. When opening_units_frozen is
 true, the live mod temporarily zeroed the listed untouched owned units' movement.
 The controller may attempt one initial owned-unit action under the unit's natural
@@ -54,6 +59,7 @@ class StrategicController:
     _last_turn: int = field(default=0, init=False)
     _last_decision: int = field(default=0, init=False)
     _previous: dict | None = field(default=None, init=False)
+    _decision_observation: dict | None = field(default=None, init=False)
     _failed: bool = field(default=False, init=False)
     _scouting_feedback: ScoutingFeedback = field(default_factory=ScoutingFeedback, init=False)
 
@@ -125,7 +131,7 @@ class StrategicController:
         try:
             curator = ContextCurator(facade, runtime.profile.player_id,
                                      runtime.llm.max_result_chars)
-            await curator.refresh()
+            await curator.refresh(include_options=False)
             frozen_ids = ({u['unit_id'] for u in curator.own('get_units')}
                           if self.opening_units_frozen else set())
             feedback = self._scouting_feedback.begin_turn(
@@ -134,6 +140,7 @@ class StrategicController:
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
             if reasons:
+                await curator.refresh()
                 directive = await self._decide(runtime, curator, reasons)
                 self.directive = copy.deepcopy(directive)
                 self._last_decision = turn
@@ -146,7 +153,8 @@ class StrategicController:
                        opening_frozen_unit_ids=sorted(frozen_ids))
 
             async def refresh() -> dict:
-                await curator.refresh()
+                # Scouting consumes map/entities only; refresh economy once afterwards.
+                await curator.refresh(include_options=False, include_overview=False)
                 return curator.state
 
             graph = await run_scouting(
@@ -206,8 +214,10 @@ class StrategicController:
     async def _decide(self, runtime: Any, curator: ContextCurator,
                       reasons: list[str]) -> dict:
         initial_posts = getattr(runtime.client, 'posts_sent', 0)
+        observation = decision_snapshot(curator, runtime._turn)
         metadata = {'turn': runtime._turn, 'player_id': runtime.profile.player_id,
                     'reasons': reasons, 'previous_directive': self.directive,
+                    'decision_packet': decision_packet(observation, self._decision_observation),
                     'movement_authority': {
                         'opening_units_frozen': self.opening_units_frozen,
                         'untouched_owned_unit_ids': sorted(
@@ -285,6 +295,7 @@ class StrategicController:
                            context_chars=len(context), format_attempts=attempt,
                            posts_attempted=getattr(runtime.client, 'posts_sent', initial_posts)
                            - initial_posts)
+                self._decision_observation = observation
                 return directive
             if not repair_available:
                 raise MatchAborted(f'strategic directive rejected: {category}/{reason}; '
