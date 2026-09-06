@@ -5,6 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
+from civ_arena.game.civ6.hotseat_roster import seat_order
 from civ_arena.session.legality import KNOWN_ACTION_TOOLS
 
 
@@ -32,12 +33,17 @@ def validate(run_dir: Path, rounds: int = 30, *, require_live: bool = True) -> d
             'clean commit identity')
     require(bool(identity.get('mod_sha256')), 'mod identity')
     agents = identity.get('config', {}).get('agents', [])
-    seats = sorted(a['player_id'] for a in agents)
-    require(len(seats) == 2 and len(set(seats)) == 2, 'two seats')
+    try:
+        seats = seat_order(a['player_id'] for a in agents)
+    except ValueError:
+        seats = []
+        require(False, 'two through four distinct seats')
+    seat_count = len(seats)
     rows = summary.get('per_turn', [])
-    require(len(rows) == 2 * rounds, 'completed seat count')
-    expected = [(rows[0]['turn'] + n // 2, seats[n % 2]) for n in range(2 * rounds)] \
-        if rows and len(seats) == 2 else []
+    require(len(rows) == seat_count * rounds, 'completed seat count')
+    expected = [(rows[0]['turn'] + n // seat_count, seats[n % seat_count])
+                for n in range(seat_count * rounds)] \
+        if rows and seats else []
     actual = [(r['turn'], r['player']) for r in rows]
     require(actual == expected and bool(expected), 'ordered seat/engine-turn pairs')
     for kind in ('LEASE_GRANT', 'LEASE_RELEASE', 'TURN_END'):

@@ -39,7 +39,9 @@ import time
 import uuid
 from pathlib import Path
 
+from civ_arena.config import load_config
 from civ_arena.game.civ6 import ui_control
+from civ_arena.game.civ6.hotseat_roster import seat_order
 from civ_arena.game.civ6.vendor.connection import GameConnection
 
 REPO = Path(__file__).resolve().parents[1]
@@ -408,13 +410,14 @@ def swap_save_into_load_slot(backup_dir: Path) -> bool:
     return True
 
 
-def verify_two_major_census(output: str) -> dict:
-    """Require the complete engine census to contain exactly two live majors.
+def verify_major_census(output: str, expected_seats=(0, 1)) -> dict:
+    """Require the complete engine census to match the configured living majors.
 
     GameCore's IsHuman is authoritative here. Some builds do not expose the
     configuration IsHuman method; that field may be '?' after the independent
     InGame reflag readback has confirmed it.
     """
+    expected = seat_order(expected_seats)
     rows = {}
     trailers = []
     for line in output.splitlines():
@@ -444,8 +447,8 @@ def verify_two_major_census(output: str) -> dict:
         raise RuntimeError('incomplete census row count')
     majors = sorted(pid for pid, row in rows.items()
                     if row['major'] == 'true' and row['alive'] == 'true')
-    if majors != [0, 1]:
-        raise RuntimeError(f'live major roster must be [0, 1], observed {majors}')
+    if majors != expected:
+        raise RuntimeError(f'live major roster must be {expected}, observed {majors}')
     for pid in majors:
         row = rows[pid]
         if row['human'] != 'true' or row.get('slot') != '3':
@@ -455,9 +458,37 @@ def verify_two_major_census(output: str) -> dict:
     return {'alive_major_ids': majors, 'players': rows}
 
 
+def verify_two_major_census(output: str) -> dict:
+    """Compatibility entrypoint with the original exact two-seat contract."""
+    return verify_major_census(output, (0, 1))
+
+
+def configured_hotseat_seats(opts) -> list[int]:
+    config = getattr(opts, "config", None)
+    if config is None:
+        return [0, 1]
+    spec = load_config(REPO / config)
+    if spec.adapter != "firetuner":
+        raise ValueError("Architecture-1 requires the firetuner adapter")
+    return seat_order((agent.player_id for agent in spec.agents), fresh=True)
+
+
+async def reflag_configured_seats(seats) -> bool:
+    """Sequential existing helper calls; phase owns each tuner cooldown."""
+    for pid in seat_order(seats, fresh=True)[1:]:
+        result = await phase(["live_hotseat_launch.py", "--reflag", "--reflag-seat", str(pid),
+                              "--port", str(tuner_port())])
+        rows = result.stdout.splitlines()
+        if (result.returncode != 0 or rows.count(f"REFLAG_SLOT|{pid}|3") != 1
+                or rows.count(f"REFLAG_CFGHUMAN|{pid}|true") != 1):
+            return False
+    return True
+
+
 async def run_arch1_session(opts) -> int:
     """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
     failed gate. Exit codes continue the ladder's scheme from 20."""
+    seats = configured_hotseat_seats(opts)
     await require_active_display(opts.artifacts)
     kill_first = getattr(opts, "kill_first", True)
     if not kill_first and opts.fresh_x:
@@ -490,11 +521,10 @@ async def run_arch1_session(opts) -> int:
     #    Codex r1 P2-8: the password gate demands the EXACT empty rows —
     #    "P1PW|arena" or "P1PW|nil" must refuse (Return auto-OK needs "")
     r = await phase(["live_hotseat_launch.py", "--full", "--empty", "--ui-start",
-               "--port", str(tuner_port())])
-    if r.returncode != 0 or "UI_START_READY|posthost_roster_verified" not in r.stdout \
-            or "InSession|true" not in r.stdout \
-            or "\nP0PW|\n" not in f"\n{r.stdout}\n" \
-            or "\nP1PW|\n" not in f"\n{r.stdout}\n":
+               "--seat-count", str(len(seats)), "--port", str(tuner_port())])
+    if (r.returncode != 0 or "UI_START_READY|posthost_roster_verified" not in r.stdout
+            or "InSession|true" not in r.stdout
+            or any(r.stdout.splitlines().count(f"P{pid}PW|") != 1 for pid in seats)):
         return 23
     # 2. enter: ReadyButton ORB, then the leader-intro banner + hotseat
     #    hand-off panels. The tuner is DEAD inside this game (the hotseat
@@ -613,10 +643,7 @@ async def run_arch1_session(opts) -> int:
     r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-1]", r.stdout.strip())
-    r = await phase(["live_hotseat_launch.py", "--reflag",
-               "--port", str(tuner_port())])
-    if "REFLAG_SLOT|1|3" not in r.stdout \
-            or "REFLAG_CFGHUMAN|1|true" not in r.stdout:
+    if not await reflag_configured_seats(seats):
         print("[gate] re-flag read-back mismatch — refusing to dispatch")
         dump_screen("reflag-gate")
         return 31
@@ -627,7 +654,7 @@ async def run_arch1_session(opts) -> int:
     try:
         if r.returncode:
             raise RuntimeError(f'census helper failed: exit {r.returncode}')
-        census = verify_two_major_census(r.stdout)
+        census = verify_major_census(r.stdout, seats)
         (opts.artifacts / 'major-census.json').write_text(json.dumps(census, sort_keys=True) + '\n')
     except RuntimeError as exc:
         print("[gate]", str(exc))
@@ -642,7 +669,7 @@ async def run_arch1_session(opts) -> int:
             return 32
     if not opts.config:
         print(json.dumps({"ok": True,
-                          "note": "arch1 session up: both seats human, "
+                          "note": "arch1 session up: all configured seats human, "
                                   "mod attached, ready to dispatch"},
                          sort_keys=True))
         return 0
@@ -697,6 +724,8 @@ async def controlled_arch1(opts) -> int:
     code, failure = 2, None
     try:
         async with asyncio.timeout(opts.startup_timeout):
+            seats = configured_hotseat_seats(opts)
+            log.write("HEARTBEAT", **namespace, audit="configured_hotseat_roster", seats=seats)
             # Copy the entire existing save inventory before the fresh game
             # can rotate autosaves or overwrite quicksave. Never remove it.
             if SAVES.exists():

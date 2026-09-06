@@ -30,10 +30,14 @@ sys.path.insert(0, str(_HERE.parent / "src"))
 sys.path.insert(0, str(_HERE))
 
 from live_newgame import (  # noqa: E402
-    CONFIG_HOTSEAT_LUA,
+    CONFIG_HOTSEAT_LUA as CONFIG_HOTSEAT_LUA,
+)
+from live_newgame import (  # noqa: E402
     HOST_HOTSEAT_LUA,
+    config_hotseat_lua,
     connect_state,
     find_state,
+    posthost_receipt,
     run_lua,
 )
 
@@ -115,15 +119,14 @@ local function CivArenaGuardedStart()
     end
     -- Let native setup adopt the map's major/minor limits and city-state defaults.
     RealizeGameSetup()
-    PlayerConfigurations[0]:SetReady(true)
-    PlayerConfigurations[1]:SetReady(true)
+    CivArenaReadySeats()
     CivArenaCloseExtraMajorSlots()
     -- A second native refresh must leave this roster intact. Verification here
     -- has no repair side effects: unstable setup refuses to launch.
     RealizeGameSetup()
-    CivArenaVerifyMajorSlots()
+    CivArenaVerifyMajorSlots(true)
     CIV_ARENA_START_GUARD_STATUS = "verified"
-    print("UI_START_ROSTER|0,1|verified_after_native_refresh")
+    print("UI_START_ROSTER|" .. CIV_ARENA_ROSTER_LABEL .. "|verified_after_native_refresh")
     Network.LaunchGame()
     CIV_ARENA_START_GUARD_STATUS = "launched"
   end)
@@ -169,19 +172,8 @@ print("{SENTINEL}")
 # passwords — the shipped playerchange.lua auto-OKs the hand-off panel on
 # Return ONLY when GetHotseatPassword() == "" (nil does NOT count), so the
 # read-back must print the empty string. Derived from live_newgame's block
-# (single source of truth) with loud assertions against silent drift.
-CONFIG_HOTSEAT_EMPTY_LUA = CONFIG_HOTSEAT_LUA.replace(
-    'SetHotseatPassword("arena")', 'SetHotseatPassword("")'
-).replace(
-    f'print("{SENTINEL}")',
-    'print("P0PW|" .. tostring(PlayerConfigurations[0]:GetHotseatPassword()))\n'
-    'print("P1PW|" .. tostring(PlayerConfigurations[1]:GetHotseatPassword()))\n'
-    f'print("{SENTINEL}")',
-)
-assert 'SetHotseatPassword("")' in CONFIG_HOTSEAT_EMPTY_LUA, (
-    "live_newgame's password literal drifted — update the empty variant")
-assert "P0PW|" in CONFIG_HOTSEAT_EMPTY_LUA, (
-    "live_newgame's sentinel drifted — password read-backs not injected")
+# (single source of truth); each configured password is read back before UI input.
+CONFIG_HOTSEAT_EMPTY_LUA = config_hotseat_lua(empty_passwords=True)
 
 # Wire-side save (the engine's own quicksave/automation recipe: ingame.lua
 # OnInputActionTriggered + automation_standardtests SharedGame_OnSaveComplete).
@@ -294,7 +286,7 @@ def find_state_sync(states: dict[int, str], name: str) -> int | None:
 async def run_full(host: str, port: int, state: str,
                    empty_passwords: bool = False,
                    transition_timeout: float = 180.0,
-                   ui_start: bool = False) -> int:
+                   ui_start: bool = False, seat_count: int = 2) -> int:
     """The whole hotseat launch on ONE tuner connection, held open across
     the HostGame transition (the disconnect is what the degraded-boot
     pathology punishes — and an idle unjoined staging session has exited
@@ -302,8 +294,10 @@ async def run_full(host: str, port: int, state: str,
 
     Gates: every phase's read-back must match before the next mutation.
     """
-    config_lua = (CONFIG_HOTSEAT_EMPTY_LUA if empty_passwords
-                  else CONFIG_HOTSEAT_LUA)
+    if seat_count != 2 and not ui_start:
+        raise ValueError("three/four-seat startup requires --ui-start Architecture-1")
+    config_lua = config_hotseat_lua(seat_count, empty_passwords=empty_passwords)
+    roster_label = ",".join(map(str, range(seat_count)))
     conn = await connect_state(host, port, state)
     try:
         # 1. seat + verify (live_newgame's proven Lua, same read-backs)
@@ -312,7 +306,7 @@ async def run_full(host: str, port: int, state: str,
         configured = await run_lua(conn, idx, config_lua)
         for ln in configured:
             print(ln)
-        if 'MAJOR_ROSTER|0,1|humans=true|extra_slots=closed' not in configured:
+        if f'MAJOR_ROSTER|{roster_label}|humans=true|extra_slots=closed' not in configured:
             print('FAILED: pre-host major roster not verified')
             return 12
         # 2. host the hotseat staging session
@@ -322,7 +316,7 @@ async def run_full(host: str, port: int, state: str,
         hosted = await run_lua(conn, idx, host_lua)
         for ln in hosted:
             print(ln)
-        if 'POSTHOST_ROSTER|two_humans_no_extra_major_slots' not in hosted:
+        if posthost_receipt(seat_count) not in hosted:
             print('FAILED: post-host major roster not verified')
             return 12
         if ui_start:
@@ -377,6 +371,8 @@ def main() -> int:
                     help="with --full/--complete: empty hotseat passwords")
     ap.add_argument("--ui-start", action="store_true",
                     help="with --full: return after post-host roster verification for UI start")
+    ap.add_argument("--seat-count", type=int, choices=(2, 3, 4), default=2,
+                    help="configured contiguous human seats for --full")
     ap.add_argument("--reflag-seat", type=int, default=1,
                     help="seat to re-flag human for --reflag")
     ap.add_argument("--save-name", default=SAVE_NAME_DEFAULT)
@@ -397,6 +393,8 @@ def main() -> int:
     g.add_argument("--full", action="store_true",
                    help="config → host → complete → launch on ONE connection")
     opts = ap.parse_args()
+    if opts.seat_count != 2 and (not opts.full or not opts.ui_start):
+        ap.error("three/four seats require --full --ui-start")
 
     # Per-phase default states: the front-end tables (Network, Save* enums)
     # live in different VMs — LoadGameMenu proved sufficient for loads, the
@@ -414,7 +412,8 @@ def main() -> int:
         if opts.full:
             return asyncio.run(
                 run_full(opts.host, opts.port, opts.state or "StagingRoom",
-                         empty_passwords=opts.empty, ui_start=opts.ui_start))
+                         empty_passwords=opts.empty, ui_start=opts.ui_start,
+                         seat_count=opts.seat_count))
         if opts.save:
             lua = save_lua(opts.save_name)
         elif opts.reflag:

@@ -580,16 +580,15 @@ class RecoveryEpisode:
 
 class CompletedTurns:
     def __init__(self, order):
-        self.order = sorted(order)
-        if len(self.order) != 2 or len(set(self.order)) != 2:
-            raise ValueError("hotseat requires two distinct seats")
+        from civ_arena.game.civ6.hotseat_roster import seat_order
+        self.order = seat_order(order)
         self.rows = []
         self.first_turn = None
 
     def expected(self):
         index = len(self.rows)
-        return (None if self.first_turn is None else self.first_turn + index // 2,
-                self.order[index % 2])
+        return (None if self.first_turn is None else self.first_turn + index // len(self.order),
+                self.order[index % len(self.order)])
 
     def check(self, turn, player):
         expected_turn, expected_player = self.expected()
@@ -607,7 +606,7 @@ class CompletedTurns:
 
     @property
     def rounds(self):
-        return len(self.rows) // 2
+        return len(self.rows) // len(self.order)
 
 
 def implementation_identity(spec, mod_lua):
@@ -671,7 +670,7 @@ async def phase_dispatch_hotseat(
     rounds: int, strategy: str, mod_lua: str, *,
     limits: HotseatLimits | None = None, controller=None, pace_llm_turns: bool = True,
 ) -> int:
-    """Drive and account for two ordered, completed seats per engine turn."""
+    """Drive and account for every configured seat once per engine turn."""
     _refuse_rerun(run_dir / "events.jsonl")
     run_dir.mkdir(parents=True, exist_ok=True)
     driver = LiveDriver(spec, adapter, run_dir, f"{spec.match_id}-i{os.getpid()}")
@@ -868,7 +867,7 @@ async def phase_dispatch_hotseat(
                         begin_hook = getattr(seat["runtime"], "begin_turn", None)
                         if begin_hook is not None:
                             begin_hook(turn)
-                        nxt = ledger.order[(ledger.order.index(seat_pid) + 1) % 2]
+                        nxt = ledger.order[(ledger.order.index(seat_pid) + 1) % len(ledger.order)]
                         adapter.set_pre_end_switch(nxt)
                         try:
                             await seat["session"].take_turn(lease, seat["runtime"])
@@ -913,7 +912,8 @@ async def phase_dispatch_hotseat(
             cleanup = {"status": "failed", "error": ui_control.redact(type(exc).__name__)}
         if cleanup["status"] != "completed" and failure is None:
             failure = "cleanup failed"
-        ok = failure is None and ledger.rounds == rounds and len(ledger.rows) == 2 * rounds
+        ok = (failure is None and ledger.rounds == rounds
+              and len(ledger.rows) == len(ledger.order) * rounds)
         # Use cached observations: cleanup never queries a changing game.
         summary = {
             "phase": "dispatch-hotseat", "strategy": strategy,
@@ -937,7 +937,8 @@ async def phase_dispatch_hotseat(
                 for s in seats.values()},
         }
         await driver.match_end(ledger.rows[-1]["turn"] if ledger.rows else 0, summary)
-    print(f"HOTSEAT {'CLEAN' if ok else 'ABORTED'}: {len(ledger.rows)}/{rounds * 2} "
+    print(f"HOTSEAT {'CLEAN' if ok else 'ABORTED'}: "
+          f"{len(ledger.rows)}/{rounds * len(ledger.order)} "
           f"seat turns; {failure or 'completed'}", flush=True)
     return 0 if ok else 2
 
@@ -1244,7 +1245,7 @@ def main() -> None:
         loop.add_signal_handler(signal.SIGTERM, task.cancel)
         if opts.fake:
             server = FakeTunerServer(mod=FakeMod(
-                hotseat=[a.player_id for a in spec.agents]
+                hotseat=sorted(a.player_id for a in spec.agents)
                 if opts.phase == "dispatch-hotseat" else None))
             port = await server.start()
             adapter = FireTunerAdapter(

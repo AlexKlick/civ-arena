@@ -155,6 +155,9 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
     (live seat 1 is the engine's own AI — outside the referee — so its
     replayed synthetic end_turn pair is not comparable), and (c) uses
     _strip's structural skeleton (see its docstring)."""
+    if len(spec.agents) > 2:
+        raise ValueError("three/four-seat simulator replay is unsupported; use "
+                         "civ_arena.game.civ6.validate_run for event structure only")
     if live is None:
         live = _is_live_run(run_dir)
     # Codex r1 P1-6: the replay dir must never BE the source dir — the

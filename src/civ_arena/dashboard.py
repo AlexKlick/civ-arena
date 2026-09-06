@@ -226,7 +226,8 @@ class DashboardStore:
             observed = payload['metrics']
             claimed = summary.get('completed_rounds')
             if (type(claimed) is int and claimed != observed['completed_rounds']) or (
-                    len(payload['agents']) == 2 and observed['completed_seat_turns'] % 2):
+                    2 <= len(payload['agents']) <= 4 and
+                    observed['completed_seat_turns'] % len(payload['agents'])):
                 status = 'incomplete'
                 payload['warnings'].append(
                     'Completed turn evidence conflicts with terminal outcome.')
@@ -297,6 +298,7 @@ class DashboardStore:
 
 def project_events(events, warnings, redactor):
     agents, turns, pending, completed = {}, {}, defaultdict(deque), []
+    declared_agents = {}
     requests, violations, incomplete = {}, 0, False
     has_completion_audit = any(e.get('audit') in ('completed_seat_turn', 'run_identity')
                                for e in events)
@@ -313,10 +315,15 @@ def project_events(events, warnings, redactor):
             return []
         return config.get('agents', [])
 
-    def agent(agent_id, player_id, model=None):
+    def agent(agent_id, player_id, model=None, *, configured=False):
         nonlocal incomplete
         if not isinstance(agent_id, str) or type(player_id) is not int:
             return
+        if configured:
+            if agent_id in declared_agents and declared_agents[agent_id] != player_id:
+                warnings.append('Configured agent identity changed within the run.')
+                incomplete = True
+            declared_agents[agent_id] = player_id
         if agent_id in agents and agents[agent_id]['player_id'] != player_id:
             warnings.append('Agent identity changed seats within the run.')
             incomplete = True
@@ -349,7 +356,7 @@ def project_events(events, warnings, redactor):
             config = event.get('config', {})
             for item in configured_agents(config):
                 if isinstance(item, list) and len(item) >= 2:
-                    agent(item[0], item[1])
+                    agent(item[0], item[1], configured=True)
         elif kind == 'HEARTBEAT' and audit == 'run_identity':
             identity = event.get('identity')
             config = identity.get('config', {}) if isinstance(identity, dict) else {}
@@ -357,7 +364,8 @@ def project_events(events, warnings, redactor):
                 if isinstance(item, dict):
                     llm = item.get('llm')
                     agent(item.get('agent_id'), item.get('player_id'),
-                          llm.get('model_id') if isinstance(llm, dict) else item.get('model'))
+                          llm.get('model_id') if isinstance(llm, dict) else item.get('model'),
+                          configured=True)
         elif kind == 'HEARTBEAT' and audit == 'provider_request':
             aid, count = event.get('agent'), event.get('posts_sent')
             if not isinstance(aid, str) or type(count) is not int or count < 0:
@@ -463,17 +471,28 @@ def project_events(events, warnings, redactor):
         incomplete = True
     if completed and not has_completion_audit:
         warnings.append('Legacy TURN_END counts; driver completion/lease audit unavailable.')
+    if declared_agents and any(
+            declared_agents.get(aid) != value['player_id'] for aid, value in agents.items()):
+        warnings.append('Observed seat identity is outside the configured roster.')
+        incomplete = True
     seats = sorted({a['player_id'] for a in agents.values()})
+    if len(seats) != len(agents):
+        warnings.append('Multiple agent identities occupy the same seat.')
+        incomplete = True
+    if completed and has_completion_audit and not 2 <= len(seats) <= 4:
+        warnings.append('Completed-seat audits require two through four configured seats.')
+        incomplete = True
     rounds, expected_turn, offset = 0, None, 0
-    if len(seats) == 2:
+    if 2 <= len(seats) <= 4:
         for number, pid, _ in completed:
             expected_turn = number if expected_turn is None else expected_turn
             if pid != seats[offset] or number != expected_turn:
-                warnings.append('Completed seat order does not form consecutive two-seat rounds.')
+                warnings.append('Completed seat order does not form consecutive '
+                                'configured-seat rounds.')
                 incomplete = True
                 break
             offset += 1
-            if offset == 2:
+            if offset == len(seats):
                 rounds, expected_turn, offset = rounds + 1, expected_turn + 1, 0
     result_turns = list(turns.values())
     for turn in result_turns:

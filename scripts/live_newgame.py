@@ -137,7 +137,7 @@ print("InSession|" .. tostring(Network.IsSessionActive()))
 print("Humans|" .. tostring(GameConfiguration.GetHumanPlayerCount()))
 if Network.IsSessionActive() and GameConfiguration.IsHotseat() then
   CivArenaCloseExtraMajorSlots()
-  print("POSTHOST_ROSTER|two_humans_no_extra_major_slots")
+  print(CIV_ARENA_POSTHOST_RECEIPT)
 else
   error("hotseat session unavailable after HostGame")
 end
@@ -196,43 +196,88 @@ print("{SENTINEL}")
 # room's own CheckGameAutoStart then auto-launches (countdown →
 # Network.LaunchGame from the session host). Leaders are the engine's own
 # tutorialsetup.lua strings.
-CONFIG_HOTSEAT_LUA = f"""
--- Open major slots can be filled with AI at launch despite Participating=2.
--- Use the shipped stagingroom.lua OnSlotType closure semantics explicitly.
-function CivArenaVerifyMajorSlots()
+LEADERS_HOTSEAT = ("LEADER_CLEOPATRA", "LEADER_GILGAMESH",
+                   "LEADER_TRAJAN", "LEADER_PERICLES")
+
+
+def posthost_receipt(seat_count: int) -> str:
+    # Preserve the existing two-seat wire receipt for old saved diagnostics.
+    return ("POSTHOST_ROSTER|two_humans_no_extra_major_slots" if seat_count == 2
+            else f"POSTHOST_ROSTER|{seat_count}_humans_no_extra_major_slots")
+
+
+def config_hotseat_lua(seat_count: int = 2, *, empty_passwords: bool = False) -> str:
+    from civ_arena.game.civ6.hotseat_roster import seat_order
+    if type(seat_count) is not int or not 2 <= seat_count <= 4:
+        raise ValueError("fresh hotseat supports two through four seats")
+    seats = seat_order(range(seat_count), fresh=True)
+    label = ",".join(map(str, seats))
+    password = "" if empty_passwords else "arena"
+    setup, readbacks = [], []
+    for pid in seats:
+        setup.append(f"""
+PlayerConfigurations[{pid}]:SetSlotStatus(SlotStatus.SS_TAKEN)
+PlayerConfigurations[{pid}]:SetMajorCiv()
+PlayerConfigurations[{pid}]:SetLeaderTypeName("{LEADERS_HOTSEAT[pid]}")
+PlayerConfigurations[{pid}]:SetHotseatName("Arena Seat {pid + 1}")
+pcall(function() PlayerConfigurations[{pid}]:SetHotseatPassword("{password}") end)
+PlayerConfigurations[{pid}]:SetReady(true)
+Network.BroadcastPlayerInfo({pid})
+""")
+        for field, getter in (("Human", "IsHuman"), ("Leader", "GetLeaderTypeName"),
+                              ("Ready", "GetReady"), ("PW", "GetHotseatPassword")):
+            readbacks.append(f'print("P{pid}{field}|" .. '
+                             f'tostring(PlayerConfigurations[{pid}]:{getter}()))')
+    setup_lua = "\n".join(setup)
+    readback_lua = "\n".join(readbacks)
+    return f"""
+CIV_ARENA_SEATS = {{{label}}}
+CIV_ARENA_ROSTER_LABEL = "{label}"
+CIV_ARENA_POSTHOST_RECEIPT = "{posthost_receipt(seat_count)}"
+local expected = {{}}
+for _, pid in ipairs(CIV_ARENA_SEATS) do expected[pid] = true end
+function CivArenaVerifyMajorSlots(requireReady)
+  for _, pid in ipairs(CIV_ARENA_SEATS) do
+    local pc = PlayerConfigurations[pid]
+    if pc == nil or pc:GetCivilizationLevelTypeID() ~=
+        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV
+        or pc:GetSlotStatus() ~= SlotStatus.SS_TAKEN or not pc:IsHuman()
+        or (requireReady and pc:GetReady() ~= true) then
+      error("expected human major slot unavailable: " .. tostring(pid))
+    end
+  end
   for pid = 0, 63 do
     local pc = PlayerConfigurations[pid]
-    if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
-        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then
-      if pid > 1 then
-        if pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
-          error("extra major slot did not close: " .. tostring(pid))
-        end
-      elseif pc:GetSlotStatus() ~= SlotStatus.SS_TAKEN or not pc:IsHuman() then
-        error("expected human major slot unavailable: " .. tostring(pid))
-      end
+    if pc ~= nil and not expected[pid] and pc:GetCivilizationLevelTypeID() ==
+        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV
+        and pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
+      error("extra major slot did not close: " .. tostring(pid))
     end
   end
   local majors = {{}}
   for _, pid in ipairs(GameConfiguration.GetParticipatingPlayerIDs()) do
     local pc = PlayerConfigurations[pid]
-    if pc:GetCivilizationLevelTypeID() == CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then
+    if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
+        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then
       table.insert(majors, pid)
     end
   end
   table.sort(majors)
-  if #majors ~= 2 or majors[1] ~= 0 or majors[2] ~= 1 then
-    error("participating major roster is not exactly seats 0 and 1")
+  if #majors ~= #CIV_ARENA_SEATS then error("participating major count mismatch") end
+  for index, pid in ipairs(CIV_ARENA_SEATS) do
+    if majors[index] ~= pid then error("participating major roster mismatch") end
   end
-  print("MAJOR_ROSTER|0,1|humans=true|extra_slots=closed")
+  print("MAJOR_ROSTER|" .. CIV_ARENA_ROSTER_LABEL .. "|humans=true|extra_slots=closed")
+end
+function CivArenaReadySeats()
+  for _, pid in ipairs(CIV_ARENA_SEATS) do PlayerConfigurations[pid]:SetReady(true) end
 end
 function CivArenaCloseExtraMajorSlots()
-  -- Keep the map's native min/max bounds. The shipped MapSize_ValueNeedsChanging
-  -- treats a forced Tiny MaxMajor=2 as stale setup and reopens four players.
-  GameConfiguration.SetParticipatingPlayerCount(2)
-  for pid = 2, 63 do
+  -- Preserve native map bounds; forced Tiny MaxMajor=2 reopens map-default slots.
+  GameConfiguration.SetParticipatingPlayerCount(#CIV_ARENA_SEATS)
+  for pid = 0, 63 do
     local pc = PlayerConfigurations[pid]
-    if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
+    if pc ~= nil and not expected[pid] and pc:GetCivilizationLevelTypeID() ==
         CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV
         and pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
       pc:SetSlotStatus(SlotStatus.SS_CLOSED)
@@ -244,22 +289,9 @@ end
 Network.SetLocalNetworkMode(GameModeTypes.HOTSEAT)
 GameConfiguration.SetGameMode(GameModeTypes.HOTSEAT)
 MapConfiguration.SetMapSize({lua_int(MAPSIZE_TINY)})
-GameConfiguration.SetParticipatingPlayerCount(2)
+GameConfiguration.SetParticipatingPlayerCount({seat_count})
 GameConfiguration.SetGameSpeedType({lua_int(GAMESPEED_STANDARD)})
-PlayerConfigurations[0]:SetSlotStatus(SlotStatus.SS_TAKEN)
-PlayerConfigurations[0]:SetMajorCiv()
-PlayerConfigurations[0]:SetLeaderTypeName("LEADER_CLEOPATRA")
-PlayerConfigurations[0]:SetHotseatName("Arena Seat 1")
-pcall(function() PlayerConfigurations[0]:SetHotseatPassword("arena") end)
-PlayerConfigurations[0]:SetReady(true)
-Network.BroadcastPlayerInfo(0)
-PlayerConfigurations[1]:SetSlotStatus(SlotStatus.SS_TAKEN)
-PlayerConfigurations[1]:SetMajorCiv()
-PlayerConfigurations[1]:SetLeaderTypeName("LEADER_GILGAMESH")
-PlayerConfigurations[1]:SetHotseatName("Arena Seat 2")
-pcall(function() PlayerConfigurations[1]:SetHotseatPassword("arena") end)
-PlayerConfigurations[1]:SetReady(true)
-Network.BroadcastPlayerInfo(1)
+{setup_lua}
 CivArenaCloseExtraMajorSlots()
 print("GameMode|" .. tostring(GameConfiguration.GetGameMode()))
 print("IsHotseat|" .. tostring(GameConfiguration.IsHotseat()))
@@ -267,16 +299,13 @@ print("Humans|" .. tostring(GameConfiguration.GetHumanPlayerCount()))
 print("AI|" .. tostring(GameConfiguration.GetAIPlayerCount()))
 print("MapSize|" .. tostring(MapConfiguration.GetMapSize()))
 print("Participating|" .. tostring(GameConfiguration.GetParticipatingPlayerCount()))
-print("P0Human|" .. tostring(PlayerConfigurations[0]:IsHuman()))
-print("P1Human|" .. tostring(PlayerConfigurations[1]:IsHuman()))
-print("P0Slot|" .. tostring(PlayerConfigurations[0]:GetSlotStatus()))
-print("P1Slot|" .. tostring(PlayerConfigurations[1]:GetSlotStatus()))
-print("P0Leader|" .. tostring(PlayerConfigurations[0]:GetLeaderTypeName()))
-print("P1Leader|" .. tostring(PlayerConfigurations[1]:GetLeaderTypeName()))
-print("P0Ready|" .. tostring(PlayerConfigurations[0]:GetReady()))
-print("P1Ready|" .. tostring(PlayerConfigurations[1]:GetReady()))
+{readback_lua}
 print("{SENTINEL}")
 """
+
+
+CONFIG_HOTSEAT_LUA = config_hotseat_lua()
+
 
 
 async def phase(host: str, port: int, lua: str, state: str,

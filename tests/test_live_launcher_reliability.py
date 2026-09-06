@@ -32,12 +32,12 @@ async def test_startup_deadline_preserves_saves_and_terminal_record(tmp_path, mo
         await asyncio.Event().wait()
     monkeypatch.setattr(z, 'run_arch1_session', stall)
     opts = SimpleNamespace(run_id='unique', runs_root=tmp_path / 'runs',
-                           startup_timeout=0.03, config='unused')
+                           startup_timeout=0.03, config='configs/live-hotseat-001.yaml')
     assert await z.controlled_arch1(opts) == 2
     assert (opts.artifacts / 'saves-before/old.Civ6Save').read_bytes() == b'old save'
     summary = json.loads((opts.artifacts / 'summary.json').read_text())
     records = [json.loads(x) for x in (opts.artifacts / 'events.jsonl').read_text().splitlines()]
-    assert [r['kind'] for r in records] == ['MATCH_START', 'MATCH_END']
+    assert [r['kind'] for r in records] == ['MATCH_START', 'HEARTBEAT', 'MATCH_END']
     assert records[-1]['summary'] == summary
     assert not summary['clean'] and 'TimeoutError' in summary['aborted']
     with pytest.raises(FileExistsError):
@@ -95,7 +95,7 @@ async def test_launcher_forwards_only_remaining_startup_budget(tmp_path, monkeyp
         return Proc()
     monkeypatch.setattr(z.asyncio, 'create_subprocess_exec', spawn)
     opts = SimpleNamespace(run_id='remaining', runs_root=tmp_path / 'runs',
-                           startup_timeout=0.3, config='config.yaml', rounds=3,
+                           startup_timeout=0.3, config='configs/live-hotseat-001.yaml', rounds=3,
                            match_timeout=7200, agent_turn_timeout=600,
                            recovery_timeout=180, recovery_sweeps=8)
     assert await z.controlled_arch1(opts) == 0
@@ -183,13 +183,13 @@ async def test_arch1_display_failure_preserves_terminal_before_game_launch(
     monkeypatch.setattr(z, 'kill_game', kill)
     monkeypatch.setattr(z, 'launch', lambda *a: pytest.fail('must not launch'))
     opts = SimpleNamespace(run_id='display-failed', runs_root=tmp_path / 'runs',
-                           startup_timeout=1, config='unused', fresh_x=True)
+                           startup_timeout=1, config='configs/live-hotseat-001.yaml', fresh_x=True)
     assert await z.controlled_arch1(opts) == 2
     assert actions == (['display'] if failure_at == 0 else ['display', 'bounce', 'display'])
     summary = json.loads((opts.artifacts / 'summary.json').read_text())
     records = [json.loads(x) for x in (opts.artifacts / 'events.jsonl').read_text().splitlines()]
     assert not summary['clean'] and 'display preflight failed' in summary['aborted']
-    assert [row['kind'] for row in records] == ['MATCH_START', 'MATCH_END']
+    assert [row['kind'] for row in records] == ['MATCH_START', 'HEARTBEAT', 'MATCH_END']
     assert records[-1]['summary'] == summary
 
 
@@ -374,7 +374,9 @@ async def test_second_launch_normalization_precedes_load_menu_inputs(tmp_path, m
 
 
 @pytest.mark.parametrize('smoke_rc', [0, 10])
-async def test_arch1_waits_between_each_final_tuner_client(smoke_rc, tmp_path, monkeypatch):
+@pytest.mark.parametrize('seat_count', [2, 4])
+async def test_arch1_waits_between_each_final_tuner_client(
+        smoke_rc, seat_count, tmp_path, monkeypatch):
     saves = tmp_path / 'saves'
     for name in ('Hotseat/auto/AutoSave_0001.Civ6Save', 'Hotseat/quick/quicksave.Civ6Save'):
         path = saves / name
@@ -393,16 +395,16 @@ async def test_arch1_waits_between_each_final_tuner_client(smoke_rc, tmp_path, m
         script = Path(args[1]).name
         actions.append(('client', script, tuple(args[2:])))
         if '--full' in args:
-            output = ('InSession|true\nP0PW|\nP1PW|\n'
-                      'UI_START_READY|posthost_roster_verified\n')
+            output = ('InSession|true\n' + ''.join(f'P{pid}PW|\n' for pid in range(seat_count))
+                      + 'UI_START_READY|posthost_roster_verified\n')
         elif '--load' in args:
             output = 'loadgame-returned|true'
         elif '--reflag' in args:
-            output = 'REFLAG_SLOT|1|3\nREFLAG_CFGHUMAN|1|true'
+            pid = int(args[args.index('--reflag-seat') + 1])
+            output = f'REFLAG_SLOT|{pid}|3\nREFLAG_CFGHUMAN|{pid}|true'
         elif script == 'live_seat_check.py':
-            output = ('P0|human=true|major=true|alive=true|slot=3|cfghuman=true\n'
-                      'P1|human=true|major=true|alive=true|slot=3|cfghuman=true\n'
-                      'CENSUS_END|2\n')
+            output = (''.join(f'P{pid}|human=true|major=true|alive=true|slot=3|cfghuman=true\n'
+                              for pid in range(seat_count)) + f'CENSUS_END|{seat_count}\n')
         else:
             assert script == 'firetuner_smoke.py'
             output = 'SMOKE OK' if smoke_rc == 0 else 'SMOKE FAILED'
@@ -418,13 +420,16 @@ async def test_arch1_waits_between_each_final_tuner_client(smoke_rc, tmp_path, m
     monkeypatch.setattr(z, 'launch', lambda *_: None)
     monkeypatch.setattr(z, 'swap_save_into_load_slot', lambda *_: True)
     opts = SimpleNamespace(artifacts=tmp_path, fresh_x=False, kill_first=False,
-                           no_smoke=False, config='unused')
+                           no_smoke=False, config=(
+                               'configs/live-hotseat-001.yaml' if seat_count == 2
+                               else 'configs/live-hotseat-strategic-minimax4-100.yaml'))
     assert await z.run_arch1_session(opts) == (0 if smoke_rc == 0 else 32)
     clients = [(i, row) for i, row in enumerate(actions) if row[0] == 'client']
-    assert [row[1] for _, row in clients[-4:]] == [
-        'live_seat_check.py', 'live_hotseat_launch.py',
+    final_clients = clients[-(seat_count + 2):]
+    assert [row[1] for _, row in final_clients] == [
+        'live_seat_check.py', *(['live_hotseat_launch.py'] * (seat_count - 1)),
         'live_seat_check.py', 'firetuner_smoke.py']
-    for i, _ in clients[-4:]:
+    for i, _ in final_clients:
         assert actions[i - 1] == ('sleep', 11)
 
 

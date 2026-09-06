@@ -1,0 +1,73 @@
+# Opt-in four human seats; live startup unverified. Per-agent limits and allowance unchanged.
+match:
+  match_id: live-hotseat-strategic-minimax4-100
+  seed: 271183
+  max_turns: 100
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+  completeness_gate: true
+  declare_own_endpath_drift: true
+agents:
+- agent_id: minimax-m3-seat0
+  player_id: 0
+  policy: llm
+  decision_mode: strategic_autopilot
+  seed: 11
+  llm:
+    base_url: https://api.minimax.io/anthropic/v1
+    api_key_env: ANTHROPIC_AUTH_TOKEN_MINIMAX2
+    model_id: MiniMax-M3
+    max_tokens: 4096
+    max_tool_rounds: 16
+    max_result_chars: 8000
+    request_timeout_s: 120
+    max_retries: 2
+    max_requests_per_match: 2000
+- agent_id: minimax-m3-seat1
+  player_id: 1
+  policy: llm
+  decision_mode: strategic_autopilot
+  seed: 22
+  llm:
+    base_url: https://api.minimax.io/anthropic/v1
+    api_key_env: ANTHROPIC_AUTH_TOKEN_MINIMAX2
+    model_id: MiniMax-M3
+    max_tokens: 4096
+    max_tool_rounds: 16
+    max_result_chars: 8000
+    request_timeout_s: 120
+    max_retries: 2
+    max_requests_per_match: 2000
+- agent_id: minimax-m3-seat2
+  player_id: 2
+  policy: llm
+  decision_mode: strategic_autopilot
+  seed: 33
+  llm:
+    base_url: https://api.minimax.io/anthropic/v1
+    api_key_env: ANTHROPIC_AUTH_TOKEN_MINIMAX2
+    model_id: MiniMax-M3
+    max_tokens: 4096
+    max_tool_rounds: 16
+    max_result_chars: 8000
+    request_timeout_s: 120
+    max_retries: 2
+    max_requests_per_match: 2000
+- agent_id: minimax-m3-seat3
+  player_id: 3
+  policy: llm
+  decision_mode: strategic_autopilot
+  seed: 44
+  llm:
+    base_url: https://api.minimax.io/anthropic/v1
+    api_key_env: ANTHROPIC_AUTH_TOKEN_MINIMAX2
+    model_id: MiniMax-M3
+    max_tokens: 4096
+    max_tool_rounds: 16
+    max_result_chars: 8000
+    request_timeout_s: 120
+    max_retries: 2
+    max_requests_per_match: 2000
+chaos: []

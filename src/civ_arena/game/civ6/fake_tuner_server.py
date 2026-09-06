@@ -78,7 +78,8 @@ class FakeMod:
         self.supports_ledger = supports_ledger
         # M18 hotseat mode: the driven players hand the turn to each other
         # (release of the round's last player advances the game turn)
-        self.hotseat = list(hotseat) if hotseat else []
+        from civ_arena.game.civ6.hotseat_roster import seat_order
+        self.hotseat = seat_order(hotseat) if hotseat else []
         # engine effect that lands inside every ambient window:
         # (kind, entity_type, numeric_id, attr, before, after)
         self.auto_ambient = auto_ambient
@@ -141,6 +142,13 @@ class FakeMod:
             1: {"owner": 0, "name": "ARENA", "x": 2, "y": 2,
                 "pop": 1, "queue": ""},
         }
+        # Additional explicit seats have isolated owned units. Keep the legacy
+        # two-seat fixture byte-for-byte equivalent for existing replay probes.
+        for pid in self.hotseat:
+            if pid not in self.players:
+                self.players[pid] = {"gold": 100, "researching": "", "researched": []}
+                self.units[100 + pid] = {"owner": pid, "type": "WARRIOR",
+                    "x": 20 + pid, "y": 20, "moves": 2, "damage": 0, "fortified": False}
         self.next_city_id = 2
 
     # -- the M17c targeted map read ----------------------------------------
