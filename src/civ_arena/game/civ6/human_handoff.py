@@ -112,19 +112,34 @@ async def _rpc(conn, operation, player, turn, seats):
         # A following game action must never reuse an ambiguous response stream.
         # Normal driver cleanup owns disconnect and its 20-second bound.
         raise
-    return {"operation": operation, "player": player, "turn": turn,
+    return {"operation": operation, "status": "observed", "player": player, "turn": turn,
             "seats": list(seats), "receipt": expected}
 
 
-async def activate(conn, player, turn, seats):
+async def _sequence(conn, player, turn, seats, operations, on_result):
     receipts = []
-    for operation in ("activate", "reflag", "verify"):
-        receipts.append(await _rpc(conn, operation, player, turn, seats))
+    for operation in operations:
+        try:
+            receipt = await _rpc(conn, operation, player, turn, seats)
+        except BaseException as exc:
+            if on_result is not None:
+                on_result({"operation": operation, "status": "failed",
+                           "player": player, "turn": turn, "seats": list(seats),
+                           "error_type": type(exc).__name__,
+                           "final_observation": "unavailable; effects may have occurred"})
+            raise
+        receipts.append(receipt)
+        # Persist each positive receipt before starting any later operation.
+        # Storage failure stops the sequence; it is not a native command failure.
+        if on_result is not None:
+            on_result(receipt)
     return receipts
 
 
-async def end_current(conn, player, turn, seats):
-    receipts = []
-    for operation in ("verify", "end"):
-        receipts.append(await _rpc(conn, operation, player, turn, seats))
-    return receipts
+async def activate(conn, player, turn, seats, *, on_result=None):
+    return await _sequence(conn, player, turn, seats,
+                           ("activate", "reflag", "verify"), on_result)
+
+
+async def end_current(conn, player, turn, seats, *, on_result=None):
+    return await _sequence(conn, player, turn, seats, ("verify", "end"), on_result)

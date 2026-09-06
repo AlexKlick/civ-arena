@@ -152,6 +152,39 @@ async def test_lost_end_receipt_does_not_repeat_end_or_switch():
     assert conn.mod.local_player == 0
 
 
+async def test_partial_activation_audits_switch_before_reflag_failure():
+    conn = Connection()
+    conn.mod.lease = {'player': 1, 'turn': 1}
+    original = conn._locked_execute
+    audits = []
+    async def reject_reflag(state, code, timeout):
+        if 'human_handoff=reflag,' in code:
+            assert audits[0]['operation'] == 'activate'
+            assert audits[0]['status'] == 'observed'
+            return []
+        return await original(state, code, timeout)
+    conn._locked_execute = reject_reflag
+    with pytest.raises(RuntimeError):
+        await hh.activate(conn, 1, 1, (0, 1), on_result=audits.append)
+    assert conn.mod.local_player == 1 and conn.mod.humans[0] is False
+    assert [(r['operation'], r['status']) for r in audits] == [
+        ('activate', 'observed'), ('reflag', 'failed')]
+    assert audits[-1]['player'] == 1 and audits[-1]['turn'] == 1
+
+
+async def test_audit_storage_failure_stops_before_later_operations():
+    conn = Connection()
+    calls = []
+    def broken(receipt):
+        calls.append(receipt)
+        raise OSError('audit storage unavailable')
+    with pytest.raises(OSError):
+        await hh.end_current(conn, 0, 1, (0, 1), on_result=broken)
+    assert len(conn.calls) == 1
+    assert len(calls) == 1 and calls[0]['operation'] == 'verify'
+    assert conn.mod.lease == {'player': 0, 'turn': 1}
+
+
 async def test_cancel_while_waiting_sends_nothing():
     conn = Connection()
     await conn._lock.acquire()
