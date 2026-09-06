@@ -1,4 +1,8 @@
-# Faster live turns and a sixty-round match
+# Faster live turns and the current 100-round target
+
+The current request is 100 full rounds and 200 completed seat turns. The
+earlier sixty-round attempts below are retained history. See the current
+100-round command and result at the end of this record.
 
 Operator request, 2026-09-05: repair the game parked at turn four, reduce
 avoidable decision overhead, and play a fresh two-model game through sixty
@@ -580,3 +584,49 @@ Validate its finalized event structure with `validate_run RUN_DIR --rounds 100`.
 Use the same stop-and-preserve procedure above. This target is not a completion
 claim. Four-player support is an isolated follow-up, not part of this two-seat
 configuration.
+
+## First 100-round attempt: stopped honestly at turn 28
+
+`minimax100-20260906T181834Z` ran the clean reviewed implementation `684efdf`
+with mod 0.3.10 on the connected `:1` monitor. It completed 27 full rounds and
+55 correctly ordered, released seat turns. Player 1's turn 28 stopped before
+its next model request because required owned-unit and nearby-terrain context
+exceeded the configured limit. This run failed the 100-round target.
+
+There is exactly one `MATCH_END`, equal to the failed summary. Cleanup completed
+with no reported errors; the summary honestly retains the interrupted P1 turn-28
+lease and marks its final observation cached. No timeout, observed deadline
+excess, recovery episode, or watchdog violation was recorded. The two agents
+made 8 and 6 provider requests. Their accepted action counts were 62 and 75;
+these counts include fortification and do not imply useful displacement.
+The configured `declare_own_endpath_drift=true` allowance admitted 78 exact
+in-policy movement rows. The event file contains 2,496 records with SHA256
+`8d9b9ced68af27590e2934fdd403ab985e17f20f978babf7996ef30c770c679e`.
+[Terminal structural audit](../runs/100-round-live-20260906T181834Z/independent-final-audit.json),
+[Summary](../runs/minimax100-20260906T181834Z/summary.json).
+
+Eleven informational popups were observed dismissed. The actual browser
+checkpoint at six completed seat turns recorded no console, page, or request
+failures and restored Follow latest. A passive physical-window screenshot shows
+the game at turn 28; it did not send input. Neither capture substitutes for a
+completed match or an atomic engine-state proof.
+[Browser evidence](../runs/100-round-live-20260906T181834Z/browser-proof/20260906T183207Z-browser.json),
+[Physical frame and nearby engine observation](../runs/100-round-live-20260906T181834Z/spectator-frame.json),
+[Native terrain rendering prototype](../runs/100-round-live-20260906T181834Z/native-observation-map/index.html).
+
+The preserved evidence also confirmed three actionable gaps: known mountains
+were normalized as plains; recurring production preferences had no roster
+targets; and the unit reader excluded barbarian players. Sumeria had four
+scouts and another queued at the stop. A separate, bounded post-stop read
+verified nearby barbarian units for both player projections without any game
+action. The next implementation adds reviewed mountain classification,
+lossless context compaction and source-classified nonmajor observations, with
+production-target checks and live validation recorded separately.
+[Mountain evidence](../runs/100-round-live-20260906T181834Z/mountain-observation-probe.json),
+[Context correction](compact-model-context.md),
+[Nonmajor observation review](../runs/100-round-live-20260906T181834Z/nonmajor-review.md).
+
+The turn-25 native reward in this run had subtype `-945185595`, not the
+population subtype corrected in mod 0.3.10. No causal population receipt was
+recorded, so this run does not exercise that corrected population path.
+All run folders, event/wire logs, summaries and save backups remain preserved.
