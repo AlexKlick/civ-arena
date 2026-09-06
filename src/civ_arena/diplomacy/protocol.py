@@ -117,6 +117,15 @@ class DiplomacyStore:
                  and all(_integer(p, 0, 63) for p in players)
                  and list(players) == sorted(set(players)), "invalid_roster")
         self.match_id, self.players = match_id, players
+        # Fixed equitable partitions never borrow unused capacity from other
+        # private channels. The sum stays <= MAX_RECORDS without consulting a
+        # shared admission counter. Public lifecycle work has reserved capacity.
+        buckets = ["public", "round_boundary", *[f"begin:{p}" for p in players],
+                   *[f"private:{p}-{q}" for p in players for q in players if p < q]]
+        _require(_integer(MAX_RECORDS, len(buckets)), "invalid_record_capacity")
+        quota = MAX_RECORDS // len(buckets)
+        self._record_limits = dict.fromkeys(buckets, quota)
+        self._record_counts = dict.fromkeys(buckets, 0)
         self._round = 0
         self._offers: dict[str, dict] = {}
         self._views: dict[str, list[dict]] = {str(p): [] for p in players}
@@ -133,8 +142,25 @@ class DiplomacyStore:
                  and _integer(ctx.turn, 1) and ctx.turn == self._round + 1
                  and _identifier(ctx.lease_id), "invalid_server_context")
 
+    def _record_bucket(self, kind: str, inputs: dict, result: dict) -> str:
+        if kind == "round_boundary":
+            return "round_boundary"
+        if kind == "begin_turn":
+            return f"begin:{inputs['context']['author']}"
+        command = inputs["command"]
+        if command["op"] == "message":
+            if command["audience"]["kind"] == "public":
+                return "public"
+            readers = sorted([inputs["context"]["author"],
+                              *command["audience"]["recipients"]])
+        else:
+            readers = result["offer"]["consent"]["participants"]
+        return "private:" + "-".join(map(str, readers))
+
     def _record(self, kind: str, inputs: dict, result: dict) -> dict:
-        _require(len(self._records) < MAX_RECORDS, "record_limit")
+        bucket = self._record_bucket(kind, inputs, result)
+        _require(self._record_counts[bucket] < self._record_limits[bucket], "record_limit")
+        self._record_counts[bucket] += 1
         record = {"seq": len(self._records), "kind": kind,
                   "inputs": copy.deepcopy(inputs), "result": copy.deepcopy(result)}
         self._records.append(record)
@@ -410,7 +436,8 @@ class DiplomacyStore:
                             "round": self._round, "offers": self._offers, "views": self._views,
                             "pending": self._pending, "begun": self._begun,
                             "dedupe": self._dedupe, "counters": self._counters,
-                            "costs": self._costs})
+                            "costs": self._costs, "record_limits": self._record_limits,
+                            "record_counts": self._record_counts})
 
     @classmethod
     def from_records(cls, match_id: str, players: tuple[int, ...], records: list[dict]

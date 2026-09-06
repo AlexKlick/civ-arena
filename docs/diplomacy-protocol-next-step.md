@@ -262,6 +262,10 @@ Proposed starting bounds, to be made explicit configuration in implementation:
   8 open offers and 8 active treaties per private channel, and 8 obligations per
   treaty. Channel-local admission avoids exposing the load of unrelated private
   negotiations through a capacity rejection; the first live match has two seats.
+  A finite journal must also reserve fixed capacity per private/public channel,
+  per-seat lease boundaries, and completed-round boundaries; a shared journal
+  admission cap would reintroduce the same hidden-traffic oracle. The D1 foundation
+  partitions at most 10,000 records across the public roster's finite reservations.
 - Each offer's complete consent document at most 1,600 characters; each message
   at most 600 characters; literal claim text remains separate from exact terms.
 - Curate due/active obligations, actionable offers, then new messages in a

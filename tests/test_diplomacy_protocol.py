@@ -369,7 +369,7 @@ def test_open_offer_limit_is_channel_local_and_bound_is_atomic():
     assert s.apply(ctx(0, 5), command)["status"] == "accepted"
 
 
-def test_active_treaty_limit_and_record_limit_are_atomic(monkeypatch):
+def test_active_treaty_limit_is_atomic(monkeypatch):
     import civ_arena.diplomacy.protocol as protocol
 
     monkeypatch.setattr(protocol, "MAX_ACTIVE_TREATIES", 1)
@@ -380,8 +380,6 @@ def test_active_treaty_limit_and_record_limit_are_atomic(monkeypatch):
     s.apply(ctx(1), reference(first))
     rejects_unchanged(s, lambda: s.apply(ctx(1), reference(second, key="second-accept")),
                       "active_treaty_limit")
-    monkeypatch.setattr(protocol, "MAX_RECORDS", len(s.records()))
-    rejects_unchanged(s, lambda: s.apply(ctx(1), message(to=0)), "record_limit")
 
 
 def test_forged_early_accept_and_withdraw_of_active_treaty_reject():
@@ -405,3 +403,98 @@ def test_oversize_consented_terms_and_duplicate_obligations_reject_atomically():
         for n in range(2)
     ]
     rejects_unchanged(s, lambda: s.apply(ctx(), command), "consent_size")
+
+
+@pytest.mark.parametrize("probe_channel_full", [False, True])
+def test_hidden_channel_saturation_cannot_change_identical_recipient_admission(
+        monkeypatch, probe_channel_full):
+    import civ_arena.diplomacy.protocol as protocol
+
+    # Three private channels, one public channel, three own-begin partitions,
+    # and one round partition: 16 slots reserve exactly two in each partition.
+    monkeypatch.setattr(protocol, "MAX_RECORDS", 16)
+    results, views = [], []
+    for hidden_channel_full in (False, True):
+        s = store((0, 1, 2))
+        s.begin_turn(ctx(1))
+        s.begin_turn(ctx(2))
+        if hidden_channel_full:
+            s.apply(ctx(), message("hidden-1"))
+            s.apply(ctx(), message("hidden-2"))
+            rejects_unchanged(s, lambda s=s: s.apply(ctx(), message("hidden-3")), "record_limit")
+        if probe_channel_full:
+            s.apply(ctx(2), message("visible-1", to=0))
+            s.apply(ctx(2), message("visible-2", to=0))
+        views.append(s.project(2))
+        before, records = s.state_digest(), s.records()
+        try:
+            result = s.apply(ctx(2), message("probe", to=0))
+            results.append(result["status"])
+        except ProtocolError as exc:
+            results.append(str(exc))
+            assert s.state_digest() == before and s.records() == records
+        assert DiplomacyStore.from_records("fixture", s.players, s.records()).state_digest() == (
+            s.state_digest())
+    assert views[0] == views[1]
+    assert results == (["record_limit"] * 2 if probe_channel_full else ["accepted"] * 2)
+
+
+def test_hidden_channel_saturation_does_not_consume_public_or_lifecycle_capacity(monkeypatch):
+    import civ_arena.diplomacy.protocol as protocol
+
+    monkeypatch.setattr(protocol, "MAX_RECORDS", 16)
+    s = store((0, 1, 2))
+    s.begin_turn(ctx(1))
+    s.begin_turn(ctx(2))
+    s.apply(ctx(), message("hidden-1"))
+    s.apply(ctx(), message("hidden-2"))
+    public = message("public")
+    public["audience"] = {"kind": "public", "recipients": [0, 1]}
+    assert s.apply(ctx(2), public)["status"] == "accepted"
+    assert s.advance_round([[1, 0], [1, 1], [1, 2]])["round"] == 1
+    assert s.begin_turn(ctx(2, 2))["status"] == "accepted"
+    assert s.project(2)["messages"][0]["message_id"] == "message:public:1"
+
+
+def test_maximum_roster_partitions_preserve_exact_global_memory_bound(monkeypatch):
+    import civ_arena.diplomacy.protocol as protocol
+
+    # 8 own-begin + 28 private + 1 public + 1 round = 38 partitions.
+    # Filling every partition must still fit the hard 38-record test bound.
+    monkeypatch.setattr(protocol, "MAX_RECORDS", 38)
+    s = store(tuple(range(8)))
+    for player in s.players:
+        s.begin_turn(ctx(player))
+    outgoing = {p: 0 for p in s.players}
+    for low in s.players:
+        for high in s.players:
+            if low >= high:
+                continue
+            author, recipient = (low, high) if high - low <= 4 else (high, low)
+            outgoing[author] += 1
+            s.apply(ctx(author), message(f"pair-{low}-{high}", to=recipient))
+    author = next(p for p in s.players if outgoing[p] < 4)
+    public = message("public")
+    public["audience"] = {"kind": "public", "recipients": [p for p in s.players if p != author]}
+    s.apply(ctx(author), public)
+    s.advance_round([[1, p] for p in s.players])
+    assert len(s.records()) == 38
+    assert DiplomacyStore.from_records("fixture", s.players, s.records()).state_digest() == (
+        s.state_digest())
+    rejects_unchanged(s, lambda: s.begin_turn(ctx(0, 2)), "record_limit")
+
+
+def test_capacity_configuration_is_fixed_at_construction_and_no_borrowing(monkeypatch):
+    import civ_arena.diplomacy.protocol as protocol
+
+    # Two-player configuration: five partitions, two slots each, one unallocated.
+    monkeypatch.setattr(protocol, "MAX_RECORDS", 11)
+    s = store()
+    s.apply(ctx(), message("one"))
+    s.apply(ctx(), message("two"))
+    assert len(s.records()) == 3  # Other reservations and remainder cannot be borrowed.
+    rejects_unchanged(s, lambda: s.apply(ctx(), message("three")), "record_limit")
+    monkeypatch.setattr(protocol, "MAX_RECORDS", 10000)
+    rejects_unchanged(s, lambda: s.apply(ctx(), message("three")), "record_limit")
+    s.begin_turn(ctx(1))
+    assert len(s.project(1)["messages"]) == 2

@@ -66,7 +66,17 @@ Bounds are fixed module constants for this first slice: 4 new operations and
 2 new offers/counteroffers per own turn; 8 open offers and 8 agreed/active treaties
 per private channel; 8 obligations per treaty; 600 message characters; 1,600
 characters for the canonical consent document; 4,096 characters for a canonical
-command; 12 levels/256 JSON nodes; 10,000 protocol records. Projection retains the
+command; 12 levels/256 JSON nodes; at most 10,000 protocol records. Record admission
+uses fixed disjoint reservations established at construction: one for each private
+pair, one public-message reservation, one own-lease reservation per seat, and one
+completed-round reservation. With `n` configured seats there are
+`n*(n-1)/2 + n + 2` reservations, each holding `floor(10000 / reservation_count)`
+records. For two seats this is 5 × 2,000; for eight it is 38 × 263 = 9,994.
+Unused remainder and another reservation's spare capacity cannot be borrowed.
+There is no shared journal-length admission fallback. Saturating one private
+channel cannot consume another channel's or the lifecycle's reserved records.
+Quota limits/counts are included in the operator-only protocol state digest.
+Projection retains the
 latest 16 delivered messages plus an authorized omission count. Offer history is
 bounded by the protocol-record limit; future context integration still needs a
 separate budgeted selection of active/due terms. These constants do not modify
@@ -88,9 +98,9 @@ The state digest belongs to the protocol plane, not Civ VI or simulator state.
 
 ## Verified findings
 
-The isolated behavioral suite reports **59 passed, 0 failed, 0 skipped** in
-`/tmp/civ-diplomacy-d1-pytest-3.log`; the targeted Ruff log is
-`/tmp/civ-diplomacy-d1-ruff-2.log` (`All checks passed!`). Reproduction:
+The isolated behavioral suite reports **64 passed, 0 failed, 0 skipped** in
+`/tmp/civ-diplomacy-d1-private-capacity-pytest-r2.log`; the targeted Ruff log is
+`/tmp/civ-diplomacy-d1-private-capacity-ruff-r2.log` (`All checks passed!`). Reproduction:
 
 ```bash
 PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m pytest -q tests/test_diplomacy_protocol.py > /tmp/civ-diplomacy-d1-pytest.log 2>&1
@@ -103,7 +113,15 @@ unknown term capabilities, bounded payload/cost/history, replay tampering, and
 alias isolation. An initial test run exposed replay's Python bool/int equality
 alias: **52 passed, 1 failed**. Canonical typed comparison fixed it; the next run
 reported **53 passed**, and additional bounds/capacity cases produced the final
-59. These are offline source tests, not live negotiation acceptance.
+59. Independent review then found that the shared 10,000-record admission guard
+could reveal unrelated private traffic through `record_limit`, despite identical
+recipient projections. Fixed reservations replace that guard. Five added cases
+verify identical admissions for identical visible prefixes with/without a full
+hidden channel (both acceptance and rejection), reserved public/lifecycle work,
+exact saturation of all 38 maximum-roster partitions, and no borrowing. The final
+64-case run includes these regressions; the maximum-roster test also replays the
+fully saturated journal. These are offline source tests, not live negotiation
+acceptance.
 
 ## Follow-up probes
 
