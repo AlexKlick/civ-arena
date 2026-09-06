@@ -312,6 +312,20 @@ if me ~= {owner} then print("---END---") return end
 local pCity = CityManager.GetCity(me, {raw})
 if pCity == nil or pCity:GetID() ~= {raw} then print("---END---") return end
 local bq = pCity:GetBuildQueue()
+local function cap_number(v)
+    if type(v) == "number" and v == v and v >= 0 and v <= 10000
+        and v == math.floor(v) then return tostring(math.floor(v)) end
+    return "?"
+end
+local function cap_boolean(v)
+    if v == true or v == 1 then return "true" end
+    if v == false or v == 0 then return "false" end
+    return "?"
+end
+local function cap_domain(v)
+    if v == "DOMAIN_LAND" or v == "DOMAIN_SEA" or v == "DOMAIN_AIR" then return v end
+    return "?"
+end
 for row in GameInfo.Units() do
     local ok = false
     pcall(function() ok = bq:CanProduce(row.Hash, true) end)
@@ -327,7 +341,10 @@ for row in GameInfo.Units() do
             if string.sub(nm, 1, 5) == "UNIT_" then nm = string.sub(nm, 6) end
             local t = -1
             pcall(function() t = math.floor(bq:GetTurnsLeft(row.Hash)) end)
-            print("ITEMROW|unit|" .. nm .. "|" .. math.floor(row.Cost or 0) .. "|" .. t)
+            print("ITEMROW|unit|" .. nm .. "|" .. math.floor(row.Cost or 0) .. "|" .. t
+                .. "|" .. cap_number(row.Combat) .. "|" .. cap_number(row.RangedCombat)
+                .. "|" .. cap_domain(row.Domain) .. "|" .. cap_boolean(row.FoundCity)
+                .. "|" .. cap_number(row.BuildCharges))
         end
     end
 end

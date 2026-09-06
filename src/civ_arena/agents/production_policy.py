@@ -65,7 +65,8 @@ def _near_city(unit, cities):
 
 
 def choose_production(state: dict, *, player_id: int, city_id: str, options: list,
-                      directive: dict, reservations: dict[str, str] | None = None) -> dict:
+                      directive: dict, reservations: dict[str, str] | None = None,
+                      growth_policy=None) -> dict:
     """Choose one exact available item and explain inventory/eligibility decisions.
 
     Reservations last only for the caller's current economy pass. An accepted
@@ -149,7 +150,7 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
         selected = next((item for item in unit_order if item in eligible), None)
         if selected is not None:
             reason = "available_unit_below_target_fallback"
-    return {"version": 1, "city_id": city_id, "item_id": selected, "reason": reason,
+    result = {"version": 1, "city_id": city_id, "item_id": selected, "reason": reason,
             "count_basis": "owned_plus_observed_queues_plus_unobserved_accepted_reservations",
             "candidates": candidates, "nearby_confirmed_barbarians": threats,
             "defenders_owned_queued_reserved": defenders, "defense_goal": defense_goal,
@@ -157,3 +158,10 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
             "unavailable_preferences": [item for item in prefs if item not in catalog],
             "unavailable_target_ids": sorted(item for item in targets
                                              if catalog.get(item) != "unit")}
+
+    if growth_policy is not None:
+        return growth_policy.adjust_production(result, state=state, player_id=player_id,
+                                               city_id=city_id, options=options,
+                                               directive=directive,
+                                               reservations=reservations)
+    return result

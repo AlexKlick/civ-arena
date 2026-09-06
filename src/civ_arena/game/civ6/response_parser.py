@@ -298,13 +298,35 @@ def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
         if prefix != "ITEMROW":
             raise ValueError(f"non-item row in production read: {line!r}")
         parts = rest.split("|")
-        if len(parts) != 4:
-            raise ValueError(f"malformed ITEMROW (want 4 fields): {line!r}")
-        kind, item_id, cost, turns = parts
+        if len(parts) not in (4, 9):
+            raise ValueError(f"malformed ITEMROW (want 4 or 9 fields): {line!r}")
+        kind, item_id, cost, turns = parts[:4]
         if kind not in ("unit", "building"):
             raise ValueError(f"unknown production kind: {line!r}")
+        metadata = {}
+        if len(parts) == 9:
+            if kind != "unit":
+                raise ValueError("unit capability fields on non-unit production")
+            combat, ranged, domain, found, charges = parts[4:]
+            values = {}
+            for key, value in (("combat", combat), ("ranged", ranged),
+                               ("build_charges", charges)):
+                if value == "?":
+                    values[key] = None
+                else:
+                    number = _coerce_strict(value)
+                    if type(number) is not int or not 0 <= number <= 10000:
+                        raise ValueError("invalid unit capability number")
+                    values[key] = number
+            if domain not in ("?", "DOMAIN_LAND", "DOMAIN_SEA", "DOMAIN_AIR"):
+                raise ValueError("invalid unit capability domain")
+            if found not in ("?", "true", "false"):
+                raise ValueError("invalid unit capability founding flag")
+            metadata["unit_capabilities"] = {**values,
+                "domain": None if domain == "?" else domain,
+                "found_city": None if found == "?" else found == "true"}
         out.append({"item_id": item_id, "cost": _coerce_strict(cost),
-                    "turns": _coerce_strict(turns), "kind": kind})
+                    "turns": _coerce_strict(turns), "kind": kind, **metadata})
     order = {"unit": 0, "building": 1}
     return sorted(out, key=lambda i: (order[i["kind"]], i["item_id"]))
 
