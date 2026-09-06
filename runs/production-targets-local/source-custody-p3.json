@@ -1,0 +1,30 @@
+{
+  "worktree": "/home/alexk/civ-arena-production-targets-20260906",
+  "branch": "fix/production-roster-targets-20260906",
+  "base": "7705a601b6d7b8f989e66329c828c13971b72cd0",
+  "date": "2026-09-06",
+  "source_sha256": {
+    "src/civ_arena/agents/strategy_directive.py": "8d33eca1f3472ee6aac42680499625ad9fd42790f5dfc7a58ba3f148d49104a2",
+    "src/civ_arena/agents/production_policy.py": "fe45e980e8d1cb5c56804ae2a519589cf8a693ebd5dfd07ae3dc531acf049684",
+    "src/civ_arena/agents/llm/strategic_controller.py": "90a74558011154619e64d644a8b27660977a19854954eb8904de9155c7e324cd",
+    "tests/test_production_policy.py": "f295af6b4e2348446c56d6c797bbf99b9d9d4aacf85b26bb8dfb71347a09d391",
+    "tests/test_strategy_directive.py": "df0e66d005a3c4b0a438d067782021e164858a119c027ddb9d9ae6c31abda44b",
+    "tests/test_strategic_controller.py": "7d5a6b27cf90dae7f0df3a6083c8c0476540c3d801b35ef52ec70058967d13dc",
+    "tests/test_strategic_wiring.py": "fa045a76fdd8b97d3ebea7814a49ab4c3ba8b07602079922d5c2b57d3c9b659c",
+    "tests/test_scouting.py": "6184e909d623071bb4f1b47543738da0ce8e2315eee5d5f844e4ba5442519911",
+    "tests/test_scouting_standing_intent.py": "be7dbb75d6332f79bc2c6593b17c0a1cbb5d87fc65ab628f8f860abbeefeb44e",
+    "tests/test_scouting_nonprogress.py": "f5c57361f9bb6e81f301aaf786eef84f06ab78225b74915b611b8b6773132512",
+    "tests/test_context_curator.py": "92eb2cd112ec96a86c6093431754fce188bb85a9514645b466c6669b1f9f3488"
+  },
+  "focused_tests": {
+    "passed": 35,
+    "deselected": 31,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 0.22,
+    "log": "runs/production-targets-local/p3-focused.log"
+  },
+  "ruff": "runs/production-targets-local/p3-ruff.log",
+  "proof_lane": "repository_and_fake_only",
+  "live_provider_browser": "not_executed_from_this_branch"
+}
