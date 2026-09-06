@@ -555,3 +555,28 @@ forecast branches or calibrated confidence. Full-game victory, stronger
 strategy, stricter mod mutation accounting and automatic save recovery remain
 separate milestones. The next planning sequence is in
 [live-turn-pacing.md](live-turn-pacing.md).
+
+## Current requested target: 100 complete rounds
+
+The user increased the next live target to 100 full rounds on September 6.
+Use `configs/live-hotseat-strategic-minimax2-100.yaml` and `--rounds 100`: each
+model receives 100 turns, for 200 completed seat turns. The configuration changes
+only match identity and round limit from the sixty-round configuration. Provider
+settings, request caps, seed, movement allowance and operational deadlines remain
+unchanged. The two fresh thirty-round reliability checks remain separately named
+acceptance runs; a longer run does not substitute for those fresh-start checks.
+
+```bash
+PYTHONPATH=src PYTHONUNBUFFERED=1 DISPLAY=:1 \
+  /home/alexk/documents/civ-arena/.venv/bin/python scripts/live_zero_touch.py \
+  --session arch1 --kill-first \
+  --config configs/live-hotseat-strategic-minimax2-100.yaml --rounds 100 \
+  --startup-timeout 2700 --match-timeout 7200 --agent-turn-timeout 600 \
+  --recovery-timeout 180 --recovery-sweeps 8 \
+  --run-id UNIQUE_FRESH_RUN --runs-root runs
+```
+
+Validate its finalized event structure with `validate_run RUN_DIR --rounds 100`.
+Use the same stop-and-preserve procedure above. This target is not a completion
+claim. Four-player support is an isolated follow-up, not part of this two-seat
+configuration.

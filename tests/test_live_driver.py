@@ -521,10 +521,14 @@ async def test_observes_over_fake_and_foreign_projection():
         vmap = await adapter.observe(
             ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
         assert vmap["tiles"], "M17c: the revealed-tiles read is real"
-        for tile in vmap["tiles"].values():
-            # visible: terrain+owner+city; fog: terrain ONLY (the wire
-            # never reads fog ownership)
-            assert set(tile) in ({"terrain"}, {"terrain", "owner", "city"})
+        observable, remembered = adapter.visibility_for(0)
+        for key, tile in vmap["tiles"].items():
+            # Native terrain is static evidence; ownership remains visible-only.
+            expected_fields = {"terrain", "native_terrain"}
+            if key in observable:
+                expected_fields |= {"owner", "city"}
+            assert set(tile) == expected_fields
+            assert set(tile["native_terrain"]) == {"type", "biome", "hills"}
         # the projection with the adapter's own visibility ground truth
         policy = VisibilityPolicy()
         observable, remembered = adapter.visibility_for(0)
@@ -540,7 +544,7 @@ async def test_observes_over_fake_and_foreign_projection():
             if key in observable:
                 assert "owner_id" in tile
             else:
-                assert set(tile) == {"coord", "terrain"}
+                assert set(tile) == {"coord", "terrain", "native_terrain"}
     finally:
         await server.stop()
 
