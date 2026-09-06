@@ -3,6 +3,14 @@
 (() => {
   const $ = id => document.getElementById(id);
   const svgNS = 'http://www.w3.org/2000/svg';
+  const seatPalette = [
+    {name: 'gold', color: '#e5bd73', line: '#806e4d', icon: '♜'},
+    {name: 'teal', color: '#65cbb8', line: '#3b746b', icon: '♝'},
+    {name: 'blue', color: '#89b9f1', line: '#517297', icon: '♞'},
+    {name: 'purple', color: '#c3a2ee', line: '#77618f', icon: '♛'}
+  ];
+  const seatTheme = index => seatPalette[index % seatPalette.length];
+  const seatLabel = agent => `Seat ${Number(agent.player_id) + 1}`;
   const state = {runId: '', runPinned: false, turn: null, follow: true, filter: 'all',
     data: null, selectedCall: null, busy: false, timer: null, lastGraph: '', lastCards: '',
     callsByKey: new Map(), lastStrategy: ''};
@@ -57,8 +65,7 @@
     return (state.data?.turns || []).filter(turn => String(turn.turn) === String(state.turn));
   }
   function agentList() {
-    const agents = [...(state.data?.agents || [])].sort((a, b) => Number(a.player_id) - Number(b.player_id));
-    return [agents[0] || {player_id: 0}, agents[1] || {player_id: 1}];
+    return [...(state.data?.agents || [])].sort((a, b) => Number(a.player_id) - Number(b.player_id));
   }
   function seatTurn(agent) { return selectedTurns().find(turn => String(turn.player_id) === String(agent.player_id)); }
   function updateConnection(ok, message) {
@@ -105,9 +112,11 @@
       const turn = seatTurn(agent);
       const calls = turn?.calls || [];
       const model = agent.model || agent.agent_id || 'Agent not recorded';
-      const card = element('article', `seat-card ${seat === 0 ? 'gold' : 'teal'}`);
-      const identity = append(element('div', 'seat-identity'), element('div', 'seat-icon', seat === 0 ? '♜' : '♝'),
-        append(element('div'), element('p', 'eyebrow', `SEAT ${seat + 1}`), element('h2', '', model)));
+      const theme = seatTheme(seat), card = element('article', 'seat-card');
+      card.style.setProperty('--seat', theme.color);
+      card.style.setProperty('--tint', `${theme.color}08`);
+      const identity = append(element('div', 'seat-identity'), element('div', 'seat-icon', theme.icon),
+        append(element('div'), element('p', 'eyebrow', seatLabel(agent).toUpperCase()), element('h2', '', model)));
       const statusLabels = {completed: 'Turn complete', running: 'Turn in progress', active: 'Turn in progress',
         aborted: 'Turn stopped', incomplete: 'Unfinished', pending: 'Awaiting turn'};
       append(card, append(element('div', 'seat-header'), identity,
@@ -142,7 +151,7 @@
   }
   function renderGraph() {
     const turns = selectedTurns(), agents = agentList();
-    const signature = JSON.stringify([state.runId, turns, state.filter]);
+    const signature = JSON.stringify([state.runId, agents, turns, state.filter]);
     state.callsByKey = new Map();
     turns.forEach(turn => (turn.calls || []).forEach(call => state.callsByKey.set(callKey(turn, call), {turn, call})));
     if (signature === state.lastGraph) { renderDetail(); return; }
@@ -156,26 +165,33 @@
     const graph = $('actionGraph');
     const maximum = Math.max(...lanes.map(lane => lane.calls.length), 0);
     const height = maximum ? maximum * 75 + 59 : 300;
-    graph.setAttribute('viewBox', `0 0 720 ${height}`);
+    const width = Math.max(720, agents.length * 360);
+    graph.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    graph.style.minWidth = `${agents.length > 2 ? width : 500}px`;
+    $('graphHint').textContent = agents.length > 2 ? 'Scroll sideways for every seat · select any call' : 'Select any call to inspect it';
+    $('seatLegend').replaceChildren(...agents.map((agent, index) => {
+      const dot = element('span', 'tiny-dot'); dot.style.background = seatTheme(index).color;
+      return append(element('span', 'seat-legend-entry'), dot, element('span', '', seatLabel(agent)));
+    }));
     graph.replaceChildren();
     const defs = svg('defs');
-    ['gold', 'teal'].forEach((name, index) => {
+    seatPalette.forEach(({name, line}) => {
       const marker = svg('marker', {id: `arrow-${name}`, viewBox: '0 0 10 10', refX: 5, refY: 5,
         markerWidth: 5, markerHeight: 5, orient: 'auto-start-reverse'});
-      append(marker, svg('path', {d: 'M 0 0 L 10 5 L 0 10 z', fill: index === 0 ? '#806e4d' : '#3b746b'}));
+      append(marker, svg('path', {d: 'M 0 0 L 10 5 L 0 10 z', fill: line}));
       append(defs, marker);
     });
     append(graph, defs);
-    lanes.forEach(({turn, calls}, seat) => {
-      const x = seat === 0 ? 29 : 389, color = seat === 0 ? '#e5bd73' : '#65cbb8';
-      append(graph, svg('text', {x: x + 5, y: 27, fill: color, class: 'lane-label'}, `SEAT ${seat + 1}`));
+    lanes.forEach(({agent, turn, calls}, seat) => {
+      const x = 29 + seat * 360, {name, color, line} = seatTheme(seat);
+      append(graph, svg('text', {x: x + 5, y: 27, fill: color, class: 'lane-label'}, seatLabel(agent).toUpperCase()));
       if (!calls.length && maximum) append(graph, svg('text', {x: x + 5, y: 70, fill: '#8292a8', 'font-size': 11}, 'No matching calls recorded'));
       calls.forEach((call, index) => {
         const y = 44 + index * 75, key = callKey(turn, call);
         if (index > 0) append(graph, svg('path', {d: `M ${x + 149} ${y - 22} L ${x + 149} ${y - 7}`,
-          stroke: seat === 0 ? '#806e4d' : '#3b746b', 'stroke-width': 1.2, 'marker-end': `url(#arrow-${seat === 0 ? 'gold' : 'teal'})`}));
-        const group = svg('g', {class: `graph-node seat-${seat === 0 ? 'gold' : 'teal'}${state.selectedCall === key ? ' selected' : ''}`, role: 'button', tabindex: 0,
-          'aria-label': `Seat ${seat + 1}, ${humanize(call.tool)}, ${call.status || 'pending'}, recorded call ${call.seq}`,
+          stroke: line, 'stroke-width': 1.2, 'marker-end': `url(#arrow-${name})`}));
+        const group = svg('g', {class: `graph-node${state.selectedCall === key ? ' selected' : ''}`, style: `--node-color:${color}`, role: 'button', tabindex: 0,
+          'aria-label': `${seatLabel(agent)}, ${humanize(call.tool)}, ${call.status || 'pending'}, recorded call ${call.seq}`,
           'data-key': key});
         append(group, svg('title', {}, `${call.tool} · ${call.status || 'pending'} · ${localTime(call.ts)}`),
           svg('rect', {x, y, width: 301, height: 54, rx: 8, class: 'node-bg'}),
@@ -217,7 +233,7 @@
     status.className = nextBadge.className; status.textContent = nextBadge.textContent; status.hidden = false;
     const meta = element('dl', 'detail-meta');
     const seat = agentList().findIndex(agent => String(agent.player_id) === String(turn.player_id));
-    [['Seat / turn', `${seat < 0 ? '—' : seat + 1} / ${turn.turn}`], ['Recorded call', `#${call.seq}`],
+    [['Seat / turn', `${seat < 0 ? '—' : Number(turn.player_id) + 1} / ${turn.turn}`], ['Recorded call', `#${call.seq}`],
       ['Requested at', localTime(call.ts)], ['Response time', duration(secondsBetween(call.ts, call.ended_at))]].forEach(([label, value]) =>
       append(meta, append(element('div'), element('dt', '', label), element('dd', '', value))));
     body.replaceChildren(meta);
@@ -227,13 +243,13 @@
     body.scrollTop = scrollPosition;
   }
   function renderStrategy() {
-    const signature = JSON.stringify([state.runId, selectedTurns().map(turn => [turn.player_id, turn.turn, turn.strategy, turn.scouting_graph])]);
+    const signature = JSON.stringify([state.runId, agentList(), selectedTurns().map(turn => [turn.player_id, turn.turn, turn.strategy, turn.scouting_graph])]);
     if (signature === state.lastStrategy) return;
     state.lastStrategy = signature;
     const panels = agentList().map((agent, seat) => {
       const turn = seatTurn(agent), strategy = turn?.strategy, graph = turn?.scouting_graph;
-      const panel = element('article', `strategy-seat ${seat === 0 ? 'gold' : 'teal'}`);
-      append(panel, element('h3', '', `Seat ${seat + 1}`));
+      const theme = seatTheme(seat), panel = element('article', `strategy-seat ${theme.name}`);
+      append(panel, element('h3', '', seatLabel(agent)));
       if (!strategy) {
         append(panel, element('p', 'subtle', 'No strategy controller record for this turn.'));
         return panel;
@@ -262,10 +278,10 @@
           const chart = svg('svg', {viewBox: `0 0 520 ${Math.max(90, candidates.length * 42 + 20)}`, role: 'img',
             'aria-label': `Scouting alternatives for ${decision.unit_id}`});
           const middle = candidates.length * 21 + 10;
-          append(chart, svg('circle', {cx: 24, cy: middle, r: 7, fill: seat ? '#65cbb8' : '#e5bd73'}));
+          append(chart, svg('circle', {cx: 24, cy: middle, r: 7, fill: theme.color}));
           candidates.forEach((candidate, index) => {
             const y = 20 + index * 42, probability = finite(candidate.probability) ? candidate.probability : null;
-            const excluded = Boolean(candidate.excluded), color = excluded ? '#64768e' : seat ? '#65cbb8' : '#e5bd73';
+            const excluded = Boolean(candidate.excluded), color = excluded ? '#64768e' : theme.color;
             append(chart, svg('path', {d: `M 31 ${middle} L 67 ${y}`, stroke: color, opacity: 0.5, fill: 'none'}),
               svg('rect', {x: 72, y: y - 12, width: probability == null ? 0 : Math.max(0, Math.min(1, probability)) * 120,
                 height: 23, rx: 3, fill: color, opacity: 0.3}),

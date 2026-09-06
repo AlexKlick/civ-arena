@@ -17,11 +17,11 @@
     </header>
     <main>
       <section class="intro">
-        <div><p class="eyebrow">TWO SEATS. ONE WORLD.</p><h1>Watch the game unfold.</h1><p class="subtitle">The agents’ recorded actions, plans, and progress, turn by turn.</p></div>
+        <div><p class="eyebrow">ONE WORLD. EVERY TURN.</p><h1>Watch the game unfold.</h1><p class="subtitle">The agents’ recorded actions, plans, and progress, turn by turn.</p></div>
         <div class="match-state"><span id="matchStatus" class="badge">Waiting for a match</span><span id="lastEvent">No events received yet</span></div>
       </section>
       <section class="metrics" aria-label="Match progress">
-        <article><span class="metric-label">COMPLETE ROUNDS</span><strong id="roundCount">—</strong><span class="metric-foot">Both seats finished</span></article>
+        <article><span class="metric-label">COMPLETE ROUNDS</span><strong id="roundCount">—</strong><span class="metric-foot">All configured seats finished</span></article>
         <article><span class="metric-label">SEAT TURNS</span><strong id="turnCount">—</strong><span class="metric-foot">Completed turns</span></article>
         <article><span class="metric-label">MODEL REQUESTS</span><strong id="requestCount">—</strong><span class="metric-foot">Recorded in this match</span></article>
         <article><span class="metric-label">WATCHDOG VIOLATIONS</span><strong id="violationCount">—</strong><span id="violationFoot" class="metric-foot">Awaiting match records</span></article>
@@ -39,7 +39,7 @@
           <div class="panel-heading"><div><p class="eyebrow">TURN JOURNAL</p><h2>Action sequence <span id="graphTurn" class="subtle"></span></h2></div><span class="legend"><span aria-hidden="true">↓</span> Recorded order</span></div>
           <div class="graph-tools"><div class="filters" role="group" aria-label="Filter recorded calls"><button type="button" data-filter="all" class="selected" aria-pressed="true">All calls</button><button type="button" data-filter="actions" aria-pressed="false">Actions</button><button type="button" data-filter="observations" aria-pressed="false">Observations</button></div><span id="callCount" class="subtle">0 calls</span></div>
           <div id="graphScroll" class="graph-scroll"><svg id="actionGraph" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Recorded actions in each seat’s turn"></svg><div id="graphEmpty" class="graph-empty">Select a match to explore its turns.</div></div>
-          <div class="graph-foot"><span class="tiny-dot gold"></span> Seat 1 <span class="tiny-dot teal"></span> Seat 2 <span class="graph-hint">Select any call to inspect it</span></div>
+          <div class="graph-foot"><span id="seatLegend" class="seat-legend" aria-label="Seat colors"></span> <span id="graphHint" class="graph-hint">Select any call to inspect it</span></div>
         </div>
         <aside class="detail-panel panel" aria-label="Selected call details"><div class="panel-heading"><div><p class="eyebrow">CLOSER LOOK</p><h2 id="detailTitle">Select a call</h2></div><span id="detailStatus" class="badge" hidden></span></div><div id="detailBody" class="detail-body"><div class="detail-empty"><span aria-hidden="true">⌖</span><p>Every action leaves a record.</p><small>Choose a node to see what was requested and what the game returned.</small></div></div></aside>
       </section>
