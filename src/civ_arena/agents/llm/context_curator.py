@@ -55,6 +55,7 @@ class ContextCurator:
         self.research_force = False
         self.revision = 0
         self.focus: str | None = None
+        self.last_render_audit: dict | None = None
 
     async def read(self, name: str, **args) -> Any:
         result = await getattr(self.facade, name)(**args)
@@ -227,7 +228,10 @@ class ContextCurator:
                              else 'deferred')
             for city in self.own('get_cities')}}
 
-    def render(self) -> str:
+    def render(self, *, adaptive_task: str | None = None,
+               target_chars: int | None = None) -> str:
+        if adaptive_task is not None and adaptive_task not in ('strategy', 'economy', 'contact'):
+            raise ValueError('unsupported adaptive briefing task')
         if self.dirty:
             raise MatchAborted('controller context requires post-action refresh')
         units = self.state['get_units']
@@ -266,7 +270,18 @@ class ContextCurator:
             doc['cold_biome_evidence'] = cold_biome_evidence(tiles, reference)
         if self.focus:
             anchors.append(self.focus)
-        ordered = sorted(tiles, key=lambda key: (min((distance(key, at) for at in anchors),
+        if adaptive_task == 'contact':
+            anchors.extend(row['coord'] for row in units + cities if row not in mine_u + mine_c)
+        focus_anchors = ([row['coord'] for row in mine_c] if adaptive_task == 'economy'
+                         else anchors) or anchors
+        if adaptive_task is not None:
+            doc['briefing_scope'] = {'task': adaptive_task,
+                'tactical_overrides_allowed': adaptive_task != 'economy',
+                'actors': 'all projected actors retained',
+                'mandatory_terrain': 'known adjacent tiles of all owned actors; '
+                    'contact review also includes observed contacts',
+                'optional_terrain': 'known radius-two tiles; unrelated distant map omitted'}
+        ordered = sorted(tiles, key=lambda key: (min((distance(key, at) for at in focus_anchors),
                                                      default=0), key))
         for key in ordered:
             if any(distance(key, at) <= 1 for at in anchors):
@@ -278,16 +293,21 @@ class ContextCurator:
         compact_actors = False
 
         def rendered() -> str:
+            if adaptive_task is not None:
+                variants = (doc, compact_terrain(doc), compact_entities(doc),
+                            compact_entities(compact_terrain(doc)))
+                return min((CONTEXT_MARKER + encode(view) for view in variants), key=len)
             view = compact_terrain(doc) if compact else doc
             return CONTEXT_MARKER + encode(compact_entities(view) if compact_actors else view)
 
-        if compact and len(rendered()) > self.budget:
+        if adaptive_task is None and compact and len(rendered()) > self.budget:
             compact_actors = True
-        if len(rendered()) > self.budget:
+        if adaptive_task is None and len(rendered()) > self.budget:
             raise MatchAborted('critical owned state and nearby terrain exceed context budget')
+        mandatory_chars = len(rendered())
         included = {row['coord'] for row in doc['terrain']}
         for key in ordered:
-            if len(doc['terrain']) >= max(48, required):
+            if adaptive_task is None and len(doc['terrain']) >= max(48, required):
                 break
             if key in included or not any(distance(key, at) <= 2 for at in anchors):
                 continue
@@ -295,11 +315,25 @@ class ContextCurator:
                    **selected(tiles[key], ('owner_id', 'city_id'))}
             doc['terrain'].append(row)
             doc['terrain_omitted'] -= 1
-            if len(rendered()) > self.budget:
+            limit = self.budget if adaptive_task is None else target_chars
+            if limit is not None and len(rendered()) > limit:
                 doc['terrain'].pop()
                 doc['terrain_omitted'] += 1
                 break
-        return rendered()
+        result = rendered()
+        if adaptive_task is not None:
+            self.last_render_audit = {
+                'task': adaptive_task, 'soft_target_chars': target_chars,
+                'mandatory_context_chars': mandatory_chars, 'context_chars': len(result),
+                'mandatory_terrain_rows': required, 'retained_terrain_rows': len(doc['terrain']),
+                'terrain_omitted': doc['terrain_omitted'],
+                'owned_units': len(mine_u), 'owned_cities': len(mine_c),
+                'visible_contacts': len(units) + len(cities) - len(mine_u) - len(mine_c),
+                'focus_coordinates': sorted(set(focus_anchors)),
+                'expanded': target_chars is not None and mandatory_chars > target_chars,
+                'expansion_reason': 'mandatory relevant observations retained beyond soft target'
+                    if target_chars is not None and mandatory_chars > target_chars else None}
+        return result
 
 
 def replace_context(messages: list[dict], content: list[dict], snapshot: str) -> None:

@@ -21,6 +21,23 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
+class AdaptiveContextSpec:
+    """Opt-in targets are soft; only provider-counted complete requests face a hard window."""
+    provider_context_tokens: int
+    strategy_target_chars: int | None = None
+    economy_target_chars: int | None = None
+    contact_target_chars: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.provider_context_tokens) is not int or self.provider_context_tokens < 1:
+            raise ConfigError('adaptive_context.provider_context_tokens must be positive integer')
+        for task in ('strategy', 'economy', 'contact'):
+            value = getattr(self, task + '_target_chars')
+            if value is not None and (type(value) is not int or value < 1):
+                raise ConfigError('adaptive context targets must be positive integers or null')
+
+
+@dataclass(frozen=True)
 class LLMSpec:
     """Provider wiring for a ``policy: llm`` agent. The wire label used by
     telemetry is ``model_id`` — what actually went on the wire, not the
@@ -35,6 +52,7 @@ class LLMSpec:
     request_timeout_s: float = 120.0
     max_retries: int = 2
     max_requests_per_match: int = 2000
+    adaptive_context: AdaptiveContextSpec | None = None
 
 
 def _parse_llm(block: Any, where: str) -> LLMSpec:
@@ -76,12 +94,20 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
             f"{where}.llm: request_timeout_s must be finite and in "
             "(0, 600] seconds"
         )
+    adaptive = block.get('adaptive_context')
+    if adaptive is not None:
+        fields = {'provider_context_tokens', 'strategy_target_chars',
+                  'economy_target_chars', 'contact_target_chars'}
+        if not isinstance(adaptive, dict) or set(adaptive) - fields \
+                or 'provider_context_tokens' not in adaptive:
+            raise ConfigError('adaptive_context has unsupported or missing fields')
+        adaptive = AdaptiveContextSpec(**adaptive)
     return LLMSpec(
         base_url=base_url, api_key_env=api_key_env, model_id=model_id,
         max_tokens=ints["max_tokens"], max_tool_rounds=ints["max_tool_rounds"],
         max_result_chars=ints["max_result_chars"],
         request_timeout_s=float(timeout), max_retries=ints["max_retries"],
-        max_requests_per_match=ints["max_requests_per_match"],
+        max_requests_per_match=ints["max_requests_per_match"], adaptive_context=adaptive,
     )
 
 

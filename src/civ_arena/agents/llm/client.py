@@ -20,6 +20,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from civ_arena.agents.llm.request_budget import TokenCount, input_payload, payload_hash
 from civ_arena.config import LLMSpec
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -87,10 +88,13 @@ class MiniMaxMessagesClient:
     the durable spend ledger depends on it (see coordinator spend.jsonl)."""
 
     def __init__(self, spec: LLMSpec, auth_style: str = "x-api-key",
-                 on_post: Callable[[], None] | None = None) -> None:
+                 on_post: Callable[[], None] | None = None,
+                 on_request_post: Callable[[str], None] | None = None) -> None:
         self.spec = spec
         self.auth_style = auth_style
         self.on_post = on_post
+        self.on_request_post = on_request_post
+        self.posts_by_kind = {'generation': 0, 'count_tokens': 0}
         self.posts_sent = 0  # every POST, retries included (budget authority)
         self._http: httpx.AsyncClient | None = None
 
@@ -151,16 +155,30 @@ class MiniMaxMessagesClient:
     async def create(self, *, system: str, messages: list[dict[str, Any]],
                      tools: list[dict[str, Any]],
                      tool_choice: dict[str, Any] | None = None) -> ModelReply:
-        url = self.spec.base_url.rstrip("/") + "/messages"
-        body = {
-            "model": self.spec.model_id,
-            "max_tokens": self.spec.max_tokens,
-            "system": system,
-            "messages": messages,
-            "tools": tools,
-        }
-        if tool_choice is not None:
-            body["tool_choice"] = tool_choice
+        body = input_payload(self.spec.model_id, system=system, messages=messages,
+                             tools=tools, tool_choice=tool_choice)
+        body['max_tokens'] = self.spec.max_tokens
+        return self._parse(await self._post_doc(body, 'generation', '/messages'))
+
+    async def count_tokens(self, *, system: str, messages: list[dict[str, Any]],
+                           tools: list[dict[str, Any]],
+                           tool_choice: dict[str, Any] | None = None) -> TokenCount:
+        body = input_payload(self.spec.model_id, system=system, messages=messages,
+                             tools=tools, tool_choice=tool_choice)
+        try:
+            async with asyncio.timeout(self.spec.request_timeout_s):
+                doc = await self._post_doc(body, 'count_tokens', '/messages/count_tokens')
+        except TimeoutError as exc:
+            raise ModelUnavailable('token counter deadline expired') from exc
+        tokens = doc.get('input_tokens') if isinstance(doc, dict) else None
+        if type(tokens) is not int or tokens < 1:
+            raise ModelUnavailable('token counter returned invalid input_tokens')
+        if 'model' in doc and doc['model'] != self.spec.model_id:
+            raise ModelUnavailable('token counter model mismatch')
+        return TokenCount(tokens, self.spec.model_id, payload_hash(body))
+
+    async def _post_doc(self, body: dict, request_kind: str, path: str) -> Any:
+        url = self.spec.base_url.rstrip('/') + path
         if self._http is None:
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.spec.request_timeout_s))
@@ -175,6 +193,9 @@ class MiniMaxMessagesClient:
             # resolution): a missing key burns nothing, a transport failure
             # mid-flight still consumed a slot (the server may have received it)
             self.posts_sent += 1
+            self.posts_by_kind[request_kind] += 1
+            if self.on_request_post is not None:
+                self.on_request_post(request_kind)
             if self.on_post is not None:
                 self.on_post()  # durable spend ledger (per attempt)
             try:
@@ -185,14 +206,14 @@ class MiniMaxMessagesClient:
                                 if self.auth_style == "bearer"
                                 else {"x-api-key": sent_key})})
             except httpx.TransportError as exc:
-                last_error = f"transport error: {exc}"
+                last_error = self._redact(f"transport error: {exc}", sent_key)
                 if attempt < self.spec.max_retries:
                     await asyncio.sleep(0.5 * 2 ** attempt)
                     continue
                 raise ModelUnavailable(last_error) from exc
             if resp.status_code == 200:
                 try:
-                    return self._parse(resp.json())
+                    return resp.json()
                 except ValueError as exc:  # invalid JSON in a 200 body
                     raise ModelUnavailable(
                         f"malformed response: body is not JSON ({exc})"
