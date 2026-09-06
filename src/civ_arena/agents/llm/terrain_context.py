@@ -11,6 +11,11 @@ def compact_terrain(doc: dict) -> dict:
     the corresponding source field was absent, not an observed empty value.
     Controller planning continues to use its unchanged full projected state.
     """
+    if any(key in tile and tile[key] is None for tile in doc['terrain']
+           for key in ('native_terrain', 'owner_id', 'city_id')):
+        # A null cell in a packed row denotes source-field absence. Preserve
+        # explicit-null observations as objects rather than collapse the two.
+        return doc
     palette: list[dict] = []
     indexes: dict[str, int] = {}
     rows = []

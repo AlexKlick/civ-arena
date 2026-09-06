@@ -154,6 +154,25 @@ def test_actor_tables_preserve_absence_false_zero_and_explicit_null():
     assert doc == before
 
 
+@pytest.mark.parametrize('field', ['owner_id', 'city_id', 'native_terrain'])
+def test_terrain_explicit_null_preserves_objects_instead_of_becoming_absent(field):
+    doc = {'terrain': [{'coord': '0,0', 'terrain': 'PLAINS', field: None},
+                       {'coord': '0,1', 'terrain': 'PLAINS'}]}
+    assert terrain_rows(compact_terrain(doc)) == doc['terrain']
+    assert 'terrain_encoding' not in compact_terrain(doc)
+
+
+async def test_curator_never_conflates_explicit_null_and_absent_ownership():
+    facade = RetainedProjection()
+    facade.state['get_visible_map']['tiles']['43,11'].update(owner_id=None, city_id=None)
+    curator = ContextCurator(facade, 1, 7000)
+    await curator.refresh()
+    doc = json.loads(curator.render().removeprefix(CONTEXT_MARKER))
+    assert 'entity_columns' in doc and 'terrain_encoding' not in doc
+    actual = next(row for row in terrain_rows(doc) if row['coord'] == '43,11')
+    assert actual['owner_id'] is None and actual['city_id'] is None
+
+
 async def test_source_classified_visible_barbarian_reaches_model_context():
     facade = RetainedProjection()
     facade.state['get_units'].append({'unit_id': 'u63:1', 'owner_id': 63,
