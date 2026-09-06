@@ -7,6 +7,16 @@ from pathlib import Path
 
 from civ_arena.canonical import atomic_write_text, canonical
 from civ_arena.catalog.base import CatalogError, extract, query
+from civ_arena.catalog.projection import MAX_OBSERVATION_BYTES, project
+
+
+def _unique_object(pairs: list[tuple]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise CatalogError('duplicate observation JSON field')
+        result[key] = value
+    return result
 
 
 def main() -> None:
@@ -20,6 +30,12 @@ def main() -> None:
     lookup.add_argument('node_id')
     lookup.add_argument('--depth', type=int, default=3)
     lookup.add_argument('--output', type=Path)
+    overlay = commands.add_parser('project')
+    overlay.add_argument('--catalog', type=Path, required=True)
+    overlay.add_argument('--observations', type=Path, required=True)
+    overlay.add_argument('node_id')
+    overlay.add_argument('--depth', type=int, default=3)
+    overlay.add_argument('--output', type=Path)
     args = parser.parse_args()
     try:
         if args.command == 'extract':
@@ -27,7 +43,17 @@ def main() -> None:
         else:
             if args.catalog.stat().st_size > 64 * 1024 * 1024:
                 raise CatalogError('catalog artifact size bound exceeded')
-            doc = query(json.loads(args.catalog.read_text()), args.node_id, args.depth)
+            catalog = json.loads(args.catalog.read_text())
+            if args.command == 'project':
+                if args.observations.stat().st_size > MAX_OBSERVATION_BYTES:
+                    raise CatalogError('observation byte bound exceeded')
+                data = args.observations.read_bytes()
+                if len(data) > MAX_OBSERVATION_BYTES:
+                    raise CatalogError('observation byte bound exceeded')
+                observations = json.loads(data, object_pairs_hook=_unique_object)
+                doc = project(catalog, args.node_id, observations, args.depth)
+            else:
+                doc = query(catalog, args.node_id, args.depth)
         if args.output:
             atomic_write_text(args.output, canonical(doc) + '\n')
             print(json.dumps({'output': str(args.output), 'catalog_digest': doc['catalog_digest'],

@@ -145,6 +145,10 @@ rejection, and explicit old-version refusal. The first correction lint check
 found one long SQL fixture line; its corrected check passed. Original independent
 review evidence remains in `/tmp/civ-catalog-independent-probes-867fb5f.log`.
 
+The separate [observed-fact overlay](observed-dependency-projection.md) now
+projects supplied research/unlock facts onto this source graph without changing
+the catalog or evaluating effective-game feasibility.
+
 ## Follow-up probes
 
 Independent read-only review must bind this exact commit. The next integration
