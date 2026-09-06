@@ -138,8 +138,17 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
         local name = "UNKNOWN"
         if info ~= nil then name = info.UnitType end
 {_strip_prefix_lua("name", "UNIT_")}
-        local hp = 100
-        pcall(function() hp = unit:GetMaxDamage() - unit:GetDamage() end)
+        -- Missing/invalid native health must not masquerade as fully healed.
+        local hp, maxhp, healthValid = "unknown", "unknown", false
+        pcall(function()
+            local maximum, damage = unit:GetMaxDamage(), unit:GetDamage()
+            if type(maximum) == "number" and type(damage) == "number"
+                and maximum > 0 and maximum <= 1000000
+                and maximum == math.floor(maximum) and damage == math.floor(damage)
+                and damage >= 0 and damage <= maximum then
+                maxhp, hp, healthValid = maximum, maximum - damage, true
+            end
+        end)
         local moves = 0
         pcall(function() moves = math.floor(unit:GetMovesRemaining()) end)
         local maxmoves = 0
@@ -159,7 +168,7 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
             .. "|" .. (x - math.floor(y / 2)) .. "|" .. y
             .. "|" .. hp .. "|" .. moves .. "|" .. maxmoves
             .. "|" .. combat .. "|" .. ranged .. "|" .. tostring(fortified)
-            .. "|" .. tostring(barbarian))
+            .. "|" .. tostring(barbarian) .. "|" .. maxhp .. "|" .. tostring(healthValid))
         end
     end
 end

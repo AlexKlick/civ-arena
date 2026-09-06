@@ -130,6 +130,9 @@ class VisibilityPolicy:
         key = f"{u['q']},{u['r']}"
         metadata = ({"is_barbarian": u["is_barbarian"]}
                     if type(u.get("is_barbarian")) is bool else {})
+        health = ({"max_hp": u["max_hp"], "health_valid": u["health_valid"]}
+                  if "max_hp" in u and type(u.get("health_valid")) is bool else {})
+        hp_bucket = u["hp"] // 25 if type(u.get("hp")) is int else None
         if u["owner"] == player_id:
             return {
                 "unit_id": u["unit_id"],
@@ -137,7 +140,8 @@ class VisibilityPolicy:
                 "type": u["type"],
                 "coord": key,
                 "hp": u["hp"],
-                "hp_bucket": u["hp"] // 25,
+                "hp_bucket": hp_bucket,
+                **health,
                 "movement": u["movement"],
                 "max_movement": u["max_movement"],
                 "strength": u["strength"],
@@ -153,7 +157,7 @@ class VisibilityPolicy:
             "type": u["type"],
             "coord": key,
             "hp": u["hp"],
-            "hp_bucket": u["hp"] // 25,
+            "hp_bucket": hp_bucket,
             "movement": u["movement"],
             "max_movement": u["max_movement"],
             "strength": u["strength"],
