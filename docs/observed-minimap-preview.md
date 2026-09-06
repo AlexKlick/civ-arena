@@ -1,0 +1,182 @@
+# Retained-observation minimap prototype
+
+This standalone browser prototype renders the actual projected packets retained
+from the stopped `minimax100-20260906T193543Z` attempt. It is a design and offline
+browser implementation, not a current live game dashboard or model-thought feed.
+The existing dashboard remains unchanged. No engine, tuner, desktop input, or
+provider calls are used.
+
+## View and interaction
+
+The atlas uses native biome colors where supplied, normalized terrain otherwise,
+and a hill/mountain marker from source metadata. Hexes can be selected with a
+mouse or keyboard. Units and cities can be selected on the map or from the actor
+list. Drag blank space to pan, scroll or use buttons to zoom, reset with Fit
+observations, and click the small overview to navigate. The mobile layout places
+the evidence inspector below the map.
+
+The map has no synthetic continental outline. Blank space means unsupplied data.
+Observed extents determine the viewport, not world bounds. Increasing axial `r`
+is drawn upward according to the established engine-grid north convention;
+this does not establish active map dimensions, wrapping, latitude, or camera
+rotation. The installed `base/maps/utility/maputilities.lua` lines 431–455 and
+499 establish the grid convention (SHA-256
+`a2214f53817e24209ecf0aae4c45fbc065ff928668157771b4c025f518090927`);
+retained proof is in the main run's earlier `map-axis-source-proof.log`.
+
+Packets contain selected model-context terrain, including remembered tiles. The
+prototype accumulates only supplied coordinates per player, ordered by packet
+sequence. Each tile retains its last packet receipt and original observation.
+Dim tiles were absent from the selected latest packet; this is **receipt age**,
+not engine visibility or the time the tile was actually seen. Tile ownership may
+also be stale. Latest-packet tiles are not asserted to be currently visible.
+`terrain_omitted` is shown separately; omitted terrain cannot be reconstructed.
+No percentage of the world explored is inferred.
+
+Actors come only from the selected packet. An absent unit is not carried forward
+or declared dead. Foreign actors remain foreign observations; only explicit
+`is_barbarian=true` receives the barbarian marker. Health points and coarse
+health buckets are labeled separately. There is no war-state inference.
+
+## Perspective and custody contract
+
+`--player N` embeds only that player's projected observations and eligible
+same-player graph audits. It does not hide other seats with CSS. `--spectator`
+is an explicit operator export containing multiple player perspectives. Its
+player selector is a display filter, not an access boundary. Combined view uses
+each seat's latest supplied packet, which can differ in turn and time. Overlapping
+tile receipts remain separate in the inspector; paint order takes the first
+seat for color and does not resolve conflicting observations. This is not an
+omniscient or simultaneous spectator state. Do not hand a spectator artifact to
+an agent as a player-only briefing.
+
+Every packet's retained request text must match its declared character count and
+SHA-256. Its projected-state object must exactly match the state after the
+controller-context marker in that request. When an event stream is supplied,
+the packet sequence, player, turn, and context hash must match a
+`strategy_request` audit. Mixed match/instance identifiers and duplicate event
+sequences are rejected. Graphs must be same-seat and no later than the selected
+packet in both event sequence and turn. Without events, event binding is labeled
+unverified and no graph is available. These checks bind supplied artifacts; they
+do not authenticate a live engine or prove the upstream projection's fog rules.
+
+The bundle records canonical packet/event hashes, original source observations,
+receipt sequence/turn/time, run identities, and a complete deterministic bundle
+digest. Raw source-file hashes are retained separately in the evidence manifest.
+No event raw text, foreign-seat packet metadata, unrelated audit kinds, or
+provider credentials enter a player export. Source paths and source files are
+operator-supplied; no `.env`, engine socket, remote URL, or implicit local secret
+file is read. The CLI supports at most 256 packets, 100,000 event rows, 10,000
+accumulated tiles per player, 1,000 actors per group, and 32 MiB per input/output
+JSON payload. These are offline artifact resource bounds, not model-context
+budgets. Malformed coordinates, duplicate actors, bad graph coordinates, duplicate
+JSON keys, mismatched hashes, and backward packet turns fail explicitly.
+
+HTML contains inline static assets and escaped JSON. Source labels are displayed
+with DOM `textContent`; template replacement occurs in one pass so arbitrary
+source tokens cannot trigger a second replacement. Script content is bound by a
+CSP hash; `connect-src 'none'` forbids network fetches. There is no CDN, server,
+provider integration, or physical-browser interaction. Outputs use exclusive
+creation to preserve existing files. A storage failure can still leave a partial
+new file and must not be treated as a completed artifact.
+
+## Unit/city to action-graph connection
+
+Selecting an owned unit joins its stable qualified `unit_id` to the latest
+eligible graph's decision and execution rows. The inspector shows candidate
+coordinates, exclusion reasons, heuristic components, source selection weights,
+selected destination, and recorded submission/observed-displacement outcomes.
+A dashed line joins the audit's original origin and chosen destination; the unit
+marker remains at the packet's observed coordinate. This makes accepted input
+without observed movement visible without pretending the plan executed.
+The source field named `probability` is displayed as **selection weight**, never
+as calibrated success probability. The audit has its own turn/sequence, often
+older than the selected packet. This is recorded controller output, not private
+model reasoning.
+
+Selecting a city shows its observed production queue. If available, the prior
+same-seat graph supplies production preferences and roster targets as historical
+intent. A settler queue/target is evidence of an expansion intent only: no site,
+completion date, yield, legality, or success forecast is invented. Non-owned
+city queues remain unknown when not supplied.
+
+A later integration should publish a read-only per-player observation envelope
+at each completed curated refresh, independent of model-request cadence and
+briefing size. The envelope needs match/instance, seat, engine turn, action
+revision, source digest, native-fog/remembered distinction, and explicit coverage.
+The dashboard can then join unit/city selections to exact-revision decisions and
+action receipts. Stale graphs should stay visibly separate. Optional dependency
+panels can consume the separately reviewed source/observed dependency projection
+via typed entity identifiers, keeping source prerequisites distinct from observed
+unlock facts and unresolved city/effective-rule requirements. Action candidates
+must retain legal-query receipts; forecast scores require separately justified
+semantics. The current prototype does not add this endpoint or live integration.
+
+## Reproduce
+
+From this isolated worktree, supply only retained model-packet JSON files and the
+matching event log. No game needs to be running:
+
+```bash
+PYTHONPATH=src /home/alexk/documents/civ-arena/.venv/bin/python -m civ_arena.minimap \
+  --packet runs/minimap-evidence-20260906/packets/p0-t37-attempt1-seq4769.json \
+  --events runs/minimap-evidence-20260906/source-events.jsonl \
+  --player 0 --output /tmp/civ-p0-observed-preview.html
+```
+
+Repeat `--packet` for history. Use `--spectator` instead of `--player` only for an
+explicit combined operator preview. Optional `--json-output` retains the bound
+bundle. Open the resulting HTML locally; no persistent server is required. The
+retained build and browser scripts below reproduce the multi-packet evidence.
+
+## Verified findings
+
+- Repository proof: 36 focused tests passed, zero failed/skipped, in 0.17 seconds
+  (`tests/test_minimap.py` plus existing compact-row compatibility tests). Ruff
+  passed; Node syntax check passed. Full logs are retained as
+  `/tmp/civ-minimap-focused-final.log`, `/tmp/civ-minimap-ruff-final.log`, and
+  `/tmp/civ-minimap-js-final.log`, copied into final evidence.
+- Browser proof: 10 isolated headless Chrome groups passed at desktop 1440×1080
+  and mobile 390×844. They cover rendering, zoom/fit, drag/navigation, selected
+  unit/city graph details, historical visibility of supplied records, keyboard
+  selection, spectator union, true player-only embedding, and hostile-label
+  inertness. The captured page-request list has three explicit local-file
+  navigations and zero HTTP(S) requests; console/page errors are empty for these
+  checks. This is not a full accessibility or cross-browser certification.
+- Source custody: 48 retained packets yield P0's latest T37 / seq4769 with 117
+  accumulated tiles and 9 actors; P1's latest T36 / seq4667 with 123 accumulated
+  tiles and 14 actors. The 240-tile combined extent is not the world map. Full
+  source copies and manifest are in `runs/minimap-evidence-20260906/`.
+- Final HTML, screenshots, browser script/log/report, artifact hashes and check
+  records are in `runs/minimap-evidence-final2-20260906/`. The spectator artifact
+  embeds both private perspectives; single-seat exports are separate files.
+  Evidence is ignored local output, not committed source or published content.
+
+## Follow-up probes
+
+Independent exact-commit review should inspect packet/event binding, spectator
+separation, snapshot aging, and browser behavior. Before live integration, prove
+an observation feed with explicit coverage and refresh cadence. Repeated packets
+with no movement and a larger explored map should be measured before claiming
+useful live-map coverage or rendering performance at map scale.
+
+## Blocked checks
+
+None for this offline slice. Live engine, provider, physical display, and actual
+online dashboard checks are outside its scope and were not performed.
+
+## Evidence gaps
+
+The first browser attempt caught a real missing JavaScript parenthesis; it was
+fixed before final checks. The second attempt used an incorrect type label for a
+qualified unit ID in the test harness; stable-ID selection corrected the probe.
+Both failed logs remain retained. The initial source-writing command's empty
+output was not separately redirected to a file; subsequent edits and all
+pytest/Ruff/browser gates have captured logs. This deviation does not provide
+missing initial-command evidence, and the final source is bound by the commit.
+
+Upstream remembered/native-fog distinctions, map bounds/wrap, live timing,
+complete known-terrain coverage, legal paths, expansion values, and calibrated
+outcome probabilities remain unproved. Retained T37 packets do not show that T37
+finished or that the run passed acceptance. The prototype makes no operational
+reliability claim.
