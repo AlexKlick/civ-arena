@@ -298,7 +298,8 @@ class DashboardStore:
 
 def project_events(events, warnings, redactor):
     agents, turns, pending, completed = {}, {}, defaultdict(deque), []
-    declared_agents = {}
+    declared_agents = None
+    roster_invalid = False
     requests, violations, incomplete = {}, 0, False
     has_completion_audit = any(e.get('audit') in ('completed_seat_turn', 'run_identity')
                                for e in events)
@@ -307,23 +308,46 @@ def project_events(events, warnings, redactor):
         value = event.get('ts')
         return redactor.text(value) if timestamp(value) is not None else None
 
-    def configured_agents(config):
-        nonlocal incomplete
-        if not isinstance(config, dict) or not isinstance(config.get('agents', []), list):
+    def configure_roster(config, *, identity=False):
+        nonlocal incomplete, declared_agents, roster_invalid
+        if isinstance(config, dict) and 'agents' not in config:
+            return  # Missing evidence is distinct from an explicit malformed roster.
+        entries = config.get('agents') if isinstance(config, dict) else None
+        candidate, models = {}, {}
+        valid = isinstance(entries, list) and 2 <= len(entries) <= 4
+        for item in entries if isinstance(entries, list) else []:
+            if identity and isinstance(item, dict):
+                aid, pid = item.get('agent_id'), item.get('player_id')
+                llm = item.get('llm')
+                model = llm.get('model_id') if isinstance(llm, dict) else item.get('model')
+            elif not identity and isinstance(item, list) and len(item) >= 2:
+                aid, pid, model = item[0], item[1], None
+            else:
+                valid = False
+                continue
+            if (not isinstance(aid, str) or not aid or type(pid) is not int
+                    or not 0 <= pid <= 63 or aid in candidate):
+                valid = False
+                continue
+            candidate[aid], models[aid] = pid, model
+        if len(set(candidate.values())) != len(candidate):
+            valid = False
+        if not valid:
             warnings.append('Malformed agent configuration in event log.')
-            incomplete = True
-            return []
-        return config.get('agents', [])
+            incomplete = roster_invalid = True
+            return
+        if declared_agents is not None and candidate != declared_agents:
+            warnings.append('Configured agent roster changed within the run.')
+            incomplete = roster_invalid = True
+            return
+        declared_agents = candidate
+        for aid, pid in candidate.items():
+            agent(aid, pid, models[aid])
 
-    def agent(agent_id, player_id, model=None, *, configured=False):
+    def agent(agent_id, player_id, model=None):
         nonlocal incomplete
         if not isinstance(agent_id, str) or type(player_id) is not int:
             return
-        if configured:
-            if agent_id in declared_agents and declared_agents[agent_id] != player_id:
-                warnings.append('Configured agent identity changed within the run.')
-                incomplete = True
-            declared_agents[agent_id] = player_id
         if agent_id in agents and agents[agent_id]['player_id'] != player_id:
             warnings.append('Agent identity changed seats within the run.')
             incomplete = True
@@ -353,19 +377,11 @@ def project_events(events, warnings, redactor):
     for event in events:
         kind, audit = event.get('kind'), event.get('audit')
         if kind == 'MATCH_START':
-            config = event.get('config', {})
-            for item in configured_agents(config):
-                if isinstance(item, list) and len(item) >= 2:
-                    agent(item[0], item[1], configured=True)
+            configure_roster(event.get('config', {}))
         elif kind == 'HEARTBEAT' and audit == 'run_identity':
             identity = event.get('identity')
             config = identity.get('config', {}) if isinstance(identity, dict) else {}
-            for item in configured_agents(config):
-                if isinstance(item, dict):
-                    llm = item.get('llm')
-                    agent(item.get('agent_id'), item.get('player_id'),
-                          llm.get('model_id') if isinstance(llm, dict) else item.get('model'),
-                          configured=True)
+            configure_roster(config, identity=True)
         elif kind == 'HEARTBEAT' and audit == 'provider_request':
             aid, count = event.get('agent'), event.get('posts_sent')
             if not isinstance(aid, str) or type(count) is not int or count < 0:
@@ -471,17 +487,28 @@ def project_events(events, warnings, redactor):
         incomplete = True
     if completed and not has_completion_audit:
         warnings.append('Legacy TURN_END counts; driver completion/lease audit unavailable.')
-    if declared_agents and any(
+    observed_seats = sorted({a['player_id'] for a in agents.values()})
+    if len(observed_seats) != len(agents):
+        warnings.append('Multiple agent identities occupy the same seat.')
+        incomplete = True
+    if declared_agents is not None and any(
             declared_agents.get(aid) != value['player_id'] for aid, value in agents.items()):
         warnings.append('Observed seat identity is outside the configured roster.')
         incomplete = True
-    seats = sorted({a['player_id'] for a in agents.values()})
-    if len(seats) != len(agents):
-        warnings.append('Multiple agent identities occupy the same seat.')
-        incomplete = True
-    if completed and has_completion_audit and not 2 <= len(seats) <= 4:
-        warnings.append('Completed-seat audits require two through four configured seats.')
-        incomplete = True
+    if has_completion_audit:
+        # Observations may display useful evidence but cannot define the roster
+        # required to certify completed engine rounds.
+        seats = sorted(declared_agents.values()) if declared_agents and not roster_invalid else []
+        if completed and not seats:
+            warnings.append('Completed-seat audits require an explicit valid configured roster.')
+            incomplete = True
+    else:
+        # Retain the historical two-seat TURN_END display with its existing
+        # missing-driver-audit warning. It is not four-seat completion proof.
+        seats = observed_seats if len(observed_seats) == 2 else []
+        if completed and not seats:
+            warnings.append('Legacy round counting requires two observed seats.')
+            incomplete = True
     rounds, expected_turn, offset = 0, None, 0
     if 2 <= len(seats) <= 4:
         for number, pid, _ in completed:
