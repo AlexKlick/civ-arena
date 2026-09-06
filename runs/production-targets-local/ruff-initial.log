@@ -1,0 +1,20 @@
+E501 Line too long (113 > 100)
+   --> tests/test_strategic_controller.py:601:101
+    |
+599 |     assert graph["unassigned_scout_ids"] == ["u0:1"]
+600 |     assert graph["decisions"][0]["assignment_warning"] == "SCOUT omitted from scouting.unit_types"
+601 |     assert graph["execution"][0]["decision"]["assignment_warning"] == graph["decisions"][0]["assignment_warning"]
+    |                                                                                                     ^^^^^^^^^^^^^
+
+E501 Line too long (102 > 100)
+   --> tests/test_strategic_controller.py:636:101
+    |
+634 |                     [use('submit_directive', {"unit_targets": {"SCOUT": 2}})]]
+635 |     await advance(controller, runtime, facade, 1)
+636 |     authority = [json.loads(request["messages"][0]["content"].split("\n", 1)[0])["movement_authority"]
+    |                                                                                                     ^^
+637 |                  for request in model.requests]
+638 |     assert authority[0]["opening_units_frozen"] is True
+    |
+
+Found 2 errors.

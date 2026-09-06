@@ -122,3 +122,25 @@ def test_provider_schema_refuses_noncanonical_destinations(dest):
     assert not _matches_tactical_schema(order)
     with pytest.raises(ValueError):
         validate({"tactical_overrides": [order]})
+
+
+@pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                      {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                      {"SCOUT": math.inf}, {"SCOUT": 10 ** 1000}, {"SCOUT": "2"},
+                                      {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                      {f"UNIT_{i}": 1 for i in range(17)}])
+def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+    with pytest.raises(ValueError, match="unit_targets"):
+        validate({"unit_targets": targets})
+
+
+def test_unit_target_optional_legacy_compatibility_and_integer_normalization():
+    legacy = validate({"version": 1, "production_preferences": ["SCOUT"]})
+    assert "unit_targets" not in legacy
+    assert validate({"unit_targets": {}}) == validate({})
+    normalized = validate({"unit_targets": {"SCOUT": 2.0, "BUILDER": 0, "WARRIOR": 32}})
+    assert normalized["unit_targets"] == {"BUILDER": 0, "SCOUT": 2, "WARRIOR": 32}
+    assert all(type(count) is int for count in normalized["unit_targets"].values())
+    schema = DIRECTIVE_SCHEMA["properties"]["unit_targets"]
+    assert schema["maxProperties"] == 16
+    assert schema["additionalProperties"] == {"type": "integer", "minimum": 0, "maximum": 32}

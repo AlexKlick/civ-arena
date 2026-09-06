@@ -7,12 +7,15 @@ import re
 from typing import Any
 
 UNIT_TYPES = ("SCOUT", "WARRIOR", "SLINGER", "ARCHER", "SPEARMAN")
+MAX_UNIT_TARGETS = 16
+MAX_UNIT_TARGET = 32
 WEIGHTS = {"unexplored": 4.0, "distance": 0.25, "threat": 5.0, "terrain": 1.0}
 DEFAULT_DIRECTIVE = {
     "version": 1,
     "scouting": {"policy": "balanced", "selection": "seeded", "temperature": 0.5,
                  "unit_types": ["SCOUT", "WARRIOR"], "weights": WEIGHTS},
-    "research_preferences": [], "production_preferences": [], "tactical_overrides": [],
+    "research_preferences": [], "production_preferences": [],
+    "tactical_overrides": [],
 }
 _ID = {"type": "string", "minLength": 1, "maxLength": 96,
        "pattern": r"^[A-Za-z0-9_:.-]+$"}
@@ -40,6 +43,8 @@ DIRECTIVE_SCHEMA = {
                 "selection": {"type": "string", "enum": ["best", "seeded"]},
                 "temperature": {"type": "number", "minimum": 0.05, "maximum": 2},
                 "unit_types": {"type": "array", "maxItems": len(UNIT_TYPES),
+                               "description": "Persistent scouting roles; include SCOUT to deploy "
+                                   "built scouts. Explicit omission holds them.",
                                "uniqueItems": True,
                                "items": {"type": "string", "enum": list(UNIT_TYPES)}},
                 "weights": {"type": "object", "additionalProperties": False,
@@ -48,7 +53,16 @@ DIRECTIVE_SCHEMA = {
             },
         },
         "research_preferences": _PREFERENCE,
-        "production_preferences": _PREFERENCE,
+        "production_preferences": {**_PREFERENCE, "description":
+            "Recurring preference ranking for each empty city queue, subject to unit targets."},
+        "unit_targets": {
+            "type": "object", "maxProperties": MAX_UNIT_TARGETS,
+            "propertyNames": {"pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+            "additionalProperties": {"type": "integer", "minimum": 0,
+                                     "maximum": MAX_UNIT_TARGET},
+            "description": "Optional empire-wide desired owned plus queued counts by exact unit "
+                "item_id. Zero disables new production; omitted IDs use conservative defaults.",
+        },
         "tactical_overrides": {
             "type": "array", "maxItems": 8,
             "items": {"type": "object", "oneOf": _TACTICAL_CASES},
@@ -88,7 +102,7 @@ def validate_directive(value: Any, *, player_id: int, owned_unit_ids: set[str]) 
     """
     if type(player_id) is not int or player_id < 0:
         raise ValueError("invalid player identity")
-    doc = _object(value, set(DEFAULT_DIRECTIVE), "directive")
+    doc = _object(value, set(DEFAULT_DIRECTIVE) | {"unit_targets"}, "directive")
     out = copy.deepcopy(DEFAULT_DIRECTIVE)
     version = doc.get("version", 1)
     # JSON Schema integer accepts mathematically integral JSON numbers such as
@@ -118,6 +132,20 @@ def validate_directive(value: Any, *, player_id: int, owned_unit_ids: set[str]) 
     for field in ("research_preferences", "production_preferences"):
         out[field] = _strings(doc.get(field, []), limit=16, pattern=r"[A-Z][A-Z0-9_]{0,63}",
                               label=field)
+    targets = doc.get("unit_targets", {})
+    if (not isinstance(targets, dict) or len(targets) > MAX_UNIT_TARGETS
+            or any(not isinstance(key, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", key)
+                   for key in targets)):
+        raise ValueError("unit_targets requires at most sixteen exact unit item IDs")
+    # Empty/omitted extensions preserve the historical normalized directive and
+    # therefore its existing scouting seed hash. Nonempty targets are explicit.
+    if targets:
+        out["unit_targets"] = {}
+    for key, target in sorted(targets.items()):
+        if (type(target) not in (int, float) or not 0 <= target <= MAX_UNIT_TARGET
+                or not math.isfinite(target) or target != int(target)):
+            raise ValueError("unit_targets values must be integers in [0, 32]")
+        out["unit_targets"][key] = int(target)
     overrides = doc.get("tactical_overrides", [])
     if not isinstance(overrides, list) or len(overrides) > 8:
         raise ValueError("at most eight tactical overrides are allowed")

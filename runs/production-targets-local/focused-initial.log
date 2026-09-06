@@ -1,0 +1,242 @@
+........................................................FFFFFFF......... [ 41%]
+........................................................................ [ 83%]
+...........F............F...                                             [100%]
+=================================== FAILURES ===================================
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets2] _______
+
+targets = {'SCOUT': True}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets3] _______
+
+targets = {'SCOUT': -1}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets4] _______
+
+targets = {'SCOUT': 33}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets5] _______
+
+targets = {'SCOUT': 1.5}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets6] _______
+
+targets = {'SCOUT': nan}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets7] _______
+
+targets = {'SCOUT': inf}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+______ test_unit_targets_reject_nonbounded_json_counts_and_ids[targets8] _______
+
+targets = {'SCOUT': '2'}
+
+    @pytest.mark.parametrize("targets", [None, [], {"SCOUT": True}, {"SCOUT": -1},
+                                          {"SCOUT": 33}, {"SCOUT": 1.5}, {"SCOUT": math.nan},
+                                          {"SCOUT": math.inf}, {"SCOUT": "2"},
+                                          {"scout": 2}, {"SCOUT;INJECT": 2}, {1: 2},
+                                          {f"UNIT_{i}": 1 for i in range(17)}])
+    def test_unit_targets_reject_nonbounded_json_counts_and_ids(targets):
+>       with pytest.raises(ValueError, match="unit_targets"):
+E       AssertionError: Regex pattern did not match.
+E         Expected regex: 'unit_targets'
+E         Actual message: 'unit target must be an integer in [0, 32]'
+
+tests/test_strategy_directive.py:133: AssertionError
+____________ test_production_refresh_respects_existing_request_caps ____________
+
+setup = (StrategicController(match_id='fresh-match', cadence=5, audit=<built-in method append of list object at 0x723156881c40...alse, on_post=None), <test_strategic_controller.Facade object at 0x72315698c080>, [], <AsyncMock id='125556231955440'>)
+
+    async def test_production_refresh_respects_existing_request_caps(setup):
+        controller, runtime, model, facade, records, scout = setup
+>       runtime.llm = replace(runtime.llm, max_requests_per_turn=1)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_strategic_controller.py:569: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+obj = LLMSpec(base_url='http://unused', api_key_env='UNUSED', model_id='fake', max_tokens=4096, max_tool_rounds=16, max_result_chars=8000, request_timeout_s=120.0, max_retries=2, max_requests_per_match=2000)
+changes = {'max_requests_per_turn': 1, 'base_url': 'http://unused', 'api_key_env': 'UNUSED', 'model_id': 'fake', ...}
+
+    def replace(obj, /, **changes):
+        """Return a new object replacing specified fields with new values.
+    
+        This is especially useful for frozen classes.  Example usage::
+    
+          @dataclass(frozen=True)
+          class C:
+              x: int
+              y: int
+    
+          c = C(1, 2)
+          c1 = replace(c, x=3)
+          assert c1.x == 3 and c1.y == 2
+        """
+    
+        # We're going to mutate 'changes', but that's okay because it's a
+        # new dict, even if called with 'replace(obj, **my_changes)'.
+    
+        if not _is_dataclass_instance(obj):
+            raise TypeError("replace() should be called on dataclass instances")
+    
+        # It's an error to have init=False fields in 'changes'.
+        # If a field is not in 'changes', read its value from the provided obj.
+    
+        for f in getattr(obj, _FIELDS).values():
+            # Only consider normal fields or InitVars.
+            if f._field_type is _FIELD_CLASSVAR:
+                continue
+    
+            if not f.init:
+                # Error if this field is specified in changes.
+                if f.name in changes:
+                    raise ValueError(f'field {f.name} is declared with '
+                                     'init=False, it cannot be specified with '
+                                     'replace()')
+                continue
+    
+            if f.name not in changes:
+                if f._field_type is _FIELD_INITVAR and f.default is MISSING:
+                    raise ValueError(f"InitVar {f.name!r} "
+                                     'must be specified with replace()')
+                changes[f.name] = getattr(obj, f.name)
+    
+        # Create the new object, which calls __init__() and
+        # __post_init__() (if defined), using all of the init fields we've
+        # added and/or left in 'changes'.  If there are values supplied in
+        # changes that aren't fields, this will correctly raise a
+        # TypeError.
+>       return obj.__class__(**changes)
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: LLMSpec.__init__() got an unexpected keyword argument 'max_requests_per_turn'
+
+/usr/lib/python3.12/dataclasses.py:1581: TypeError
+_________ test_live_fake_dispatch_preserves_strategic_economy_choices __________
+
+tmp_path = PosixPath('/tmp/pytest-of-alexk/pytest-7027/test_live_fake_dispatch_preser0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7231567dce90>
+
+    async def test_live_fake_dispatch_preserves_strategic_economy_choices(tmp_path, monkeypatch):
+        import json
+    
+        from civ_arena.game.civ6 import live_driver as ld
+        from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
+        from civ_arena.game.civ6.firetuner import FireTunerAdapter
+    
+        spec = load_config(ROOT / 'configs/live-hotseat-strategic-minimax2-060.yaml')
+        models = []
+        def client(_spec, on_post=None):
+            fake = FakeModel([[use('submit_directive', {'version': 1,
+                             'production_preferences': ['WARRIOR'],
+                             'research_preferences': ['POTTERY']})]])
+            fake.on_post = on_post
+            models.append(fake)
+            return fake
+        monkeypatch.setattr('civ_arena.agents.llm.client.MiniMaxMessagesClient', client)
+        mod = FakeMod(hotseat=[0, 1])
+        mod.pending_blockers = ['BLOCKING|ENDTURN_BLOCKING_RESEARCH',
+                                'BLOCKING|ENDTURN_BLOCKING_PRODUCTION']
+        server = FakeTunerServer(mod=mod)
+        port = await server.start()
+        adapter = FireTunerAdapter('127.0.0.1', port, simulate_hook=ld._fake_hook)
+        try:
+            result = await ld.phase_dispatch_hotseat(spec, adapter, tmp_path, 1, 'h1',
+                                                    ld.MOD_DEFAULT.read_text())
+        finally:
+            await server.stop()
+        summary = json.loads((tmp_path / 'summary.json').read_text())
+        assert result == 0, summary
+>       assert mod.cities[1]['queue'] == 'WARRIOR'  # housekeeping preference is MONUMENT
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AssertionError: assert 'MONUMENT' == 'WARRIOR'
+E         
+E         - WARRIOR
+E         + MONUMENT
+
+tests/test_strategic_wiring.py:125: AssertionError
+----------------------------- Captured stdout call -----------------------------
+hotseat turn 1 p0: 1 completed
+hotseat turn 1 p1: 2 completed
+HOTSEAT CLEAN: 2/2 seat turns; completed
+=========================== short test summary info ============================
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets2]
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets3]
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets4]
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets5]
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets6]
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets7]
+FAILED tests/test_strategy_directive.py::test_unit_targets_reject_nonbounded_json_counts_and_ids[targets8]
+FAILED tests/test_strategic_controller.py::test_production_refresh_respects_existing_request_caps
+FAILED tests/test_strategic_wiring.py::test_live_fake_dispatch_preserves_strategic_economy_choices
+9 failed, 163 passed in 41.32s

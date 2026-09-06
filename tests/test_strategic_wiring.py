@@ -103,7 +103,7 @@ async def test_live_fake_dispatch_preserves_strategic_economy_choices(tmp_path, 
     models = []
     def client(_spec, on_post=None):
         fake = FakeModel([[use('submit_directive', {'version': 1,
-                         'production_preferences': ['WARRIOR'],
+                         'production_preferences': ['WARRIOR'], 'unit_targets': {'WARRIOR': 2},
                          'research_preferences': ['POTTERY']})]])
         fake.on_post = on_post
         models.append(fake)

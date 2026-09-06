@@ -1,0 +1,79 @@
+........................................................................ [ 30%]
+........................................................................ [ 60%]
+................................................................F....... [ 90%]
+........................                                                 [100%]
+=================================== FAILURES ===================================
+___ test_real_adapter_rejection_refreezes_before_executor_observes_and_stops ___
+
+    async def test_real_adapter_rejection_refreezes_before_executor_observes_and_stops():
+        """Use the real adapter's restore/rejection path, with wire methods mocked."""
+        state = snapshot([unit(movement=0)])
+        adapter = FireTunerAdapter()
+        adapter._phase_open = 0
+        adapter._turn_mirror = 1
+        adapter._conn = AsyncMock()
+        trace = []
+        async def read(lua):
+            if "BeginRewardCommand" in lua:
+                trace.append("begin_reward")
+                nonce = lua.split("'")[1]
+                return [f"REWARD_BEGIN|{nonce}|accepted", "---END---"]
+            if "CancelRewardCommand" in lua:
+                trace.append("cancel_reward")
+                return ["---END---"]
+            if "RestoreUnit" in lua:
+                trace.append("restore")
+                state["get_units"][0]["movement"] = 2
+                return ["RESTORE_UNIT|0|131073|restored", "---END---"]
+            assert "FreezeUnit" in lua
+            trace.append("refreeze")
+            state["get_units"][0]["movement"] = 0
+            return ["FROZEN|131073", "---END---"]
+        adapter._conn.execute_read.side_effect = read
+        adapter._conn.execute_write.return_value = ["ACT|move_unit|ERR|ILLEGAL_MOVE|blocked"]
+        async def execute(name, args):
+            trace.append("execute")
+            args = dict(args)
+            key = args.pop("idempotency_key")
+            result = await adapter.act(ActionCommand(tool=name, args=args, player_id=0,
+                                                     idempotency_key=key, lease_id="fixture"))
+            return {"status": result.status, "rejection": result.rejection}
+        async def refresh():
+            trace.append("refresh")
+            return copy.deepcopy(state)
+>       result = await run_scouting(copy.deepcopy(state), directive={}, **IDENTITY,
+                                    execute=execute, refresh=refresh,
+                                    frozen_unit_ids={"u0:131073"})
+
+tests/test_scouting.py:305: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/civ_arena/agents/scouting.py:359: in run_scouting
+    result = await execute(action["action"], args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_scouting.py:299: in execute
+    result = await adapter.act(ActionCommand(tool=name, args=args, player_id=0,
+src/civ_arena/game/civ6/firetuner.py:726: in act
+    rows = await self._conn.execute_read(lua_translator.begin_reward_command(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+player = 0, turn = 1, unit_id = 'u0:131073'
+nonce = '5fd31474b6b3057eb93c2034a06c3ef63ae015806b321bf9fb40b75a000b32a6'
+dest = '0,-1', seq = 1
+
+    def begin_reward_command(player: int, turn: int, unit_id: str, nonce: str,
+                             dest: str, seq: int) -> str:
+        owner, raw = decode(unit_id, "u")
+        if type(player) is not int or owner != player:
+            raise ValueError("reward command owner mismatch")
+        if any(type(v) is not int or not 0 < v < 2**53 for v in (turn, seq)):
+            raise ValueError("invalid reward command turn or sequence")
+        q, r = map(int, dest.split(","))
+        x, y = axial_to_xy(q, r)
+        if min(x, y) < 0 or max(x, y) >= 2**53:
+>           raise ValueError("invalid reward destination")
+E           ValueError: invalid reward destination
+
+src/civ_arena/game/civ6/lua_translator.py:945: ValueError
+=========================== short test summary info ============================
+FAILED tests/test_scouting.py::test_real_adapter_rejection_refreezes_before_executor_observes_and_stops
+1 failed, 239 passed in 41.56s
