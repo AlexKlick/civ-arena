@@ -247,7 +247,9 @@ async def test_quiet_turn_works_even_when_provider_budget_spent(setup):
 
 async def test_oversized_critical_context_refuses_before_provider(setup):
     controller, runtime, model, facade, records, scout = setup
-    facade.units = [dict(facade.units[0], unit_id=f'u0:{i}') for i in range(200)]
+    # Shared column names now let the old 200-unit fixture fit losslessly.
+    # Exercise a roster that still exceeds the cap after both packing stages.
+    facade.units = [dict(facade.units[0], unit_id=f'u0:{i}') for i in range(512)]
     with pytest.raises(MatchAborted, match='context budget'):
         await advance(controller, runtime, facade, 1)
     assert not model.posts_sent
