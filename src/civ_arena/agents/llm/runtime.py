@@ -135,6 +135,8 @@ class LLMAgentRuntime:
             return
         if self.profile.decision_mode == "strategic_autopilot":
             raise MatchAborted("strategic_autopilot runtime was not bound by the factory")
+        if self.llm.adaptive_context is not None:
+            raise MatchAborted('adaptive context requires the strategic controller')
         diary_text = (self.diary.get(self.profile.player_id)
                       if self.diary is not None else "")
         memory = (render_memory(self.strategy, self.profile.player_id,

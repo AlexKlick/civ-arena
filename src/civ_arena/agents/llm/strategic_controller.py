@@ -6,6 +6,7 @@ reproduction inputs but are not a checkpoint restore implementation.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -16,6 +17,13 @@ from typing import Any
 from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
+from civ_arena.agents.llm.request_budget import (
+    TokenCount,
+    input_payload,
+    measurements,
+    payload_hash,
+    task_for,
+)
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.production_policy import choose_production
 from civ_arena.agents.recovery import RecoveryPolicy, RecoveryTracker
@@ -275,8 +283,81 @@ class StrategicController:
                 'tool_names_omitted': max(0, len(uses) - len(names)),
                 'text_blocks': counts.get('text', 0), 'text_chars': text_chars}, uses
 
+    async def _provider_call(self, runtime: Any, request_kind: str,
+                             action: Any, kwargs: dict) -> Any:
+        client = runtime.client
+        if not hasattr(client, 'on_request_post'):
+            return await action(**kwargs)
+        previous = client.on_request_post
+
+        def posted(kind: str) -> None:
+            self._emit(runtime, 'strategy_provider_post', request_kind=kind,
+                       expected_request_kind=request_kind,
+                       posts_sent=client.posts_sent,
+                       provider_posts_by_kind=copy.deepcopy(client.posts_by_kind))
+            if previous is not None:
+                previous(kind)
+
+        client.on_request_post = posted
+        try:
+            return await action(**kwargs)
+        finally:
+            client.on_request_post = previous
+
+    async def _count_request(self, runtime: Any, kwargs: dict, *, task: str) -> dict:
+        policy = runtime.llm.adaptive_context
+        client_spec = getattr(runtime.client, 'spec', None)
+        if client_spec is not None and (client_spec.model_id != runtime.llm.model_id
+                                        or client_spec.max_tokens != runtime.llm.max_tokens):
+            raise ModelUnavailable(
+                'adaptive context unavailable: generation configuration mismatch')
+        body = input_payload(runtime.llm.model_id, **kwargs)
+        report = measurements(body, runtime.llm.max_tokens)
+        report.update(task=task, provider_context_tokens=policy.provider_context_tokens,
+                      request_kind='count_tokens')
+        self._emit(runtime, 'strategy_token_count_request', **report)
+        counter = getattr(runtime.client, 'count_tokens', None)
+        if not callable(counter):
+            self._emit(runtime, 'strategy_token_count_result', outcome='unavailable',
+                       reason='counter_not_supported', **report)
+            raise ModelUnavailable('adaptive context unavailable: token counter not supported')
+        before = getattr(runtime.client, 'posts_sent', 0)
+        try:
+            async with asyncio.timeout(runtime.llm.request_timeout_s):
+                receipt = await self._provider_call(
+                    runtime, 'count_tokens', counter, copy.deepcopy(kwargs))
+        except (TimeoutError, ModelUnavailable) as exc:
+            self._emit(runtime, 'strategy_token_count_result', outcome='unavailable',
+                       reason=type(exc).__name__,
+                       posts_attempted=getattr(runtime.client, 'posts_sent', before) - before,
+                       **report)
+            raise ModelUnavailable('adaptive context unavailable: token counter failed') from exc
+        valid = (isinstance(receipt, TokenCount) and type(receipt.input_tokens) is int
+                 and receipt.input_tokens > 0 and receipt.model == runtime.llm.model_id
+                 and receipt.input_payload_sha256 == report['input_payload_sha256']
+                 and receipt.source in ('provider_count_tokens', 'injected_token_counter')
+                 and payload_hash(input_payload(runtime.llm.model_id, **kwargs))
+                 == report['input_payload_sha256'])
+        if not valid:
+            self._emit(runtime, 'strategy_token_count_result', outcome='invalid_receipt', **report)
+            raise ModelUnavailable('adaptive context unavailable: token count identity mismatch')
+        total = receipt.input_tokens + runtime.llm.max_tokens
+        admitted = total <= policy.provider_context_tokens
+        self._emit(runtime, 'strategy_token_count_result',
+                   outcome='admitted' if admitted else 'provider_window_exceeded',
+                   input_tokens=receipt.input_tokens, total_reserved_tokens=total,
+                   count_source=receipt.source,
+                   provider_exact=receipt.source == 'provider_count_tokens',
+                   posts_attempted=getattr(runtime.client, 'posts_sent', before) - before, **report)
+        if not admitted:
+            raise ModelUnavailable(
+                'provider-counted input plus output reserve exceeds declared window')
+        return report
+
     async def _decide(self, runtime: Any, curator: ContextCurator,
                       reasons: list[str], *, opening_actions_pending: bool = True) -> dict:
+        adaptive = runtime.llm.adaptive_context
+        task = task_for(reasons, opening_actions_pending)
         opening_authority = self.opening_units_frozen and opening_actions_pending
         initial_posts = getattr(runtime.client, 'posts_sent', 0)
         observation = decision_snapshot(curator, runtime._turn)
@@ -294,7 +375,14 @@ class StrategicController:
                         'legality': 'engine_checked_not_proven_by_this_metadata'}}
         schema = {'name': 'submit_directive',
                   'description': 'Submit one strategy; tactical overrides expire this turn.',
-                  'input_schema': DIRECTIVE_SCHEMA}
+                  'input_schema': copy.deepcopy(DIRECTIVE_SCHEMA) if adaptive else DIRECTIVE_SCHEMA}
+        if adaptive:
+            metadata['briefing_policy'] = {'task': task, 'soft_target_chars':
+                getattr(adaptive, task + '_target_chars'),
+                'tactical_overrides_allowed': task != 'economy',
+                'hard_limit': 'complete provider-counted input plus reserved output window'}
+            if task == 'economy':
+                schema['input_schema']['properties']['tactical_overrides']['maxItems'] = 0
         # One normal attempt plus at most one format repair, both charged to the
         # existing turn/request caps. Client transport retries still count every POST.
         limit = min(2, runtime.llm.max_tool_rounds - self._turn_strategy_requests)
@@ -308,18 +396,33 @@ class StrategicController:
             encoded_metadata = _encode(metadata)
             # Re-budget the complete fresh request INCLUDING repair metadata.
             # Invalid assistant content is discarded, never echoed or interpreted.
-            curator.budget = runtime.llm.max_result_chars - len(encoded_metadata) - 1
-            if curator.budget < 1:
-                raise MatchAborted('strategic metadata exceeds context budget')
-            context = encoded_metadata + '\n' + curator.render()
+            if adaptive:
+                target = getattr(adaptive, task + '_target_chars')
+                context = encoded_metadata + '\n' + curator.render(adaptive_task=task,
+                    target_chars=None if target is None else max(0, target-len(encoded_metadata)-1))
+                self._emit(runtime, 'strategy_briefing', **curator.last_render_audit,
+                           full_context_chars=len(context), configured_soft_target_chars=target)
+            else:
+                curator.budget = runtime.llm.max_result_chars - len(encoded_metadata) - 1
+                if curator.budget < 1:
+                    raise MatchAborted('strategic metadata exceeds context budget')
+                context = encoded_metadata + '\n' + curator.render()
+            kwargs = {'system': SYSTEM, 'messages': [{'role': 'user', 'content': context}],
+                      'tools': [schema],
+                      'tool_choice': {'type': 'tool', 'name': 'submit_directive'}}
+            if adaptive:
+                await self._count_request(runtime, kwargs, task=task)
+                if getattr(runtime.client, 'posts_sent', 0) >= runtime.llm.max_requests_per_match:
+                    raise ModelUnavailable('request budget exhausted after token count')
+            posts = getattr(runtime.client, 'posts_sent', 0)
             self._emit(runtime, 'strategy_request', attempt=attempt,
-                       named_tool='submit_directive', user_context=context,
+                       request_kind='generation', named_tool='submit_directive',
+                       user_context=context,
                        context_sha256=hashlib.sha256(context.encode('utf-8')).hexdigest(),
                        context_chars=len(context))
             self._turn_strategy_requests += 1
-            reply = await runtime.client.create(
-                system=SYSTEM, messages=[{'role': 'user', 'content': context}], tools=[schema],
-                tool_choice={'type': 'tool', 'name': 'submit_directive'})
+            reply = (await self._provider_call(runtime, 'generation', runtime.client.create, kwargs)
+                     if adaptive else await runtime.client.create(**kwargs))
             runtime._report_usage(reply)
             usage_in += reply.input_tokens
             usage_out += reply.output_tokens
@@ -341,6 +444,9 @@ class StrategicController:
                             directive = validate_directive(
                                 value, player_id=runtime.profile.player_id,
                                 owned_unit_ids={u['unit_id'] for u in curator.own('get_units')})
+                            if adaptive and task == 'economy' and directive['tactical_overrides']:
+                                directive = None
+                                reason = 'tactical_authority_disabled'
                     except (ValueError, TypeError, OverflowError, RecursionError):
                         # Validation exceptions may contain model values. Use only
                         # fixed categories in durable diagnostics and repair prompts.
@@ -361,7 +467,9 @@ class StrategicController:
                            input_tokens=usage_in, output_tokens=usage_out,
                            context_chars=len(context), format_attempts=attempt,
                            posts_attempted=getattr(runtime.client, 'posts_sent', initial_posts)
-                           - initial_posts)
+                           - initial_posts,
+                           provider_posts_by_kind=copy.deepcopy(
+                               getattr(runtime.client, 'posts_by_kind', {})))
                 self._decision_observation = observation
                 return directive
             if not repair_available:
