@@ -2,6 +2,9 @@
 
 Read-only survey, 2026-09-05. Repository observed at `503478c70e23cfd57cdcaed9bf9054015c7d976e`. This note supports S1 in `docs/strategic-autopilot.md`; it is an implementation proposal, not an extractor or match-effective catalog. No tuner, provider, desktop, or game input was used. Active match ruleset, enabled content, and effective database were not queried.
 
+The isolated [offline base-source extractor](base-source-catalog.md) now implements
+the bounded first slice; effective-game and forecast gates remain separate.
+
 ## Concrete source inventory
 
 Installed asset root (all paths below are relative to it):
