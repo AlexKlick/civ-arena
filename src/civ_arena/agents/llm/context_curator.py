@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from civ_arena.agents.llm.terrain_context import compact_entities, compact_terrain
 from civ_arena.agents.llm.terrain_evidence import cold_biome_evidence
 from civ_arena.arena.referee import MatchAborted
 from civ_arena.game.terrain_metadata import terrain_fields
@@ -232,7 +233,7 @@ class ContextCurator:
         units = self.state['get_units']
         cities = self.state['get_cities']
         unit_fields = ('unit_id', 'type', 'coord', 'movement', 'max_movement', 'hp',
-                       'hp_bucket', 'strength', 'ranged_strength', 'fortified')
+                       'hp_bucket', 'strength', 'ranged_strength', 'fortified', 'is_barbarian')
         city_fields = ('city_id', 'coord', 'population', 'production_queue', 'hp')
         mine_u = self.own('get_units')
         mine_c = self.own('get_cities')
@@ -273,7 +274,16 @@ class ContextCurator:
                     **selected(tiles[key], ('owner_id', 'city_id'))})
         required = len(doc['terrain'])
         doc['terrain_omitted'] = len(tiles) - required
-        if len(CONTEXT_MARKER) + len(encode(doc)) > self.budget:
+        compact = len(CONTEXT_MARKER) + len(encode(doc)) > self.budget
+        compact_actors = False
+
+        def rendered() -> str:
+            view = compact_terrain(doc) if compact else doc
+            return CONTEXT_MARKER + encode(compact_entities(view) if compact_actors else view)
+
+        if compact and len(rendered()) > self.budget:
+            compact_actors = True
+        if len(rendered()) > self.budget:
             raise MatchAborted('critical owned state and nearby terrain exceed context budget')
         included = {row['coord'] for row in doc['terrain']}
         for key in ordered:
@@ -285,11 +295,11 @@ class ContextCurator:
                    **selected(tiles[key], ('owner_id', 'city_id'))}
             doc['terrain'].append(row)
             doc['terrain_omitted'] -= 1
-            if len(CONTEXT_MARKER) + len(encode(doc)) > self.budget:
+            if len(rendered()) > self.budget:
                 doc['terrain'].pop()
                 doc['terrain_omitted'] += 1
                 break
-        return CONTEXT_MARKER + encode(doc)
+        return rendered()
 
 
 def replace_context(messages: list[dict], content: list[dict], snapshot: str) -> None:
