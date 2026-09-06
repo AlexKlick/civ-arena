@@ -389,3 +389,77 @@ def test_overmaximum_health_never_counts_as_verified_healthy():
     s = state([unit(hp=101), barb()])
     out = choose(policy(s), s)
     assert out['growth']['healthy_local_defender_ids'] == []
+
+
+@pytest.mark.parametrize('domain', ['DOMAIN_SEA', 'DOMAIN_AIR', None])
+@pytest.mark.parametrize('reserved', [False, True])
+def test_all_armed_domains_consume_cap_but_not_land_defense_strength(domain, reserved):
+    s = state(cities=[city(), city('c0:2', queue=[] if reserved else ['REMOTE_COMBAT'])])
+    g = policy(s, controls=GrowthControls(military_cap=1),
+               catalogs={'c0:1': CATALOG, 'c0:2': [option('REMOTE_COMBAT', domain=domain)]})
+    out = choose(g, s, reservations={'c0:2': 'REMOTE_COMBAT'} if reserved else None)
+    assert out['growth']['military_capacity_slots'] == 1
+    assert out['growth']['land_military_owned_queued'] == 0
+    assert out['growth']['queued_reserved_strength'] == 0
+    assert out['item_id'] == 'GRANARY'
+
+
+@pytest.mark.parametrize('reserved', [False, True])
+def test_present_unknown_capability_object_reserves_uncertain_capacity(reserved):
+    unknown = option('UNKNOWN_ROLE')
+    unknown['unit_capabilities'] = dict.fromkeys(unknown['unit_capabilities'])
+    s = state(cities=[city(), city('c0:2', queue=[] if reserved else ['UNKNOWN_ROLE'])])
+    g = policy(s, controls=GrowthControls(military_cap=1),
+               catalogs={'c0:1': CATALOG, 'c0:2': [unknown]})
+    out = choose(g, s, reservations={'c0:2': 'UNKNOWN_ROLE'} if reserved else None)
+    assert out['growth']['military_capacity_slots'] == 1
+    assert out['growth']['military_owned_queued'] == 0
+    assert len(out['growth']['unclassified_capacity_reservations']) == 1
+    assert out['item_id'] == 'GRANARY'
+
+
+@pytest.mark.parametrize('domain', ['DOMAIN_SEA', 'DOMAIN_AIR', None])
+def test_nonland_or_unknown_domain_cannot_be_city_guard_or_settler_escort(domain):
+    s = state([unit(), unit('other', kind='FOREIGN_DOMAIN', coord='-1,0', power=100)])
+    s['get_visible_map']['tiles']['-1,0'] = {'terrain': 'COAST', 'owner_id': -1, 'city_id': ''}
+    catalog = [*CATALOG, option('FOREIGN_DOMAIN', domain=domain)]
+    g = policy(s, catalogs={'c0:1': catalog})
+    out = choose(g, s, options=catalog)
+    assert g.mission['escort_id'] is None
+    assert g.mission['status'] == 'awaiting_healthy_spare_escort'
+    assert out['growth']['healthy_local_defender_ids'] == ['u0:1']
+    assert out['growth']['military_owned_queued'] == 2
+    assert out['growth']['land_military_owned_queued'] == 1
+    assert out['item_id'] != 'SETTLER'
+
+
+def test_observed_terminal_city_stays_terminal_after_city_loss_before_expiration():
+    s = state([unit(), unit('escort')])
+    g = policy(s)
+    original = g.mission
+    g.complete_turn(1)
+    s['get_cities'].append(city('new-city', coord=original['site']))
+    g.begin_turn(s, turn=2)
+    terminal = g.mission
+    assert terminal['status'] == 'city_observed_at_site'
+    g.complete_turn(2)
+    s['get_cities'].pop()
+    g.begin_turn(s, turn=3)
+    assert g.mission == terminal
+    assert choose(g, s)['item_id'] != 'SETTLER'
+    assert g.mission == terminal
+
+
+def test_lost_settler_terminal_does_not_reopen_on_later_reappearance():
+    settler = unit('settler', kind='SETTLER', power=0)
+    s = state([unit(), unit('escort'), settler])
+    g = policy(s)
+    g.complete_turn(1)
+    s['get_units'].pop()
+    g.begin_turn(s, turn=2)
+    terminal = g.mission
+    assert terminal['status'] == 'settler_no_longer_observed_owned'
+    g.complete_turn(2)
+    s['get_units'].append(settler)
+    g.begin_turn(s, turn=3)
+    assert g.mission == terminal

@@ -15,6 +15,8 @@ from civ_arena.game.sim.state import hex_dist, neighbors
 
 _LAND = frozenset({'PLAINS', 'GRASSLAND', 'DESERT', 'HILL', 'FOREST', 'JUNGLE', 'MARSH'})
 _CAP_KEYS = {'combat', 'ranged', 'domain', 'found_city', 'build_charges'}
+_TERMINAL_MISSIONS = frozenset({'city_observed_at_site', 'expired',
+                                'settler_no_longer_observed_owned'})
 
 
 def _distance(a, b):
@@ -69,6 +71,15 @@ def _role(cap):
     if cap['combat'] is not None and cap['ranged'] is not None:
         return 'military' if max(cap['combat'], cap['ranged']) > 0 else 'other_civilian'
     return 'unknown'
+
+
+def _armed(cap):
+    return cap is not None and any(cap[key] is not None and cap[key] > 0
+                                   for key in ('combat', 'ranged'))
+
+
+def _unknown_arms(cap):
+    return cap is None or any(cap[key] is None for key in ('combat', 'ranged'))
 
 
 @dataclass(frozen=True)
@@ -154,6 +165,7 @@ class GrowthPolicy:
                          for c in mine)]
         threats = [unit for unit in local if unit.get('is_barbarian') is True]
         defenders = [unit for unit in own if (_power(unit) or 0) > 0
+                     and _role(self._capabilities.get(unit.get('type'))) == 'military'
                      and any(_distance(unit['coord'], c['coord']) <= self.controls.threat_radius
                              for c in mine)]
         healthy = [unit for unit in defenders if _healthy(unit)]
@@ -252,6 +264,9 @@ class GrowthPolicy:
     def _plan_settlement(self, state):
         units, cities, own, mine, tiles = self._state(state)
         mission = self._mission
+        if mission and mission['status'] in _TERMINAL_MISSIONS:
+            mission['proposal'] = None
+            return
         if mission and any(c['coord'] == mission['site'] and _owner(c) == self.player_id
                            for c in cities):
             mission.update(status='city_observed_at_site', proposal=None,
@@ -266,7 +281,8 @@ class GrowthPolicy:
             return
         settlers = sorted([u for u in own if _role(self._capabilities.get(u.get('type')))
                            == 'settler'], key=lambda u: u['unit_id'])
-        military = sorted([u for u in own if _healthy(u) and (_power(u) or 0) > 0],
+        military = sorted([u for u in own if _healthy(u) and (_power(u) or 0) > 0
+                           and _role(self._capabilities.get(u.get('type'))) == 'military'],
                           key=lambda u: (-(_power(u) or 0), u['unit_id']))
         if not mine or len(mine) >= self.controls.max_cities:
             if mission:
@@ -366,15 +382,18 @@ class GrowthPolicy:
         out = copy.deepcopy(base)
         candidates = out['candidates']
         owned = [u for u in state['get_units'] if _owner(u) == player_id]
-        field_count = sum((_power(u) or 0) > 0 for u in owned)
-        queued_count, future_power = 0, 0
+        queued_count, land_queued_count, future_power = 0, 0, 0
         uncertain_slots = []
         caps = {**self._capabilities, **{item: capability(row) for item, row in catalog.items()
                                        if row['kind'] == 'unit'}}
+        field_count = sum((_power(u) or 0) > 0 or _armed(caps.get(u.get('type')))
+                          for u in owned)
+        land_field_count = sum(_role(caps.get(u.get('type'))) == 'military' for u in owned)
         civilian = {role: sum(_role(caps.get(u.get('type'))) == role for u in owned)
                     for role in ('settler', 'builder')}
         for unit in owned:
-            if _power(unit) is None and _role(caps.get(unit.get('type'))) == 'unknown':
+            cap = caps.get(unit.get('type'))
+            if _power(unit) is None and not _armed(cap) and _unknown_arms(cap):
                 uncertain_slots.append({'unit_id': unit['unit_id']})
         for city in state['get_cities']:
             if _owner(city) != player_id:
@@ -385,16 +404,19 @@ class GrowthPolicy:
             promised = list(queue) + ([reserved] if reserved and reserved not in queue else [])
             for item in promised:
                 cap = caps.get(item)
-                if _role(cap) == 'military':
-                    queued_count += 1
-                    future_power += max(cap['combat'], cap['ranged'])
-                elif _role(cap) in civilian:
+                if _role(cap) in civilian:
                     civilian[_role(cap)] += 1
-                elif cap is None and catalog.get(item, {}).get('kind') != 'building':
+                if _armed(cap):
+                    queued_count += 1
+                    if _role(cap) == 'military':
+                        land_queued_count += 1
+                        future_power += max(cap['combat'], cap['ranged'])
+                elif _unknown_arms(cap) and catalog.get(item, {}).get('kind') != 'building':
                     uncertain_slots.append({'city_id': city['city_id'], 'item_id': item})
         total_military = field_count + queued_count
         occupied_slots = total_military + len(uncertain_slots)
-        shortfall = max(0, risk['minimum_military_count'] - total_military)
+        land_military = land_field_count + land_queued_count
+        shortfall = max(0, risk['minimum_military_count'] - land_military)
         power_gap = max(0, risk['planning_strength_target']
                         - risk['healthy_local_defense_strength_sum'])
         production_power_gap = max(0, power_gap - future_power)
@@ -443,6 +465,7 @@ class GrowthPolicy:
         out.update(version=2, item_id=chosen, reason='growth_policy_choice' if chosen else
                    'no_eligible_growth_production', growth={'mode': mode, **risk,
                    'military_owned_queued': total_military,
+                   'land_military_owned_queued': land_military,
                    'military_cap': self.controls.military_cap, 'count_shortfall': shortfall,
                    'unclassified_capacity_reservations': uncertain_slots,
                    'military_capacity_slots': occupied_slots, 'civilian_inventory': civilian,
