@@ -20,7 +20,13 @@ from typing import Any, Protocol
 
 import httpx
 
-from civ_arena.agents.llm.request_budget import TokenCount, input_payload, payload_hash
+from civ_arena.agents.llm.request_budget import (
+    GenerationAdmission,
+    TokenCount,
+    encoded,
+    input_payload,
+    payload_hash,
+)
 from civ_arena.config import LLMSpec
 
 ANTHROPIC_VERSION = "2023-06-01"
@@ -160,6 +166,18 @@ class MiniMaxMessagesClient:
         body['max_tokens'] = self.spec.max_tokens
         return self._parse(await self._post_doc(body, 'generation', '/messages'))
 
+    async def create_admitted(self, *, admission: GenerationAdmission) -> ModelReply:
+        try:
+            body = admission.body()
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ModelUnavailable('invalid generation admission') from exc
+        admitted_model = body['model']
+        doc = await self._post_doc(body, 'generation', '/messages', admission=admission)
+        # A concurrent configuration edit cannot relabel a missing response model.
+        if isinstance(doc, dict) and 'model' not in doc:
+            doc = {**doc, 'model': admitted_model}
+        return self._parse(doc)
+
     async def count_tokens(self, *, system: str, messages: list[dict[str, Any]],
                            tools: list[dict[str, Any]],
                            tool_choice: dict[str, Any] | None = None) -> TokenCount:
@@ -173,11 +191,23 @@ class MiniMaxMessagesClient:
         tokens = doc.get('input_tokens') if isinstance(doc, dict) else None
         if type(tokens) is not int or tokens < 1:
             raise ModelUnavailable('token counter returned invalid input_tokens')
-        if 'model' in doc and doc['model'] != self.spec.model_id:
+        if 'model' in doc and doc['model'] != body['model']:
             raise ModelUnavailable('token counter model mismatch')
-        return TokenCount(tokens, self.spec.model_id, payload_hash(body))
+        return TokenCount(tokens, body['model'], payload_hash(body))
 
-    async def _post_doc(self, body: dict, request_kind: str, path: str) -> Any:
+    async def _post_doc(self, body: dict, request_kind: str, path: str, *,
+                        admission: GenerationAdmission | None = None) -> Any:
+        # Freeze admitted bytes before any await or callback. The legacy path
+        # retains its existing JSON serialization and has no token admission.
+        dispatch_json = encoded(body) if request_kind == 'count_tokens' else None
+        if admission is not None:
+            try:
+                admitted_body = admission.body()
+                if body != admitted_body or request_kind != 'generation' or path != '/messages':
+                    raise ValueError('dispatch differs from admission')
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ModelUnavailable('invalid generation admission') from exc
+            dispatch_json = admission.request_json
         url = self.spec.base_url.rstrip('/') + path
         if self._http is None:
             self._http = httpx.AsyncClient(
@@ -185,6 +215,9 @@ class MiniMaxMessagesClient:
 
         last_error = "no attempt made"
         for attempt in range(self.spec.max_retries + 1):
+            if admission is not None and (self.spec.model_id != admitted_body['model']
+                    or self.spec.max_tokens != admitted_body['max_tokens']):
+                raise ModelUnavailable('admitted generation configuration mismatch')
             self._budget_check()
             # capture the key BEFORE posting: redaction must target the
             # credential actually sent, even if the env var rotates mid-flight
@@ -200,8 +233,11 @@ class MiniMaxMessagesClient:
                 self.on_post()  # durable spend ledger (per attempt)
             try:
                 resp = await self._http.post(
-                    url, json=body,
+                    url, **({'content': dispatch_json} if dispatch_json is not None
+                            else {'json': body}),
                     headers={"anthropic-version": ANTHROPIC_VERSION,
+                             **({'content-type': 'application/json'}
+                                if dispatch_json is not None else {}),
                              **({"Authorization": f"Bearer {sent_key}"}
                                 if self.auth_style == "bearer"
                                 else {"x-api-key": sent_key})})

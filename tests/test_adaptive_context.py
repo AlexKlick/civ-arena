@@ -10,7 +10,14 @@ import pytest
 
 from civ_arena.agents.llm.client import MiniMaxMessagesClient, ModelUnavailable
 from civ_arena.agents.llm.context_curator import CONTEXT_MARKER, ContextCurator, distance
-from civ_arena.agents.llm.request_budget import TokenCount, input_payload, payload_hash, task_for
+from civ_arena.agents.llm.request_budget import (
+    GenerationAdmission,
+    TokenCount,
+    encoded,
+    input_payload,
+    payload_hash,
+    task_for,
+)
 from civ_arena.agents.llm.runtime import LLMAgentRuntime
 from civ_arena.agents.llm.strategic_controller import StrategicController
 from civ_arena.agents.llm.terrain_context import entity_rows, terrain_rows
@@ -315,3 +322,138 @@ async def test_generation_output_configuration_must_match_count_reserve(monkeypa
     finally:
         await runtime.aclose()
     assert not requests
+
+
+@pytest.mark.parametrize('field,value', [('max_tokens',8192),('model_id','OTHER_MODEL')])
+@pytest.mark.parametrize('when', ['after_count','generation_audit'])
+async def test_configuration_drift_after_admission_refuses_generation(monkeypatch,field,value,when):
+    runtime,controller,requests,records,_,_=harness(monkeypatch,window=4200)
+    original=runtime.client.count_tokens
+    async def drift(**kwargs):
+        receipt=await original(**kwargs)
+        runtime.client.spec=replace(runtime.client.spec,**{field:value})
+        return receipt
+    if when=='after_count':
+        runtime.client.count_tokens=drift
+    else:
+        def audit(record):
+            records.append(record)
+            if record['audit']=='strategy_request':
+                runtime.client.spec=replace(runtime.client.spec,**{field:value})
+        controller.audit=audit
+    curator=ContextCurator(RetainedProjection(),1,8000)
+    await curator.refresh()
+    try:
+        with pytest.raises(ModelUnavailable,match='generation configuration mismatch'):
+            await controller._decide(runtime,curator,['initial_strategy'])
+    finally:
+        await runtime.aclose()
+    assert [kind for kind,_ in requests]==['count_tokens']
+    assert runtime.client.posts_by_kind=={'count_tokens':1,'generation':0}
+
+
+@pytest.mark.parametrize('field,value', [('max_tokens',8192),('model_id','OTHER_MODEL')])
+async def test_post_hook_drift_cannot_change_serialized_admitted_generation(
+        monkeypatch,field,value):
+    runtime,controller,requests,_,_,_=harness(monkeypatch,window=4200)
+    def hook(kind):
+        if kind=='generation':
+            runtime.client.spec=replace(runtime.client.spec,**{field:value})
+    runtime.client.on_request_post=hook
+    curator=ContextCurator(RetainedProjection(),1,8000)
+    await curator.refresh()
+    try:
+        await controller._decide(runtime,curator,['initial_strategy'])
+    finally:
+        await runtime.aclose()
+    counted,generated=[body for _,body in requests]
+    assert {k:v for k,v in generated.items() if k!='max_tokens'}==counted
+    assert generated['model']=='MiniMax-M3' and generated['max_tokens']==4096
+    assert runtime.client.posts_by_kind=={'count_tokens':1,'generation':1}
+
+
+async def test_admitted_body_is_immutable_across_hook_mutation_and_transport_retries(monkeypatch):
+    runtime,_,_,_,_,_=harness(monkeypatch)
+    client=runtime.client
+    await client._http.aclose()
+    sent=[]
+    def handler(request):
+        sent.append(bytes(request.content))
+        if len(sent)==1:
+            return httpx.Response(503,json={})
+        assert request.headers['content-type']=='application/json'
+        return httpx.Response(200,json={'content':[]})
+    client._http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr('civ_arena.agents.llm.client.asyncio.sleep',AsyncMock())
+    kwargs={'system':'original','messages':[{'role':'user','content':'original'}],
+            'tools':[{'name':'original'}],'tool_choice':{'type':'tool','name':'original'}}
+    body=input_payload(client.spec.model_id,**kwargs)
+    receipt=TokenCount(100,client.spec.model_id,payload_hash(body),'injected_token_counter')
+    admission=GenerationAdmission(encoded({**body,'max_tokens':4096}),receipt,4200)
+    original=client._post_doc
+    async def wrapped(body,kind,path,**kw):
+        # Simulates caller-owned dictionaries changed immediately before POST.
+        def mutate():
+            body.update(model='OTHER_MODEL',max_tokens=8192,system='changed',
+                        messages=[],tools=[],tool_choice={'type':'none'})
+            kwargs['messages'][0]['content']='changed'
+        client.on_post=mutate
+        return await original(body,kind,path,**kw)
+    client._post_doc=wrapped
+    try:
+        reply=await client.create_admitted(admission=admission)
+    finally:
+        await runtime.aclose()
+    assert sent==[admission.request_json.encode()]*2
+    assert reply.model=='MiniMax-M3'
+    assert admission.body()['messages'][0]['content']=='original'
+    assert client.posts_by_kind=={'generation':2,'count_tokens':0}
+
+
+@pytest.mark.parametrize('change', ['window','count','input','reserve','extra'])
+async def test_invalid_admission_never_posts(monkeypatch,change):
+    runtime,_,requests,_,_,_=harness(monkeypatch)
+    body=input_payload('MiniMax-M3',system='s',messages=[],tools=[])
+    receipt=TokenCount(100,'MiniMax-M3',payload_hash(body),'injected_token_counter')
+    body['max_tokens']=4096
+    window=4200
+    if change=='window':
+        window=4195
+    elif change=='count':
+        receipt=replace(receipt,input_tokens=True)
+    elif change=='input':
+        body['tools']=[{'name':'uncounted'}]
+    elif change=='reserve':
+        body['max_tokens']=8192
+    elif change=='extra':
+        body['uncounted_extra']='not allowed'
+    admission=GenerationAdmission(encoded(body),receipt,window)
+    try:
+        with pytest.raises(ModelUnavailable,match='invalid generation admission'):
+            await runtime.client.create_admitted(admission=admission)
+    finally:
+        await runtime.aclose()
+    assert requests==[] and runtime.client.posts_sent==0
+
+
+async def test_count_and_admitted_generation_use_same_canonical_field_serialization(monkeypatch):
+    runtime,controller,_,_,_,_=harness(monkeypatch)
+    await runtime.client._http.aclose()
+    sent=[]
+    def handler(request):
+        doc=json.loads(request.content)
+        assert request.content==encoded(doc).encode()
+        assert request.headers['content-type']=='application/json'
+        sent.append(doc)
+        if request.url.path.endswith('count_tokens'):
+            return httpx.Response(200,json={'input_tokens':100})
+        return httpx.Response(200,json={'content':[use('submit_directive',{'version':1})]})
+    runtime.client._http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    curator=ContextCurator(RetainedProjection(),1,8000)
+    await curator.refresh()
+    try:
+        await controller._decide(runtime,curator,['initial_strategy'])
+    finally:
+        await runtime.aclose()
+    assert len(sent)==2
+    assert {k:v for k,v in sent[1].items() if k!='max_tokens'}==sent[0]
