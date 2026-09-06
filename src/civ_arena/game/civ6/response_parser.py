@@ -152,7 +152,9 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
     the omniscient UNITS doc (projection consumes q/r/owner/hp/movement/
     max_movement/strength/ranged_strength/fortified; ownership checks read
     owner). An optional twelfth field carries a strict native is_barbarian
-    boolean; historical eleven-field rows preserve the absent classification.
+    boolean. New fourteen-field rows append maximum HP and health-validity;
+    invalid native health is explicitly unknown. Legacy eleven/twelve-field rows
+    remain byte-compatible parsed observations, without inferred maximum health.
     Sorted by numeric engine id — the sim's deterministic order."""
     out: list[dict[str, Any]] = []
     for line in _split_lines(lines):
@@ -163,9 +165,23 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
         if prefix != "UNITROW":
             raise ValueError(f"non-unit row in units read: {line!r}")
         parts = rest.split("|")
-        if len(parts) not in (11, 12):
-            raise ValueError(f"malformed UNITROW (want 11 or 12 fields): {line!r}")
+        if len(parts) not in (11, 12, 14):
+            raise ValueError(f"malformed UNITROW (want 11, 12 or 14 fields): {line!r}")
         metadata = {}
+        unknown_health = False
+        if len(parts) == 14:
+            maximum, valid = parts[-2:]
+            parts = parts[:-2]
+            hp_token = parts[5]
+            if valid == "false" and maximum == hp_token == "unknown":
+                metadata.update(max_hp=None, health_valid=False)
+                unknown_health = True
+            elif (valid == "true" and re.fullmatch(r"[1-9][0-9]{0,6}", maximum)
+                  and re.fullmatch(r"0|[1-9][0-9]{0,6}", hp_token)
+                  and 0 <= int(hp_token) <= int(maximum) <= 1_000_000):
+                metadata.update(max_hp=int(maximum), health_valid=True)
+            else:
+                raise ValueError("malformed UNITROW native health metadata")
         if len(parts) == 12:
             barbarian = parts.pop()
             if barbarian not in ("true", "false"):
@@ -179,7 +195,7 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
             "type": type_,
             "q": _coerce_strict(q),
             "r": _coerce_strict(r),
-            "hp": _coerce_strict(hp),
+            "hp": None if unknown_health else _coerce_strict(hp),
             "movement": _coerce_strict(moves),
             "max_movement": _coerce_strict(maxmoves),
             "strength": _coerce_strict(combat),
