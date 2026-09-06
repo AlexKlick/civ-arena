@@ -19,7 +19,8 @@ from fakes import FakeModel, text, use
 class Facade:
     def __init__(self):
         self.units = [{'unit_id': 'u0:1', 'owner_id': 0, 'type': 'SCOUT',
-                       'coord': '0,0', 'movement': 2, 'hp': 100}]
+                       'coord': '0,0', 'movement': 2, 'hp': 100,
+                       'max_hp': 100, 'health_valid': True}]
         self.cities = []
         self.you = {'researching': 'MINING', 'gold': 0}
         self.calls = []

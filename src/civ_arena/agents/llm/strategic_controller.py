@@ -18,6 +18,7 @@ from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.production_policy import choose_production
+from civ_arena.agents.recovery import RecoveryPolicy, RecoveryTracker
 from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
 from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
 from civ_arena.arena.referee import MatchAborted
@@ -53,6 +54,13 @@ until the empire has two defenders per city; explicit unit_targets still apply.
 scouting.unit_types assigns persistent roles; include SCOUT to send built scouts
 exploring. Explicit omission holds those scouts and suppresses new scout production;
 tactical orders still apply.
+The recovery overlay pauses normal missions below the configured observed HP ratio
+until the resume threshold is observed. Unknown health cannot prove recovery.
+Explicit tactical orders can interrupt recovery for one turn (for example retreat
+from ongoing damage), without cancelling recovery or replacing the unit's mission.
+Recovery holds are ordinary standing orders; a submitted order is not proof of healing.
+Review recovery_under_damage or recovery_no_observed_gain using observed terrain and
+contacts. No observed enemy does not prove safety, and unknown health is not full HP.
 If production_targets_satisfied requests a late economic adjustment, scouting has
 already executed. Adjust available production targets or preferences; tactical
 overrides from that late request will be discarded.
@@ -71,6 +79,9 @@ class StrategicController:
     cadence: int = 5
     audit: Callable[[dict], None] | None = None
     opening_units_frozen: bool = False
+    recovery_policy: RecoveryPolicy = field(default_factory=RecoveryPolicy)
+    _recovery: RecoveryTracker = field(init=False)
+    _recovery_proposal: dict | None = field(default=None, init=False)
     directive: dict | None = field(default=None, init=False)
     _last_turn: int = field(default=0, init=False)
     _last_decision: int = field(default=0, init=False)
@@ -81,6 +92,7 @@ class StrategicController:
     _scouting_feedback: ScoutingFeedback = field(default_factory=ScoutingFeedback, init=False)
 
     def __post_init__(self) -> None:
+        self._recovery = RecoveryTracker(self.recovery_policy)
         if not isinstance(self.match_id, str) or not self.match_id:
             raise ValueError('strategic controller requires match_id')
         if type(self.opening_units_frozen) is not bool:
@@ -155,8 +167,13 @@ class StrategicController:
             feedback = self._scouting_feedback.begin_turn(
                 curator.state, player_id=runtime.profile.player_id, turn=turn,
                 completed_turn=self._last_turn)
+            recovery = self._recovery.begin_turn(
+                curator.state['get_units'], player_id=runtime.profile.player_id,
+                turn=turn, completed_turn=self._last_turn)
+            self._recovery_proposal = recovery
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
+            reasons.extend(recovery['review_reasons'])
             if reasons:
                 await curator.refresh()
                 directive = await self._decide(runtime, curator, reasons)
@@ -168,7 +185,7 @@ class StrategicController:
                        reasons=reasons, last_decision_turn=self._last_decision,
                        seed=runtime.profile.seed, directive=directive,
                        persistence='fresh_only_v1', cadence=self.cadence,
-                       opening_frozen_unit_ids=sorted(frozen_ids))
+                       opening_frozen_unit_ids=sorted(frozen_ids), recovery=recovery)
 
             async def refresh() -> dict:
                 # Scouting consumes map/entities only; refresh economy once afterwards.
@@ -179,8 +196,14 @@ class StrategicController:
                 curator.state, directive=directive, player_id=runtime.profile.player_id,
                 match_id=self.match_id, agent_id=runtime.profile.agent_id, turn=turn,
                 execute=curator.execute, refresh=refresh, seed=runtime.profile.seed,
-                frozen_unit_ids=frozen_ids, nonprogress=feedback["suppressed"])
+                frozen_unit_ids=frozen_ids, nonprogress=feedback["suppressed"],
+                recovery=recovery['units'], recovery_policy=self.recovery_policy)
+            # A post-action refresh can first reveal unknown/damaged health in
+            # another unit. Commit that newly held state only after turn closure.
+            for uid, row in graph.get('recovery_overlay', {}).items():
+                recovery['units'].setdefault(uid, copy.deepcopy(row))
             graph["nonprogress_feedback"] = feedback
+            graph["recovery"] = recovery
             # Retain explicit role exclusions, but make otherwise idle scouts
             # visible in the graph details consumed by the existing dashboard.
             excluded = ({u['unit_id'] for u in curator.own('get_units')
@@ -201,6 +224,7 @@ class StrategicController:
             await runtime._close_turn(facade)
             self._previous = self._facts(curator)
             self._last_turn = turn
+            self._recovery.commit(recovery)
             pending = self._scouting_feedback.remember_completed(graph, turn=turn)
             self._emit(runtime, 'strategy_turn_closed', source='controller',
                        scouting_pending_confirmation=pending)
@@ -211,6 +235,17 @@ class StrategicController:
         except Exception as exc:
             self._emit(runtime, 'strategy_failed', reason=type(exc).__name__)
             raise
+
+    def _recovery_context(self) -> dict | None:
+        if self._recovery_proposal is None:
+            return None
+        proposal = self._recovery_proposal
+        columns = ['unit_id', 'state', 'hp', 'max_hp', 'no_gain_turns']
+        return {'policy': proposal['policy'], 'observed_turn': proposal['turn'],
+                'columns': columns, 'units': [[row[key] for key in columns]
+                    for row in proposal['units'].values()],
+                'meaning': 'Pauses routine mission; explicit tactical action interrupts one turn. '
+                    'Null health is unavailable. A standing order does not prove healing.'}
 
     @staticmethod
     def _response_shape(reply: Any) -> tuple[dict, list[dict]]:
@@ -248,6 +283,7 @@ class StrategicController:
         metadata = {'turn': runtime._turn, 'player_id': runtime.profile.player_id,
                     'reasons': reasons, 'previous_directive': self.directive,
                     'decision_packet': decision_packet(observation, self._decision_observation),
+                    'recovery': self._recovery_context(),
                     'movement_authority': {
                         'opening_units_frozen': opening_authority,
                         'untouched_owned_unit_ids': sorted(
