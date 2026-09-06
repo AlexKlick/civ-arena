@@ -118,14 +118,16 @@ print("---END---")
 
 
 def units_read() -> str:
-    """Sim-UNITS-shaped omniscient read (ALL alive majors' units — the
+    """Sim-UNITS-shaped omniscient read (ALL alive players' units — the
     referee's ownership check needs foreign units present; the projection
     hides what the viewer cannot see). Engine UnitTypes are normalized by
     prefix-strip (UNIT_WARRIOR -> WARRIOR) so agent-facing ids match the
     scripted doctrines' vocabulary."""
     return f"""
 print("UNITS|1")
-for _, p in ipairs(PlayerManager.GetAliveMajors()) do
+for _, p in ipairs(PlayerManager.GetAlive()) do
+    local barbarian = p:IsBarbarian()
+    assert(type(barbarian) == "boolean", "IsBarbarian must return boolean")
     for _, unit in p:GetUnits():Members() do
         local gone = false
         pcall(function() gone = (unit:GetX() == -9999) end)
@@ -156,7 +158,8 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
             .. "|" .. p:GetID() .. "|" .. name
             .. "|" .. (x - math.floor(y / 2)) .. "|" .. y
             .. "|" .. hp .. "|" .. moves .. "|" .. maxmoves
-            .. "|" .. combat .. "|" .. ranged .. "|" .. tostring(fortified))
+            .. "|" .. combat .. "|" .. ranged .. "|" .. tostring(fortified)
+            .. "|" .. tostring(barbarian))
         end
     end
 end

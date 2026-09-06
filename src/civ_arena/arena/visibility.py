@@ -30,7 +30,8 @@ class Scope(enum.StrEnum):
 
 # Field allowlists for foreign (non-owned) entities.
 FOREIGN_UNIT_FIELDS = frozenset(
-    {"unit_id", "type", "coord", "owner_id", "hp_bucket", "strength", "ranged_strength"}
+    {"unit_id", "type", "coord", "owner_id", "hp_bucket", "strength", "ranged_strength",
+     "is_barbarian"}
 )
 FOREIGN_CITY_FIELDS = frozenset({"city_id", "name", "coord", "owner_id", "hp", "population"})
 
@@ -127,6 +128,8 @@ class VisibilityPolicy:
     def _unit(self, u: dict[str, Any], player_id: int,
               observable: frozenset[str]) -> dict[str, Any] | None:
         key = f"{u['q']},{u['r']}"
+        metadata = ({"is_barbarian": u["is_barbarian"]}
+                    if type(u.get("is_barbarian")) is bool else {})
         if u["owner"] == player_id:
             return {
                 "unit_id": u["unit_id"],
@@ -140,6 +143,7 @@ class VisibilityPolicy:
                 "strength": u["strength"],
                 "ranged_strength": u["ranged_strength"],
                 "fortified": u["fortified"],
+                **metadata,
             }
         if key not in observable:
             return None  # hidden: absent, not masked
@@ -155,6 +159,7 @@ class VisibilityPolicy:
             "strength": u["strength"],
             "ranged_strength": u["ranged_strength"],
             "fortified": u["fortified"],
+            **metadata,
         }
         return {k: v for k, v in full.items() if k in self.foreign_unit_fields}
 

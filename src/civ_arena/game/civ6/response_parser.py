@@ -151,7 +151,9 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
     """UNITROW|uid|pid|type|q|r|hp|moves|maxmoves|combat|ranged|fortified ->
     the omniscient UNITS doc (projection consumes q/r/owner/hp/movement/
     max_movement/strength/ranged_strength/fortified; ownership checks read
-    owner). Sorted by numeric engine id — the sim's deterministic order."""
+    owner). An optional twelfth field carries a strict native is_barbarian
+    boolean; historical eleven-field rows preserve the absent classification.
+    Sorted by numeric engine id — the sim's deterministic order."""
     out: list[dict[str, Any]] = []
     for line in _split_lines(lines):
         line = line.strip()
@@ -161,8 +163,14 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
         if prefix != "UNITROW":
             raise ValueError(f"non-unit row in units read: {line!r}")
         parts = rest.split("|")
-        if len(parts) != 11:
-            raise ValueError(f"malformed UNITROW (want 11 fields): {line!r}")
+        if len(parts) not in (11, 12):
+            raise ValueError(f"malformed UNITROW (want 11 or 12 fields): {line!r}")
+        metadata = {}
+        if len(parts) == 12:
+            barbarian = parts.pop()
+            if barbarian not in ("true", "false"):
+                raise ValueError("malformed UNITROW is_barbarian boolean")
+            metadata["is_barbarian"] = barbarian == "true"
         (uid, pid, type_, q, r, hp, moves, maxmoves, combat, ranged,
          fortified) = parts
         out.append({
@@ -177,6 +185,7 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
             "strength": _coerce_strict(combat),
             "ranged_strength": _coerce_strict(ranged),
             "fortified": _coerce(fortified),
+            **metadata,
         })
     if qualified and len({u["unit_id"] for u in out}) != len(out):
         raise ValueError("duplicate unit identity in observation")
