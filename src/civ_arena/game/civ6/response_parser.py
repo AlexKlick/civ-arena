@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from civ_arena.game.civ6 import entity_ids
+from civ_arena.game.terrain_metadata import native_terrain
 
 # canonical ints only: a token that LOOKS numeric by any other spelling
 # (12.5, .5, 1., 1e3, nan, inf, +7) fails closed (Codex P2-9)
@@ -347,7 +348,8 @@ def parse_visible_map(lines: list[str]) -> dict[str, Any]:
         if sim_terrain is None:
             sim_terrain = "PLAINS"
             unknown += 1
-        entry: dict[str, Any] = {"terrain": sim_terrain}
+        entry: dict[str, Any] = {"terrain": sim_terrain,
+                                 "native_terrain": native_terrain(terrain)}
         if vis_flag == "true":
             visible.add(key)
             entry["owner"] = _coerce_strict(owner)

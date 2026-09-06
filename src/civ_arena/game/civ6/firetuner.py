@@ -53,6 +53,7 @@ from civ_arena.game.adapter import (
 from civ_arena.game.civ6 import lua_translator, response_parser
 from civ_arena.game.civ6.entity_ids import decode
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
+from civ_arena.game.terrain_metadata import terrain_fields
 
 _LIVE_POINTER = (
     "live FireTuner support is not implemented yet — see "
@@ -627,6 +628,8 @@ class FireTunerAdapter:
                     timeout=25.0))
             turn = parsed["turn"]
             fresh = parsed["tiles"]
+            if set(fresh) - visible:
+                raise ValueError("terrain response contains unrequested coordinates")
             cache = self._map_vis.setdefault(
                 req.player_id, {"turn": turn, "tiles": {}, "visible": set()})
             # remembered = every tile EVER visible, terrain frozen at its
@@ -651,9 +654,9 @@ class FireTunerAdapter:
             out: dict[str, dict[str, Any]] = {}
             for key, tile in cache["tiles"].items():
                 if key in visible:
-                    out[key] = tile
+                    out[key] = {**tile, **terrain_fields(tile)}
                 else:
-                    out[key] = {"terrain": tile["terrain"]}
+                    out[key] = terrain_fields(tile)
             return {"turn": turn, "tiles": out}
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
             lines = await self._conn.execute_read(

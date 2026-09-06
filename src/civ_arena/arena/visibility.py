@@ -16,6 +16,8 @@ import copy
 import enum
 from typing import Any
 
+from civ_arena.game.terrain_metadata import terrain_fields
+
 BILATERAL_STUB: dict[str, Any] = {"status": "stub", "participants": []}
 
 
@@ -106,10 +108,7 @@ class VisibilityPolicy:
                 sees = key in observable
                 if not (sees or key in remembered):
                     continue
-                entry: dict[str, Any] = {
-                    "coord": key,
-                    "terrain": tile["terrain"],
-                }
+                entry: dict[str, Any] = {"coord": key, **terrain_fields(tile)}
                 if sees:
                     entry["owner_id"] = tile["owner"]
                     entry["city_id"] = tile["city"]

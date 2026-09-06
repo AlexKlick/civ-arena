@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from civ_arena.agents.llm.terrain_evidence import cold_biome_evidence
 from civ_arena.arena.referee import MatchAborted
+from civ_arena.game.terrain_metadata import terrain_fields
 
 BASIC_READS = frozenset({'get_units', 'get_cities', 'get_overview', 'get_visible_map',
                          'get_available_research', 'get_available_production', 'get_strategy'})
@@ -248,20 +250,27 @@ class ContextCurator:
                                             for x in options]
                                       for cid, options in sorted(self.production.items())},
                'terrain': [], 'terrain_omitted': 0,
+               'native_terrain_scope': 'Optional source type/biome/hills; absent or null means '
+                    'unknown. terrain remains the normalized movement class. '
+                    'Known terrain may be remembered; no map limits or latitude are supplied.',
                'scope': 'Known terrain is not a legal-move list. Observations follow the previous '
                         'action batch; accepted movement may leave position unchanged.'}
         tiles = self.state['get_visible_map'].get('tiles')
         if not isinstance(tiles, dict):
             raise MatchAborted('context map tiles have invalid shape')
         anchors = [row['coord'] for row in mine_u + mine_c]
+        if anchors and any('native_terrain' in tile for tile in tiles.values()):
+            reference = (sorted(mine_c, key=lambda row: row['city_id'])[0]['coord'] if mine_c
+                         else sorted(mine_u, key=lambda row: row['unit_id'])[0]['coord'])
+            doc['cold_biome_evidence'] = cold_biome_evidence(tiles, reference)
         if self.focus:
             anchors.append(self.focus)
         ordered = sorted(tiles, key=lambda key: (min((distance(key, at) for at in anchors),
                                                      default=0), key))
         for key in ordered:
             if any(distance(key, at) <= 1 for at in anchors):
-                doc['terrain'].append({'coord': key, **selected(
-                    tiles[key], ('terrain', 'owner_id', 'city_id'))})
+                doc['terrain'].append({'coord': key, **terrain_fields(tiles[key]),
+                    **selected(tiles[key], ('owner_id', 'city_id'))})
         required = len(doc['terrain'])
         doc['terrain_omitted'] = len(tiles) - required
         if len(CONTEXT_MARKER) + len(encode(doc)) > self.budget:
@@ -272,7 +281,8 @@ class ContextCurator:
                 break
             if key in included or not any(distance(key, at) <= 2 for at in anchors):
                 continue
-            row = {'coord': key, **selected(tiles[key], ('terrain', 'owner_id', 'city_id'))}
+            row = {'coord': key, **terrain_fields(tiles[key]),
+                   **selected(tiles[key], ('owner_id', 'city_id'))}
             doc['terrain'].append(row)
             doc['terrain_omitted'] -= 1
             if len(CONTEXT_MARKER) + len(encode(doc)) > self.budget:
