@@ -327,6 +327,29 @@ class FakeMod:
                 b for b in self.pending_blockers
                 if not b.endswith("ENDTURN_BLOCKING_RESEARCH")]
             return [f"ACT|set_research|OK|{tech}", "---END---"]
+        if tool == "set_city_production" and "-- arena:productive=" in code:
+            family, item, x, y = re.search(
+                r"-- arena:productive=(district|project)\|([A-Z0-9_]+)\|(-?\d+)\|(-?\d+)",
+                code).groups()
+            cid = int(re.search(r"CityManager.GetCity\(me,(\d+)\)", code).group(1))
+            city = self.cities.get(cid)
+            row = getattr(self, "productive_options", {}).get(item)
+            if city is None or city["owner"] != me:
+                return ["ACT|set_city_production|ERR|NOT_YOUR_CITY|productive-refused", "---END---"]
+            if city.get("queue"):
+                return ["ACT|set_city_production|ERR|ALREADY|productive-refused", "---END---"]
+            if row is None or row["kind"] != family:
+                return ["ACT|set_city_production|ERR|PREREQ_UNMET|productive-refused", "---END---"]
+            q, r = _ax(int(x), int(y))
+            if family == "district" and f"{q},{r}" not in row["placements"]:
+                return ["ACT|set_city_production|ERR|ILLEGAL_DEST|productive-refused", "---END---"]
+            city["queue"] = item
+            index, dtype = ((row["plot_index"], row["district_index"])
+                            if family == "district" else (-1, -1))
+            city["productive_placement"] = (index, dtype)
+            return [f"PRODUCTIVE_REQUEST|{family}|{item}|"
+                    f"{self._production_hash(item)}|{index}|{dtype}",
+                    f"ACT|set_city_production|OK|{item}", "PRODUCTIVE_REQUEST_END|1", "---END---"]
         if tool == "set_city_production":
             cid = dec(num(r"CityManager\.GetCity\(me, (\d+)\)"))
             item = token(r"GameInfo\.Units\['UNIT_([A-Z0-9_]+)'\]") or \
@@ -423,10 +446,24 @@ class FakeMod:
             rows = [f"TECHROW|{t}|{cost}" for t, cost in sorted(self.TECHS.items())
                     if t not in p["researched"]]
             return ["AVRES|1", *rows, "---END---"]
+        if "-- arena:productive_readback=" in code:
+            cid = int(re.search(r"CityManager.GetCity\(me,(\d+)\)", code).group(1))
+            city = self.cities.get(cid)
+            if city is None or city["owner"] != self.local_player:
+                return ["ERROR:productive readback owner unavailable"]
+            index, dtype = city.get("productive_placement", (-1,-1))
+            district = index >= 0
+            owner, belongs = (city["owner"], "true") if district else (-1, "false")
+            h = self._production_hash(city["queue"]) if city.get("queue") else 0
+            return [f"PRODUCTIVE_STATE|{h}|{index}|{dtype}|{owner}|{belongs}|{belongs}",
+                    "PRODUCTIVE_STATE_END|1", "---END---"]
         if 'print("AVPROD|1")' in code:
             rows = [f"ITEMROW|{kind}|{item}|{cost}|10"
                     for item, (cost, kind) in sorted(self.BUILDABLE.items())]
-            return ["AVPROD|1", *rows, "---END---"]
+            for item, row in sorted(getattr(self, "productive_options", {}).items()):
+                extra = "|" + ";".join(row["placements"]) if row["kind"] == "district" else ""
+                rows.append(f"ITEMROW|{row['kind']}|{item}|54|10{extra}")
+            return ["AVPROD|1", *rows, "PRODUCTIVE_OPTIONS_END|1", "---END---"]
         # -- M14d acts (the translator's inert marker identifies the tool) --
         m = re.search(r"-- arena:tool=(\w+)", code)
         if m is not None:

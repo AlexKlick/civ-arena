@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 
+from civ_arena.game.civ6 import productive_native
 from civ_arena.game.civ6.entity_ids import decode
 
 # ---------------------------------------------------------------------------
@@ -220,6 +221,21 @@ for _, p in ipairs(PlayerManager.GetAliveMajors()) do
                     if row.Hash == h then queue = row.BuildingType break end
                 end
             end
+            if string.match(queue, '^UNIT_DISTRICT_') or string.match(queue, '^UNIT_PROJECT_')
+                or string.match(queue, '^BUILDING_DISTRICT_')
+                or string.match(queue, '^BUILDING_PROJECT_') then
+                error('legacy queue collides with reserved productive namespace')
+            end
+            if queue == "-" and GameInfo.Districts ~= nil then
+                for row in GameInfo.Districts() do
+                    if row.Hash == h then queue = row.DistrictType break end
+                end
+            end
+            if queue == "-" and GameInfo.Projects ~= nil then
+                for row in GameInfo.Projects() do
+                    if row.Hash == h then queue = row.ProjectType break end
+                end
+            end
             if queue == "-" then
                 queue = "UNKNOWN_PRODUCTION_" .. tostring(h)
             elseif string.sub(queue, 1, 5) == "UNIT_" then
@@ -317,9 +333,10 @@ def available_production_read(city_id: str) -> str:
     return f"""
 print("AVPROD|1")
 local me = Game.GetLocalPlayer()
-if me ~= {owner} then print("---END---") return end
+if me ~= {owner} then error("production observation owner mismatch") end
 local pCity = CityManager.GetCity(me, {raw})
-if pCity == nil or pCity:GetID() ~= {raw} then print("---END---") return end
+if pCity == nil or pCity:GetID() ~= {raw} or pCity:GetOwner() ~= me then
+    error("production observation city unavailable") end
 local bq = pCity:GetBuildQueue()
 local function cap_number(v)
     if type(v) == "number" and v == v and v >= 0 and v <= 10000
@@ -376,6 +393,7 @@ for row in GameInfo.Buildings() do
         end
     end
 end
+{productive_native.options_lua()}
 print("---END---")
 """
 
@@ -847,10 +865,14 @@ end
 if item == nil then {_bail(tool, "ARGS_INVALID", item_id)} end"""
 
 
-def set_city_production(city_id: str, item_id: str) -> str:
+def set_city_production(city_id: str, item_id: str, dest: str | None = None) -> str:
     """InGame CityManager.RequestOperation(BUILD) with upstream's
     VALUE_EXCLUSIVE insert mode — the tool's contract is REPLACE, not
     queue-alongside."""
+    if item_id.startswith(("DISTRICT_", "PROJECT_")):
+        return productive_native.request_lua(city_id, item_id, dest)
+    if dest is not None:
+        raise ValueError('placement is supported only for exact district production')
     owner, cid = decode(city_id, "c")
     return f"""{_resolve_item_lua(item_id, "set_city_production")}
 local me = Game.GetLocalPlayer()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from civ_arena.game.civ6 import entity_ids
+from civ_arena.game.civ6 import entity_ids, productive_native
 from civ_arena.game.terrain_metadata import native_terrain
 
 # canonical ints only: a token that LOOKS numeric by any other spelling
@@ -302,24 +302,64 @@ def parse_available_research(lines: list[str]) -> list[dict[str, Any]]:
     return sorted(out, key=lambda t: t["tech_id"])
 
 
-def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
+def parse_available_production(lines: list[str], *,
+                               require_productive: bool = False) -> list[dict[str, Any]]:
     """ITEMROW|kind|item_id|cost|turns -> [{item_id, cost, turns, kind}],
     units before buildings (the sim's grouping), id-sorted within each."""
     out: list[dict[str, Any]] = []
+    flattened = _split_lines(lines)
+    if flattened and flattened[-1] == '---END---':
+        flattened.pop()
+    productive = any(line.startswith('PRODUCTIVE_OPTIONS_END|') for line in flattened)
+    if require_productive and not productive:
+        raise ValueError('productive options completeness marker unavailable')
+    if productive and (flattened[0] != 'AVPROD|1' or flattened.count('AVPROD|1') != 1
+                       or '---END---' in flattened
+                       or flattened.count('PRODUCTIVE_OPTIONS_END|1') != 1
+                       or flattened[-1:] != ['PRODUCTIVE_OPTIONS_END|1']):
+        raise ValueError('productive options framing unavailable')
+    seen = set()
+    placements_count = 0
     for line in _split_lines(lines):
         line = line.strip()
-        if not line or line.startswith(("AVPROD|", "---END---")):
+        if (not line or line.startswith(("AVPROD|", "---END---"))
+                or line == "PRODUCTIVE_OPTIONS_END|1"):
             continue
         prefix, _, rest = line.partition("|")
         if prefix != "ITEMROW":
             raise ValueError(f"non-item row in production read: {line!r}")
         parts = rest.split("|")
-        if len(parts) not in (4, 9):
+        if len(parts) not in (4, 5, 9):
             raise ValueError(f"malformed ITEMROW (want 4 or 9 fields): {line!r}")
         kind, item_id, cost, turns = parts[:4]
-        if kind not in ("unit", "building"):
+        if kind not in ("unit", "building", "district", "project"):
             raise ValueError(f"unknown production kind: {line!r}")
         metadata = {}
+        if kind in {'district', 'project'}:
+            if not productive or productive_native.kind(item_id) != kind:
+                raise ValueError('productive identity or completeness marker unavailable')
+            if (kind == 'project' and len(parts) != 4) or (kind == 'district' and len(parts) != 5):
+                raise ValueError('productive option field count invalid')
+            c, t = _coerce_strict(cost), _coerce_strict(turns)
+            if (type(c) is not int or not 0 <= c <= 1000000000
+                    or type(t) is not int or not -1 <= t <= 1000000):
+                raise ValueError('productive cost or turns unavailable')
+            if kind == 'district':
+                places = parts[4].split(';')
+                if (not places or any(not productive_native.COORD.fullmatch(p) for p in places)
+                        or len(places) != len(set(places))):
+                    raise ValueError('invalid district placement list')
+                placements_count += len(places)
+                if placements_count > 256:
+                    raise ValueError('productive placement bound exceeded')
+                metadata['placements'] = sorted(places)
+        elif item_id.startswith(('PROJECT_', 'DISTRICT_')):
+            raise ValueError('legacy item collides with reserved productive namespace')
+        elif len(parts) == 5:
+            raise ValueError('placement fields on legacy item')
+        if item_id in seen or len(out) >= 1024:
+            raise ValueError('duplicate or excessive production options')
+        seen.add(item_id)
         if len(parts) == 9:
             if kind != "unit":
                 raise ValueError("unit capability fields on non-unit production")
@@ -343,7 +383,7 @@ def parse_available_production(lines: list[str]) -> list[dict[str, Any]]:
                 "found_city": None if found == "?" else found == "true"}
         out.append({"item_id": item_id, "cost": _coerce_strict(cost),
                     "turns": _coerce_strict(turns), "kind": kind, **metadata})
-    order = {"unit": 0, "building": 1}
+    order = {"unit": 0, "building": 1, "district": 2, "project": 3}
     return sorted(out, key=lambda i: (order[i["kind"]], i["item_id"]))
 
 

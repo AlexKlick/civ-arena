@@ -98,10 +98,13 @@ async def set_research(ctx: SessionCtx, tech_id: str,
 
 
 async def set_city_production(ctx: SessionCtx, city_id: str, item_id: str,
+                              dest: str | None = None,
                               *, idempotency_key: str | None = None) -> dict:
+    args = {"city_id": city_id, "item_id": item_id}
+    if dest is not None:
+        args["dest"] = dest
     return await ctx.referee.execute(
-        ctx, "set_city_production", {"city_id": city_id, "item_id": item_id},
-        client_key=idempotency_key)
+        ctx, "set_city_production", args, client_key=idempotency_key)
 
 
 async def purchase(ctx: SessionCtx, city_id: str, item_id: str,
