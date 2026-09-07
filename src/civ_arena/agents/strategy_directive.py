@@ -99,13 +99,18 @@ class DirectiveValidationError(ValueError):
 
 def validation_diagnostic(error: BaseException) -> dict:
     """Only fixed schema tokens and bounded array indexes may reach audit/model."""
-    if isinstance(error, DirectiveValidationError):
-        code, path = error.code, error.path
-        if (type(code) is str and code in _VALIDATION_CODES and type(path) is tuple
-                and len(path) <= 4 and all(
-                    type(part) is str and part in _VALIDATION_FIELDS
-                    or type(part) is int and 0 <= part < 16 for part in path)):
-            return {"code": code, "path": list(path)}
+    try:
+        if isinstance(error, DirectiveValidationError):
+            code, path = error.code, error.path
+            if (type(code) is str and code in _VALIDATION_CODES and type(path) is tuple
+                    and len(path) <= 4 and all(
+                        type(part) is str and part in _VALIDATION_FIELDS
+                        or type(part) is int and 0 <= part < 16 for part in path)):
+                return {"code": code, "path": list(path)}
+    except Exception:
+        # Broken metadata is still an unknown validation failure. Cancellation
+        # and other BaseException controls must propagate unchanged.
+        pass
     return {"code": "unknown", "path": []}
 
 

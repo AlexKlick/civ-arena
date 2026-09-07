@@ -20,7 +20,10 @@ map entry with a model-supplied key, including `unit_targets`, is identified by 
 parent schema path. Unknown property names, entity IDs, argument values, raw
 provider content and exception text are never copied into this object. Unexpected
 validation exceptions use `{"code":"unknown","path":[]}`. The diagnostic helper
-rechecks its own allowlist and bounds before exposing exception attributes.
+rechecks its own allowlist and bounds before exposing exception attributes. Missing attributes or ordinary
+metadata-access exceptions also produce the fixed unknown result. BaseException
+controls such as cancellation continue to propagate; they are not converted into
+a format-repair attempt.
 
 The same safe object is included in the next existing `format_repair` metadata.
 Adaptive admission counts that complete repaired request before generation. The

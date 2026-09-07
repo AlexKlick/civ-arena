@@ -1,5 +1,6 @@
 """Value-free validation diagnostics and counted repair; all providers are fixtures."""
 
+import asyncio
 import copy
 import json
 from dataclasses import replace
@@ -228,3 +229,36 @@ async def test_final_typed_rejection_has_no_actions_closure_or_extra_attempts(se
     with pytest.raises(MatchAborted, match="previously failed"):
         await advance(ctl, runtime, facade, 1)
     assert model.posts_sent == cap
+
+
+@pytest.mark.parametrize("attribute", ["code", "path"])
+def test_missing_diagnostic_attribute_uses_unknown(attribute):
+    error = DirectiveValidationError(MARKER, code="invalid_enum", path=("scouting", "policy"))
+    delattr(error, attribute)
+    assert validation_diagnostic(error) == {"code": "unknown", "path": []}
+
+
+@pytest.mark.parametrize("attribute", ["code", "path"])
+@pytest.mark.parametrize("raised", [ValueError, OSError])
+def test_throwing_diagnostic_accessor_uses_unknown(attribute, raised):
+    class BrokenMetadata(DirectiveValidationError):
+        def __getattribute__(self, name):
+            if name == attribute:
+                raise raised(MARKER)
+            return super().__getattribute__(name)
+
+    error = BrokenMetadata(MARKER, code="invalid_enum", path=("scouting", "policy"))
+    assert validation_diagnostic(error) == {"code": "unknown", "path": []}
+
+
+@pytest.mark.parametrize("raised", [asyncio.CancelledError, KeyboardInterrupt, SystemExit])
+def test_diagnostic_accessor_preserves_baseexception_control(raised):
+    class CancelledMetadata(DirectiveValidationError):
+        def __getattribute__(self, name):
+            if name in {"code", "path"}:
+                raise raised()
+            return super().__getattribute__(name)
+
+    error = CancelledMetadata(MARKER, code="invalid_enum")
+    with pytest.raises(raised):
+        validation_diagnostic(error)
