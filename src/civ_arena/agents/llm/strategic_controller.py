@@ -106,6 +106,17 @@ It never relocates that site automatically. No production catalog or spare escor
 is needed for this initial prerequisite. Other tactical orders still last one turn.
 Rejected or unconfirmed founding is not retried automatically. If no site was
 selected, one additional choice review is available; no optimal site is invented.
+An unsent expansion intent may select another currently observed feasible site,
+at most three times; committed travel intents and attempted missions preserve their sites.
+One preparatory founder may train below the city cap in growth mode with a verified
+healthy city guard and nearby spare escort, even while surveying the destination.
+Owned, queued and accepted reserved founders count toward this single reserve.
+Training does not authorize travel through unknown ownership or unsafe founding.
+Preparatory training retires any infeasible unsent site; surveying must establish
+a currently feasible site before a new travel mission can start.
+Before founder commitment, a spare escort may survey rather than wait indefinitely.
+Production options currently enumerate only units/buildings. Unlisted districts
+and city projects have unknown native availability; do not infer none exist.
 """
 
 
@@ -649,6 +660,9 @@ class StrategicController:
                 self._emit(runtime, 'strategy_economy', source='autopilot',
                            tool='set_city_production', production_policy=policy,
                            outcome='no_eligible_production')
+                if self._growth is not None:
+                    raise MatchAborted(f'no eligible supported production for {cid}; '
+                                       'district/project choices remain unrepresented')
                 raise MatchAborted(f'no eligible production within unit targets for {cid}')
             args = {'city_id': cid, 'item_id': item}
             result = await curator.execute('set_city_production', args)
@@ -659,4 +673,13 @@ class StrategicController:
                 raise MatchAborted('production action returned no canonical status')
             if result['status'] == 'accepted':
                 reservations[cid] = item
+                if self._growth is not None:
+                    founder_reserved = self._growth.reserve_founder_production(
+                        curator.state, cid, item,
+                        preparatory=policy['growth']['preparatory_founder_reserve']['selected'])
+                    if founder_reserved:
+                        self._emit(runtime, 'strategy_growth_preparation', source='autopilot',
+                                   city_id=cid, item_id=item, mission=self._growth.mission,
+                                   preparation=self._growth.summary()['preparatory_training'],
+                                   authority='accepted_production_not_travel_or_founding')
             await curator.refresh()

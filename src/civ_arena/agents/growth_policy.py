@@ -6,6 +6,8 @@ bounded planning heuristics, not combat odds, engine legality or yield forecasts
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -96,12 +98,14 @@ class GrowthControls:
     production_wait_review_turns: int = 60
     min_city_spacing: int = 4
     max_route: int = 12
+    unstarted_replans: int = 3
 
     def __post_init__(self):
         bounds = {'quiet_turns': (1, 10), 'threat_radius': (1, 10), 'military_cap': (1, 32),
                   'guards_per_city': (0, 3), 'max_cities': (1, 32), 'mission_ttl': (1, 30),
                   'min_city_spacing': (3, 8), 'max_route': (1, 24),
                   'production_wait_review_turns': (1, 120)}
+        bounds['unstarted_replans'] = (0, 8)
         for key, (low, high) in bounds.items():
             value = getattr(self, key)
             if type(value) is not int or not low <= value <= high:
@@ -133,6 +137,9 @@ class GrowthPolicy:
         self._mission = None
         self._assessment = None
         self._completed_missions = []
+        self._replan_observations = set()
+        self._founder_reservations = {}
+        self._preparation = None
 
     @property
     def assessment(self):
@@ -245,8 +252,17 @@ class GrowthPolicy:
         mission = self._mission
         if mission and mission['status'] not in _TERMINAL_MISSIONS:
             for key, role in (('unit_id', 'settler'), ('escort_id', 'escort')):
+                if (role == 'escort' and self.mission_execution
+                        and self._unstarted(mission) and not self._founder_queued(state)):
+                    continue
                 if any(u['unit_id'] == mission.get(key) for u in own):
                     roles[mission[key]] = role
+        elif self._preparation and self._preparation['status'] == 'awaiting_site_survey':
+            escort = self._preparation['escort_id']
+            if any(u['unit_id'] == escort for u in own):
+                roles[escort] = 'escort'
+            roles.update({u['unit_id']: 'settler' for u in own
+                          if _role(self._capabilities.get(u.get('type'))) == 'settler'})
         for city in sorted(mine, key=lambda c: c['city_id']):
             local = sorted((u for u in own if u['unit_id'] not in roles
                             and _role(self._capabilities.get(u.get('type'))) == 'military'
@@ -273,10 +289,12 @@ class GrowthPolicy:
                 'mission': {key: mission.get(key) for key in
                     ('mission_id', 'site', 'status', 'unit_id', 'escort_id', 'created_turn',
                      'travel_started_turn', 'last_confirmed_progress_turn', 'expiry_basis',
-                     'observed_settler_queued', 'production_wait_review_due')}
+                     'observed_settler_queued', 'production_wait_review_due',
+                     'replan_outcome', 'replans', 'site_feasibility_issues')}
                     if mission else None,
                 'capability_columns': columns, 'observed_capabilities': rows,
                 'capabilities_omitted': max(0, len(self._capabilities) - len(rows)),
+                'preparatory_training': copy.deepcopy(self._preparation),
                 'meaning': 'Observed catalog memory, not current availability. '
                     'Waiting reasons are feasibility holds, not optimality. '
                     'Unknown contacts do not establish war; strength sums are not odds.'}
@@ -300,6 +318,8 @@ class GrowthPolicy:
         if type(turn) is not int or turn != self._completed + 1 or self._turn is not None:
             raise ValueError('growth policy requires consecutive completed own turns')
         self._state(state)
+        self._replan_observations.clear()
+        self._founder_reservations.clear()
         self._learn_catalogs(state, catalogs)
         risk = self._risk(state)
         if risk['confirmed_local_barbarian_ids']:
@@ -322,6 +342,9 @@ class GrowthPolicy:
         self._completed, self._turn = turn, None
         if (self.mission_execution and self._mission
                 and self._mission.get('completed_turn') == turn):
+            if (self._preparation and
+                    self._preparation.get('mission_id') == self._mission['mission_id']):
+                self._preparation['status'] = 'completed'
             self._completed_missions = (self._completed_missions + [self.mission])[-8:]
             self._mission = None
 
@@ -350,6 +373,71 @@ class GrowthPolicy:
                 depths[key] = depths[at] + 1
                 todo.append(key)
         return None
+
+    @staticmethod
+    def _unstarted(mission):
+        return (mission is None or mission['status'] not in _TERMINAL_MISSIONS
+                and mission.get('unit_id') is None and 'travel_started_turn' not in mission
+                and 'last_confirmed_progress_turn' not in mission
+                and 'training_accepted_turn' not in mission
+                and not mission.get('execution_attempted'))
+
+    def _founder_queued(self, state, reservations=None):
+        reservations = {**self._founder_reservations, **(reservations or {})}
+        for city in state['get_cities']:
+            if _owner(city) != self.player_id:
+                continue
+            queue = city.get('production_queue') or []
+            queue = [queue] if isinstance(queue, str) else queue
+            promised = [*queue, (reservations or {}).get(city['city_id'])]
+            if any(_role(self._capabilities.get(item)) == 'settler' for item in promised):
+                return True
+        return False
+
+    def reserve_founder_production(self, state, city_id, item_id, *, preparatory=False):
+        if self._turn is None or city_id not in {c['city_id'] for c in self._state(state)[3]}:
+            raise ValueError('founder reservation requires active owned city')
+        if _role(self._capabilities.get(item_id)) == 'settler':
+            if preparatory:
+                escort = self._preparatory_escort(state, city_id)
+                if not self._unstarted(self._mission) or escort is None:
+                    raise ValueError('preparatory reservation lost unsent guarded growth readiness')
+                self._preparation = {'status': 'awaiting_site_survey', 'city_id': city_id,
+                    'escort_id': escort, 'training_accepted_turn': self._turn,
+                    'retired_unsent_intent': {key: self._mission.get(key)
+                        for key in ('mission_id', 'site', 'status')} if self._mission else None,
+                    'authority': 'production_only_no_selected_travel_site'}
+                self._mission = None
+            elif self._mission:
+                self._mission['training_accepted_turn'] = self._turn
+                self._mission['training_city_id'] = city_id
+            self._founder_reservations[city_id] = item_id
+            if self._assessment is not None:
+                self._assessment['settlement_mission'] = self.mission
+            return True
+        return False
+
+    def record_mission_attempt(self, mission_id, turn):
+        if self._turn != turn or not self._mission or self._mission['mission_id'] != mission_id:
+            raise ValueError('mission attempt requires active matching identity')
+        self._mission['execution_attempted'] = True
+
+    def _preparatory_escort(self, state, city_id):
+        """Training readiness only; this grants no route or founding authority."""
+        _, _, own, mine, _ = self._state(state)
+        military = sorted((u for u in own if _healthy(u) and (_power(u) or 0) > 0
+                           and _role(self._capabilities.get(u.get('type'))) == 'military'),
+                          key=lambda u: (-(_power(u) or 0), u['unit_id']))
+        guards = set()
+        for city in sorted(mine, key=lambda c: c['city_id']):
+            local = [u for u in military if u['unit_id'] not in guards
+                     and _distance(u['coord'], city['coord']) <= 2]
+            if len(local) < self.controls.guards_per_city:
+                return None
+            guards.update(u['unit_id'] for u in local[:self.controls.guards_per_city])
+        origin = next(c['coord'] for c in mine if c['city_id'] == city_id)
+        return next((u['unit_id'] for u in military if u['unit_id'] not in guards
+                     and _distance(u['coord'], origin) <= 1), None)
 
     def _plan_settlement(self, state):
         units, cities, own, mine, tiles = self._state(state)
@@ -380,7 +468,7 @@ class GrowthPolicy:
                                      for item in queued)
                     mission['observed_settler_queued'] = productive
                     mission['production_wait_review_due'] = (not productive and
-                        self._turn - mission['created_turn']
+                        self._turn - mission.get('initial_planning_turn', mission['created_turn'])
                         >= self.controls.production_wait_review_turns)
             elif self._turn - mission['created_turn'] >= self.controls.mission_ttl:
                 mission.update(status='expired', proposal=None)
@@ -409,28 +497,62 @@ class GrowthPolicy:
         blocked = {key for key in tiles if any(
             _distance(key, u['coord']) <= 2 for u in units if _owner(u) != self.player_id)}
         foreign = [u for u in units if _owner(u) != self.player_id]
-        candidates = []
         sites = ([mission['site']] if mission else
                  sorted((site for site in tiles
                          if _distance(origin, site) <= self.controls.max_route),
                         key=lambda site: (_distance(origin, site), site)))
-        route_probes = 0
-        for site in sites:
-            tile = tiles.get(site, {})
-            if (tile.get('terrain') not in _LAND or tile.get('owner_id') != -1
-                    or tile.get('city_id') or site in blocked
-                    or any(_distance(site, c['coord']) < self.controls.min_city_spacing
-                           for c in cities)
-                    or any(_distance(site, u['coord']) <= 2 for u in foreign)):
-                continue
-            if route_probes >= 64:
-                break
-            route_probes += 1
-            route = self._route(origin, site, tiles, blocked)
-            if route is not None:
-                # Tile coverage is an information score only; no yield is fabricated.
-                coverage = sum(f'{q},{r}' in tiles for q, r in neighbors(*coordinate(site)))
-                candidates.append((-coverage, len(route), site, route))
+        def candidates_for(choices):
+            candidates, route_probes = [], 0
+            for site in choices:
+                tile = tiles.get(site, {})
+                if (tile.get('terrain') not in _LAND or tile.get('owner_id') != -1
+                        or tile.get('city_id') or site in blocked
+                        or any(_distance(site, c['coord']) < self.controls.min_city_spacing
+                               for c in cities)
+                        or any(_distance(site, u['coord']) <= 2 for u in foreign)):
+                    continue
+                if route_probes >= 64:
+                    break
+                route_probes += 1
+                route = self._route(origin, site, tiles, blocked)
+                if route is not None:
+                    coverage = sum(f'{q},{r}' in tiles for q, r in neighbors(*coordinate(site)))
+                    candidates.append((-coverage, len(route), site, route))
+            return candidates
+
+        candidates = candidates_for(sites)
+        replanning = None
+        if (not candidates and mission and self.mission_execution and self._unstarted(mission)
+                and not settlers and not self._founder_queued(state)):
+            tile = tiles.get(mission['site'], {})
+            mission['site_feasibility_issues'] = (
+                ['site_ownership_unavailable'] if 'owner_id' not in tile else
+                ['site_or_route_fails_current_guards'])
+            history = mission.get('replans', [])
+            observation = hashlib.sha256(json.dumps(
+                [origin, tiles, [(u['unit_id'], _owner(u), u['coord']) for u in units],
+                 [(c['city_id'], _owner(c), c['coord']) for c in cities]],
+                sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+            if len(history) >= self.controls.unstarted_replans:
+                mission['replan_outcome'] = 'unstarted_replan_limit_reached'
+            elif (observation not in self._replan_observations
+                  and len(self._replan_observations) < 2):
+                self._replan_observations.add(observation)
+                previous_sites = {r['from_site'] for r in history} | {mission['site']}
+                alternatives = sorted((site for site in tiles if site not in previous_sites
+                                       and _distance(origin, site) <= self.controls.max_route),
+                                      key=lambda site: (_distance(origin, site), site))
+                candidates = candidates_for(alternatives)
+                mission['replan_outcome'] = 'no_current_feasible_alternative'
+                if candidates:
+                    selected_site = min(candidates)[2]
+                    replanning = {'initial_planning_turn': mission.get(
+                        'initial_planning_turn', mission['created_turn']),
+                        'replan_outcome': 'unstarted_intent_retargeted',
+                        'replans': [*history, {'turn': self._turn, 'from_site': mission['site'],
+                            'to_site': selected_site, 'previous_mission_id': mission['mission_id'],
+                            'basis': 'current_observed_site_and_route_guards'}]}
+                    mission = None
         if not candidates:
             if mission:
                 mission.update(status='site_or_route_not_currently_observed_feasible',
@@ -442,21 +564,29 @@ class GrowthPolicy:
                        'site': site, 'created_turn': self._turn, 'unit_id': None,
                        'escort_id': None, 'status': 'planned', 'proposal': None}
             self._mission = mission
+            if replanning:
+                mission.update(replanning)
+            if self._preparation and self._preparation['status'] == 'awaiting_site_survey':
+                self._preparation.update(status='site_selected', mission_id=mission['mission_id'])
+                mission['training_accepted_turn'] = self._preparation['training_accepted_turn']
+                mission['training_city_id'] = self._preparation['city_id']
         mission['unit_id'] = settler['unit_id'] if settler else None
         if self.mission_execution and settler:
             mission.setdefault('travel_started_turn', self._turn)
         guards = set()
         guarded = True
+        escort_committed = (self.mission_execution and
+                            (not self._unstarted(mission) or self._founder_queued(state)))
         for city in sorted(mine, key=lambda c: c['city_id']):
             local = [u for u in military if u['unit_id'] not in guards
-                     and not (self.mission_execution and u['unit_id'] == mission.get('escort_id'))
+                     and not (escort_committed and u['unit_id'] == mission.get('escort_id'))
                      and _distance(u['coord'], city['coord']) <= 2]
             if len(local) < self.controls.guards_per_city:
                 guarded = False
             guards.update(u['unit_id'] for u in local[:self.controls.guards_per_city])
         spare = [u for u in military if u['unit_id'] not in guards] if guarded else []
         escort = next((u for u in spare if _distance(u['coord'], origin) <= 1), None)
-        if self.mission_execution and mission.get('escort_id'):
+        if escort_committed and mission.get('escort_id'):
             # Preserve the assigned mission identity through a health pause. A
             # missing/invalid escort becomes an explicit hold, never a new order.
             escort = next((u for u in own if u['unit_id'] == mission['escort_id']
@@ -491,6 +621,11 @@ class GrowthPolicy:
                           reservations=None):
         if self._turn is None or player_id != self.player_id:
             raise ValueError('growth production requires active matching player turn')
+        for reserved_city, item in (reservations or {}).items():
+            if reserved_city in {c['city_id'] for c in state['get_cities']
+                                 if _owner(c) == player_id}:
+                self.reserve_founder_production(state, reserved_city, item)
+        reservations = {**self._founder_reservations, **(reservations or {})}
         risk = self._risk(state)
         # Newly observed danger in an economy refresh enters defend immediately.
         if risk['confirmed_local_barbarian_ids']:
@@ -549,6 +684,11 @@ class GrowthPolicy:
                           [c for c in state['get_cities'] if _owner(c) == player_id]) + 1)
         needs_defense = (shortfall > 0 or mode == 'defend' and production_power_gap > 0
                          or escort_gap)
+        preparatory_escort = self._preparatory_escort(state, city_id) if (
+            self.mission_execution and mode == 'grow' and self._unstarted(self._mission)
+            and civilian['settler'] == 0 and 0 < len(
+                [c for c in state['get_cities'] if _owner(c) == player_id])
+            < self.controls.max_cities) else None
         rank = {}
         for row in candidates:
             item = row['item_id']
@@ -569,10 +709,13 @@ class GrowthPolicy:
                                                    if _owner(c) == player_id])
                 reason = 'infrastructure_builder_gap' if eligible else 'builder_target_satisfied'
             elif role == 'settler':
-                eligible = (mode == 'grow' and self._mission is not None
+                feasible = (mode == 'grow' and self._mission is not None
                             and self._mission['status'] == 'awaiting_settler'
                             and civilian['settler'] == 0)
-                reason = 'feasible_escorted_expansion' if eligible else 'expansion_not_ready'
+                eligible = feasible or preparatory_escort is not None
+                reason = ('feasible_escorted_expansion' if feasible else
+                          'bounded_preparatory_founder_reserve' if eligible
+                          else 'expansion_not_ready')
             if (row['kind'] == 'unit' and _armed(capability(catalog[item]))
                     and occupied_slots >= self.controls.military_cap):
                 eligible, reason = False, 'empire_military_capacity_satisfied'
@@ -609,7 +752,17 @@ class GrowthPolicy:
                    'production_strength_gap': production_power_gap,
                    'production_defense_needed': needs_defense,
                    'bounded_expansion_escort_gap': bool(escort_gap),
+                   'preparatory_founder_reserve': {'limit_owned_queued_reserved': 1,
+                       'observed_guarded_spare_escort_id': preparatory_escort,
+                       'selected': any(row['item_id'] == chosen and row['reason'] ==
+                                       'bounded_preparatory_founder_reserve' for row in candidates),
+                       'meaning': 'Training capacity only; no route or founding authority.'},
                    'available_infrastructure': sorted(item for item, row in catalog.items()
                                                        if row['kind'] == 'building'),
+                   'production_option_scope': {'supported_kinds': ['unit', 'building'],
+                       'unrepresented_native_choices': ['district_placement', 'city_projects'],
+                       'native_availability_of_unrepresented_choices': 'unobserved',
+                       'no_eligible_choice_requires': None if chosen else
+                           'qualify_productive_capability_or_wait_for_observed_safe_growth'},
                    'mission': self.mission, 'execution': 'proposal_only_no_game_actions'})
         return out
