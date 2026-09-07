@@ -122,8 +122,11 @@ candidate's district/project writes.
 
 Independently review the frozen commit, then qualify the exact generated options
 query on the stopped native state using the parent's single-client guard. Before
-live activation, separately capture a legal district submission and exact placement
-readback, then a freshly enabled project and its exact queue readback. Retain full
+fresh play, separately capture a legal district submission and exact placement
+readback on the preserved stopped game. Once the district completes during fresh
+play, capture a freshly enabled project and exact queue readback there. This first
+native project qualification is part of the bounded live run; it is not a prior
+pass or a requirement to artificially complete construction. Retain full
 wire and event custody. Root owns strategic/curator integration and its full gate.
 
 ## Blocked checks

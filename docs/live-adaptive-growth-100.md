@@ -1,5 +1,10 @@
 # Adaptive growth 100-round validation, 2026-09-07 UTC
 
+The subsequent live attempt failed after 38 complete rounds. The current failure
+record, fixes and launch/stop procedure are in
+[live-productive-growth-100.md](live-productive-growth-100.md). The earlier
+prelaunch evidence below remains historical.
+
 ## Verified findings
 
 The preceding `minimax100-20260906T193543Z` match failed after 36 complete
@@ -102,7 +107,7 @@ On first unresolved failure, stop new model/UI actions and preserve the run,
 unique save backups, event log, summary, wire log and native logs. The driver owns
 bounded cleanup and durable terminal handling. For an operator stop, read the
 run-specific `launch.json`, verify its PID/process-group command and cwd, and send
-SIGTERM only to that owned launcher group. Allow its bounded cleanup to finish;
+SIGTERM only to that verified launcher PID; it forwards one signal to its driver. Allow its bounded cleanup to finish;
 never restart into the same run folder. Do not kill Steam, X, Chrome or unrelated
 processes. A hard kill/storage failure is incomplete evidence and cannot pass.
 Never open a second tuner connection while the match driver is active.

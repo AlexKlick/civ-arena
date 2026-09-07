@@ -49,13 +49,27 @@ independent probes. Those checks do not retroactively repair the failed match.
 
 ## Follow-up probes
 
-The next candidate combines persistent initial-capital founding, bounded
+The integrated candidate combines persistent initial-capital founding, bounded
 unstarted settlement replanning, at most one preparatory settler, and typed native
-district/project production. These changes require their affected tests,
-independent review and one full release gate on the settled source before launch.
-The native read above establishes available APIs and options only. District
-submission, plot readback, project admission and later completion need action
-evidence from the new implementation.
+district/project production. An independent review rejected continuity commit
+`84f0982`: a disappeared accepted training queue could permit replacement. Additive
+correction `647fdfb` retains the accepted receipt until observed settlement closure
+and provides one bounded model review for an unresolved outcome. The earlier
+NO-GO and failing probe remain preserved. The combined affected gate at `a980963`
+passed 439 tests with no failures or skips; that is not the full release gate.
+Independent final review and the full release gate remain required before launch.
+The exact committed `6e7e1b2` production query and parser also ran read-only against
+the preserved turn-39 game. Evidence is
+`productive-compiled-read-6e7e1b2/result.json` in the same support directory; query
+SHA-256 is `3dcfb70923031864e9bcfbba43320d602d529786d028f7a7f521590d95716e6e`.
+It returned five units plus Campus, native cost 78 / seven turns, with five clear
+canonical placements. The query and parser both completed and disconnected.
+These reads establish available APIs/options only. District submission and exact
+plot readback require a separately bounded postmortem action probe after the
+source gates. Project admission/completion will be observed in the fresh game
+once its district finishes; no artificial completion or extra game rehearsal is
+required. The fresh game doubles as that first native project qualification and
+must stop at its first unresolved failure.
 
 Preserve the existing provider/model settings, request/output limits and movement
 allowance. Fresh play targets 100 complete rounds / 200 released seats under
