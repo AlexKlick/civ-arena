@@ -86,4 +86,7 @@ def test_spectate_rehearsal_end_to_end(tmp_path):
         cwd=REPO, capture_output=True, text=True, timeout=120.0)
     assert proc.returncode == 4, proc.stdout + proc.stderr
     assert "SPECTATE" in proc.stdout
-    assert "structural certificate FAILED" in proc.stdout  # tampered above
+    # CAP-02: the CLI speaks structural-audit language, never replay
+    assert "structural audit FAILED" in proc.stdout  # tampered above
+    assert "replayed" not in proc.stdout.lower()
+    assert "re-execution" in proc.stdout
