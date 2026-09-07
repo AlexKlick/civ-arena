@@ -112,6 +112,9 @@ One preparatory founder may train below the city cap in growth mode with a verif
 healthy city guard and nearby spare escort, even while surveying the destination.
 Owned, queued and accepted reserved founders count toward this single reserve.
 Training does not authorize travel through unknown ownership or unsafe founding.
+Accepted founder training stays committed until confirmed settlement closure. If
+its queue vanishes without an observed owned founder, one review reports the missing
+outcome; no automatic replacement trains. An observed founder is not proof of origin.
 Preparatory training retires any infeasible unsent site; surveying must establish
 a currently feasible site before a new travel mission can start.
 Before founder commitment, a spare escort may survey rather than wait indefinitely.
@@ -245,6 +248,7 @@ class StrategicController:
             reasons.extend(recovery['review_reasons'])
             if self._settlement is not None:
                 reasons.extend(self._settlement.review_reasons(turn, self._growth.mission))
+                reasons.extend(self._growth.training_review_reasons(turn))
             if self._capital is not None:
                 reasons.extend(self._capital.review_reasons(turn))
             if reasons:

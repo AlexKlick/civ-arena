@@ -10,6 +10,7 @@ from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.production_policy import choose_production
 from test_growth_integration import GrowthFacade, setup
 from test_growth_policy import CATALOG, city, state, unit
+from test_growth_policy import choose as choose_simple
 from test_strategic_controller import advance
 
 
@@ -204,7 +205,124 @@ async def test_completed_preparation_does_not_commit_the_next_expansion_intent()
             break
     assert len(f.cities) == 2 and ctl._growth.mission is None
     assert ctl._growth.summary()['preparatory_training']['status'] == 'completed'
+    assert ctl._growth.summary()['founder_training']['status'] == 'completed'
+    assert not ctl._growth._training_pending()
     await advance(ctl, rt, f, turn + 1)
     assert ctl._growth.mission is not None
     assert 'training_accepted_turn' not in ctl._growth.mission
     assert ctl._growth._unstarted(ctl._growth.mission)
+
+
+@pytest.mark.parametrize('preparatory', [True, False])
+@pytest.mark.parametrize('missing_outcome', ['empty', 'other_queue', 'foreign_founder'])
+def test_accepted_training_remains_latched_when_queue_disappears(preparatory, missing_outcome):
+    if preparatory:
+        g, f = t39()
+        s, cid, turn = f['state'], 'c0:65536', 39
+        def decide():
+            return choose(g, f)
+    else:
+        g, s = replannable()
+        cid, turn = 'c0:1', 1
+        def decide():
+            return choose_simple(g, s)
+    producer = next(c for c in s['get_cities'] if c['city_id'] == cid)
+    g.reserve_founder_production(s, cid, 'SETTLER', preparatory=preparatory)
+    producer['production_queue'] = ['SETTLER']
+    g.refresh(s)
+    assert g.summary()['founder_training']['status'] == 'queued_observed'
+    g.complete_turn(turn)
+    producer['production_queue'] = []
+    if missing_outcome == 'foreign_founder':
+        s['get_units'].append(unit('foreign', owner=1, kind='SETTLER', coord='30,30', power=0))
+    elif missing_outcome == 'other_queue':
+        producer['production_queue'] = ['BUILDER']
+    g.begin_turn(s, turn=turn + 1)
+    receipt = g.summary()['founder_training']
+    assert receipt['status'] == 'outcome_unavailable' and receipt['review_due']
+    assert not receipt['observed_founder_present']
+    # A different observed queue is never overwritten either; inspect after it closes.
+    producer['production_queue'] = []
+    for _ in range(3):
+        g.refresh(s)
+        result = decide()
+        row = next(r for r in result['candidates'] if r['item_id'] == 'SETTLER')
+        assert not row['eligible']
+        assert row['reason'] == 'accepted_founder_training_unresolved'
+    with pytest.raises(ValueError, match='remains unresolved'):
+        g.reserve_founder_production(s, cid, 'SETTLER', preparatory=preparatory)
+    assert g.summary()['founder_training']['accepted_turn'] == turn
+
+
+def test_preparatory_receipt_reconciles_founder_observation_but_never_retrains_after_loss():
+    g, f = t39()
+    s = f['state']
+    g.reserve_founder_production(s, 'c0:65536', 'SETTLER', preparatory=True)
+    g.complete_turn(39)
+    g.begin_turn(s, turn=40)
+    assert g.summary()['founder_training']['review_due']
+    s['get_units'].append(unit('new_founder', kind='SETTLER', coord='8,28', power=0))
+    g.refresh(s)
+    receipt = g.summary()['founder_training']
+    assert receipt['status'] == 'founder_observed'
+    assert receipt['observed_founder_id'] == 'new_founder' and not receipt['review_due']
+    g.complete_turn(40)
+    s['get_units'] = [u for u in s['get_units'] if u['unit_id'] != 'new_founder']
+    g.begin_turn(s, turn=41)
+    assert g.summary()['founder_training']['review_due']
+    assert not next(r for r in choose(g, f)['candidates'] if r['item_id'] == 'SETTLER')['eligible']
+
+
+def test_training_receipt_preserves_original_same_turn_reservation_and_missing_city():
+    g, f = t39()
+    s = f['state']
+    g.reserve_founder_production(s, 'c0:65536', 'SETTLER', preparatory=True)
+    first = g.summary()['founder_training']
+    g.reserve_founder_production(s, 'c0:65536', 'SETTLER')
+    assert g.summary()['founder_training'] == first
+    g.complete_turn(39)
+    s['get_cities'] = [city('other', coord='8,28')]
+    g.begin_turn(s, turn=40)
+    receipt = g.summary()['founder_training']
+    assert receipt['review_due'] and not receipt['observed_producer_owned']
+    with pytest.raises(ValueError, match='remains unresolved'):
+        g.reserve_founder_production(s, 'other', 'SETTLER', preparatory=True)
+
+
+
+def test_ordinary_training_without_site_binds_next_observed_feasible_mission():
+    g, f = t39()
+    s = f['state']
+    g._mission = None
+    g.reserve_founder_production(s, 'c0:65536', 'SETTLER')
+    g.complete_turn(39)
+    g.begin_turn(s, turn=40)
+    assert g.mission is None and g.summary()['founder_training']['review_due']
+    assert not next(r for r in choose(g, f)['candidates'] if r['item_id'] == 'SETTLER')['eligible']
+    for tile in s['get_visible_map']['tiles'].values():
+        tile.setdefault('owner_id', -1)  # New current observations, not a runtime inference.
+    g.refresh(s)
+    assert g.mission['training_accepted_turn'] == 39
+    assert g.summary()['founder_training']['mission_id'] == g.mission['mission_id']
+    assert not g._unstarted(g.mission)
+
+
+
+async def test_missing_preparatory_outcome_requests_one_review_without_repeat_training():
+    ctl, rt, model, f, records = setup()
+    f.units = [u for u in f.units if u['unit_id'] != 'settler']
+    f.tiles = {f'{q},0': {'terrain': 'GRASSLAND', 'city_id': '',
+                         **({'owner_id': -1} if q < 4 else {})} for q in range(13)}
+    await advance(ctl, rt, f, 1)
+    assert f.cities[0]['production_queue'] == 'SETTLER'
+    f.cities[0]['production_queue'] = []
+    for turn in range(2, 5):
+        await advance(ctl, rt, f, turn)
+    reviews = [r for r in records if r['audit'] == 'strategy_execution'
+               and 'founder_training_outcome_unavailable' in r['reasons']]
+    assert len(reviews) == 1 and reviews[0]['turn'] == 2
+    assert model.posts_sent == 2  # Initial directive and one receipt review only.
+    assert ctl._growth.mission is None
+    assert ctl._growth.summary()['founder_training']['review_due']
+    assert sum(call[:3] == ('set_city_production', 'c0:1', 'SETTLER')
+               for call in f.calls if isinstance(call, tuple)) == 1
