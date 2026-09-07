@@ -155,6 +155,7 @@ class SettlementExecutor:
         args['idempotency_key'] = 'settle-' + hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:40]
         self._attempted_turn = turn
+        policy.record_mission_attempt(mission['mission_id'], turn)
         result = await execute(action, args)
         untouched_frozen_ids.discard(actor_id)
         if not isinstance(result, dict) or result.get('status') not in {'accepted', 'rejected'}:
