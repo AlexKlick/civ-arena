@@ -72,7 +72,11 @@ def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
     (spend.jsonl parity with the sim coordinator), the always-on
     per-attempt cost ledger, the opt-in wire transcript, and the existing
     provider_request audit — composed instead of clobbering whichever
-    callback happened to be set last."""
+    callback happened to be set last.
+
+    CAP-03: a ledger write failure must NEVER fail or retransmit the
+    provider request — the fault is audited (ledger_write_failed, once per
+    sink) and the accounting gap stays visible; the request completes."""
     if client is None or not hasattr(client, "on_post"):
         return
     from civ_arena.agents.llm.wire_log import CostLedger, WireLog
@@ -83,17 +87,29 @@ def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
     wire = None
     if agent.llm is not None and agent.llm.wire_log:
         wire = WireLog(run_dir, agent.agent_id, agent.player_id, agent.llm)
+    sink_failed: set[str] = set()
+
+    def _guarded(sink: str, write) -> None:
+        if sink in sink_failed:
+            return
+        try:
+            write()
+        except Exception:  # noqa: BLE001 — isolation is the contract
+            sink_failed.add(sink)
+            with contextlib.suppress(Exception):  # the audit is best-effort
+                audit("ledger_write_failed", agent=agent.agent_id, sink=sink)
 
     def on_post(client=client, aid=agent.agent_id) -> None:
-        spend.note(aid, agent.player_id)
+        _guarded("spend", lambda: spend.note(aid, agent.player_id))
         audit("provider_request", agent=aid, posts_sent=client.posts_sent)
 
     client.on_post = on_post
 
     def on_attempt(record: dict[str, Any]) -> None:
-        costs.note(agent.agent_id, agent.player_id, record)
+        _guarded("costs",
+                 lambda: costs.note(agent.agent_id, agent.player_id, record))
         if wire is not None:
-            wire.note(record)
+            _guarded("wire", lambda: wire.note(record))
 
     client.on_attempt = on_attempt
 

@@ -26,7 +26,9 @@ from civ_arena.agents.llm.client import MiniMaxMessagesClient
 from civ_arena.config import LLMSpec
 
 _COST_FIELDS = ("ts", "request_kind", "attempt", "status_code", "latency_ms",
-                "model", "payload_hash", "input_tokens", "output_tokens")
+                "model", "payload_hash", "input_tokens", "output_tokens",
+                # CAP-03 (F-07): logical identity for decision-level joins
+                "decision_id", "logical_request_id", "request_set_key")
 
 
 def _utcnow() -> str:
