@@ -119,6 +119,7 @@ class AgentSpec:
     # M19b: case-base prior artifact for policy "planner" only.
     case_base: CaseBaseSpec | None = None
     decision_mode: str = "legacy"
+    growth_autopilot: bool = False
 
 
 @dataclass
@@ -200,6 +201,7 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             policy=str(_require(entry, "policy", where)),
             seed=int(entry.get("seed", seed * 10 + i)),
             decision_mode=entry.get("decision_mode", "legacy"),
+            growth_autopilot=entry.get("growth_autopilot", False),
             model=entry.get("model"),  # display hint; parsed and ignored
             llm=_parse_llm(entry["llm"], where) if "llm" in entry else None,
             proposer=_parse_llm(entry["proposer"], f"{where}.proposer")
@@ -211,6 +213,10 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             raise ConfigError(f"{where}: unknown decision_mode {agent.decision_mode!r}")
         if agent.decision_mode != "legacy" and agent.policy != "llm":
             raise ConfigError(f"{where}: strategic_autopilot requires policy llm")
+        if type(agent.growth_autopilot) is not bool:
+            raise ConfigError(f"{where}: growth_autopilot must be an explicit boolean")
+        if agent.growth_autopilot and agent.decision_mode != "strategic_autopilot":
+            raise ConfigError(f"{where}: growth_autopilot requires strategic_autopilot")
         if agent.policy not in VALID_POLICIES:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
         if agent.policy == "llm" and agent.llm is None:

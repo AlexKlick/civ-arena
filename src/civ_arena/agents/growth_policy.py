@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from civ_arena.agents.strategy_directive import coordinate
 from civ_arena.game.sim.state import hex_dist, neighbors
@@ -93,13 +93,15 @@ class GrowthControls:
     guards_per_city: int = 1
     max_cities: int = 4
     mission_ttl: int = 12
+    production_wait_review_turns: int = 60
     min_city_spacing: int = 4
     max_route: int = 12
 
     def __post_init__(self):
         bounds = {'quiet_turns': (1, 10), 'threat_radius': (1, 10), 'military_cap': (1, 32),
                   'guards_per_city': (0, 3), 'max_cities': (1, 32), 'mission_ttl': (1, 30),
-                  'min_city_spacing': (3, 8), 'max_route': (1, 24)}
+                  'min_city_spacing': (3, 8), 'max_route': (1, 24),
+                  'production_wait_review_turns': (1, 120)}
         for key, (low, high) in bounds.items():
             value = getattr(self, key)
             if type(value) is not int or not low <= value <= high:
@@ -114,9 +116,13 @@ class GrowthPolicy:
     proposal is revalidated from each current observation and is never dispatched.
     """
 
-    def __init__(self, player_id: int, *, controls: GrowthControls | None = None):
+    def __init__(self, player_id: int, *, controls: GrowthControls | None = None,
+                 mission_execution: bool = False):
         if type(player_id) is not int or player_id < 0:
             raise ValueError('growth policy requires exact player identity')
+        if type(mission_execution) is not bool:
+            raise ValueError('mission_execution must be boolean')
+        self.mission_execution = mission_execution
         self.player_id = player_id
         self.controls = controls or GrowthControls()
         self._completed = 0
@@ -126,6 +132,7 @@ class GrowthPolicy:
         self._capabilities = {}
         self._mission = None
         self._assessment = None
+        self._completed_missions = []
 
     @property
     def assessment(self):
@@ -191,10 +198,7 @@ class GrowthPolicy:
                 'uncertainties': ['war_and_opponent_intent_unobserved',
                                   'strength_sum_is_not_combat_odds', 'fog_threats_unobserved']}
 
-    def begin_turn(self, state, *, turn: int, catalogs: dict[str, list] | None = None):
-        if type(turn) is not int or turn != self._completed + 1 or self._turn is not None:
-            raise ValueError('growth policy requires consecutive completed own turns')
-        self._state(state)
+    def _learn_catalogs(self, state, catalogs):
         if catalogs is not None:
             if not isinstance(catalogs, dict) or len(catalogs) > 32:
                 raise ValueError('growth catalogs exceed city bound')
@@ -218,6 +222,85 @@ class GrowthPolicy:
             if len(set(self._capabilities) | set(observed)) > 1024:
                 raise ValueError('growth capability memory exceeds bound')
             self._capabilities.update(observed)
+
+    def refresh(self, state, *, catalogs=None):
+        """Revalidate within the active turn without advancing the quiet clock."""
+        if self._turn is None:
+            raise ValueError('growth refresh requires active turn')
+        self._learn_catalogs(state, catalogs)
+        risk = self._risk(state)
+        if risk['confirmed_local_barbarian_ids']:
+            self._mode, self._quiet = 'defend', 0
+        self._plan_settlement(state)
+        self._assessment = {**risk, 'turn': self._turn, 'mode': self._mode,
+                            'quiet_observed_turns': self._quiet,
+                            'quiet_turns_required': self.controls.quiet_turns,
+                            'settlement_mission': self.mission}
+        return self.assessment
+
+    def reserved_roles(self, state):
+        """Retain nearby land guards even while recovering; no extra action authority."""
+        _, _, own, mine, _ = self._state(state)
+        roles = {}
+        mission = self._mission
+        if mission and mission['status'] not in _TERMINAL_MISSIONS:
+            for key, role in (('unit_id', 'settler'), ('escort_id', 'escort')):
+                if any(u['unit_id'] == mission.get(key) for u in own):
+                    roles[mission[key]] = role
+        for city in sorted(mine, key=lambda c: c['city_id']):
+            local = sorted((u for u in own if u['unit_id'] not in roles
+                            and _role(self._capabilities.get(u.get('type'))) == 'military'
+                            and _distance(u['coord'], city['coord']) <= 2),
+                           key=lambda u: (not _healthy(u), -(_power(u) or 0), u['unit_id']))
+            for unit in local[:self.controls.guards_per_city]:
+                roles[unit['unit_id']] = 'guard'
+        return roles
+
+    def summary(self):
+        """Compact observed capabilities, not a claim about unqueried catalogs."""
+        assessment = self.assessment or {}
+        mission = self.mission
+        columns = ['item_id', 'domain', 'combat', 'ranged', 'found_city', 'build_charges']
+        rows = [[item, *(cap[key] for key in columns[1:])]
+                for item, cap in sorted(self._capabilities.items())[:16]]
+        return {'enabled': True, 'mode': self._mode, 'controls': asdict(self.controls),
+                'known_threat_strength': assessment.get('known_threat_strength_sum'),
+                'healthy_local_defense_strength': assessment.get(
+                    'healthy_local_defense_strength_sum'),
+                'confirmed_local_barbarians': len(assessment.get(
+                    'confirmed_local_barbarian_ids', [])),
+                'quiet_observed_turns': self._quiet,
+                'mission': {key: mission.get(key) for key in
+                    ('mission_id', 'site', 'status', 'unit_id', 'escort_id', 'created_turn',
+                     'travel_started_turn', 'last_confirmed_progress_turn', 'expiry_basis',
+                     'observed_settler_queued', 'production_wait_review_due')}
+                    if mission else None,
+                'capability_columns': columns, 'observed_capabilities': rows,
+                'capabilities_omitted': max(0, len(self._capabilities) - len(rows)),
+                'meaning': 'Observed catalog memory, not current availability. '
+                    'Waiting reasons are feasibility holds, not optimality. '
+                    'Unknown contacts do not establish war; strength sums are not odds.'}
+
+    def confirm_movement_observation(self, mission_id, turn):
+        if self._turn != turn or not self._mission or self._mission['mission_id'] != mission_id:
+            raise ValueError('movement confirmation requires active matching mission')
+        if self._mission['status'] not in _TERMINAL_MISSIONS:
+            self._mission['last_confirmed_progress_turn'] = turn
+
+    def confirm_founding_observation(self, mission_id, turn):
+        if (self._turn != turn or not self._mission
+                or self._mission['mission_id'] != mission_id
+                or self._mission['status'] != 'city_observed_at_site'):
+            raise ValueError('founding confirmation requires matching observed city mission')
+        self._mission['completion_basis'] = (
+            'accepted_found_city_then_new_owned_city_and_consumed_settler')
+        self._mission['completed_turn'] = turn
+
+    def begin_turn(self, state, *, turn: int, catalogs: dict[str, list] | None = None):
+        if type(turn) is not int or turn != self._completed + 1 or self._turn is not None:
+            raise ValueError('growth policy requires consecutive completed own turns')
+        self._state(state)
+        self._learn_catalogs(state, catalogs)
         risk = self._risk(state)
         if risk['confirmed_local_barbarian_ids']:
             self._mode, self._quiet = 'defend', 0
@@ -237,6 +320,10 @@ class GrowthPolicy:
         if type(turn) is not int or self._turn != turn:
             raise ValueError('growth completion requires active own turn')
         self._completed, self._turn = turn, None
+        if (self.mission_execution and self._mission
+                and self._mission.get('completed_turn') == turn):
+            self._completed_missions = (self._completed_missions + [self.mission])[-8:]
+            self._mission = None
 
     def _route(self, origin, site, tiles, blocked):
         todo, previous, depths = deque([origin]), {origin: None}, {origin: 0}
@@ -275,9 +362,29 @@ class GrowthPolicy:
             mission.update(status='city_observed_at_site', proposal=None,
                            completion_basis='observed_owned_city_not_causal_receipt')
             return
-        if mission and self._turn - mission['created_turn'] >= self.controls.mission_ttl:
-            mission.update(status='expired', proposal=None)
-            return
+        if mission:
+            if self.mission_execution:
+                active = mission.get('travel_started_turn')
+                basis = mission.get('last_confirmed_progress_turn', active)
+                if active is not None:
+                    if self._turn - basis >= self.controls.mission_ttl:
+                        mission.update(status='expired', proposal=None,
+                                       expiry_basis='no_confirmed_travel_progress')
+                        return
+                else:
+                    queued = []
+                    for city in mine:
+                        queue = city.get('production_queue') or []
+                        queued.extend([queue] if isinstance(queue, str) else queue)
+                    productive = any(_role(self._capabilities.get(item)) == 'settler'
+                                     for item in queued)
+                    mission['observed_settler_queued'] = productive
+                    mission['production_wait_review_due'] = (not productive and
+                        self._turn - mission['created_turn']
+                        >= self.controls.production_wait_review_turns)
+            elif self._turn - mission['created_turn'] >= self.controls.mission_ttl:
+                mission.update(status='expired', proposal=None)
+                return
         if mission and mission.get('unit_id') and not any(
                 u['unit_id'] == mission['unit_id'] for u in own):
             mission.update(status='settler_no_longer_observed_owned', proposal=None)
@@ -336,22 +443,35 @@ class GrowthPolicy:
                        'escort_id': None, 'status': 'planned', 'proposal': None}
             self._mission = mission
         mission['unit_id'] = settler['unit_id'] if settler else None
+        if self.mission_execution and settler:
+            mission.setdefault('travel_started_turn', self._turn)
         guards = set()
         guarded = True
         for city in sorted(mine, key=lambda c: c['city_id']):
             local = [u for u in military if u['unit_id'] not in guards
+                     and not (self.mission_execution and u['unit_id'] == mission.get('escort_id'))
                      and _distance(u['coord'], city['coord']) <= 2]
             if len(local) < self.controls.guards_per_city:
                 guarded = False
             guards.update(u['unit_id'] for u in local[:self.controls.guards_per_city])
         spare = [u for u in military if u['unit_id'] not in guards] if guarded else []
         escort = next((u for u in spare if _distance(u['coord'], origin) <= 1), None)
+        if self.mission_execution and mission.get('escort_id'):
+            # Preserve the assigned mission identity through a health pause. A
+            # missing/invalid escort becomes an explicit hold, never a new order.
+            escort = next((u for u in own if u['unit_id'] == mission['escort_id']
+                           and _role(self._capabilities.get(u.get('type'))) == 'military'), None)
+            if escort and (not guarded or _distance(escort['coord'], origin) > 1):
+                mission.update(status='awaiting_guard_or_adjacent_escort', proposal=None)
+                return
         mission.update(route=route, escort_id=escort['unit_id'] if escort else None,
                        proposal=None, uncertainties=['site_legality_unverified',
                        'yield_resource_freshwater_unobserved',
                        'wrap_and_routes_are_not_engine_paths'])
         if escort is None:
             mission['status'] = 'awaiting_healthy_spare_escort'
+        elif not _healthy(escort):
+            mission['status'] = 'awaiting_verified_escort_health'
         elif settler is None:
             mission['status'] = 'awaiting_settler'
         elif not _healthy(settler):
@@ -423,7 +543,12 @@ class GrowthPolicy:
         power_gap = max(0, risk['planning_strength_target']
                         - risk['healthy_local_defense_strength_sum'])
         production_power_gap = max(0, power_gap - future_power)
-        needs_defense = (shortfall > 0 or mode == 'defend' and production_power_gap > 0)
+        escort_gap = (self.mission_execution and mode == 'grow' and self._mission is not None
+                      and self._mission['status'] == 'awaiting_healthy_spare_escort'
+                      and land_military < self.controls.guards_per_city * len(
+                          [c for c in state['get_cities'] if _owner(c) == player_id]) + 1)
+        needs_defense = (shortfall > 0 or mode == 'defend' and production_power_gap > 0
+                         or escort_gap)
         rank = {}
         for row in candidates:
             item = row['item_id']
@@ -433,6 +558,9 @@ class GrowthPolicy:
                 eligible, reason = True, 'infrastructure_opportunity'
             elif item == 'SCOUT' and not base['scout_role_assigned']:
                 reason = 'scouting_role_disabled'
+            elif self.mission_execution and item == 'SCOUT':
+                eligible = row['effective'] < directive.get('unit_targets', {}).get('SCOUT', 2)
+                reason = 'bounded_scouting_inventory' if eligible else 'scout_target_satisfied'
             elif role == 'military':
                 eligible = needs_defense and occupied_slots < self.controls.military_cap
                 reason = 'aggregate_defense_gap' if eligible else 'minimum_army_satisfied_or_capped'
@@ -449,6 +577,8 @@ class GrowthPolicy:
                     and occupied_slots >= self.controls.military_cap):
                 eligible, reason = False, 'empire_military_capacity_satisfied'
             cap = directive.get('unit_targets', {}).get(item) if row['kind'] == 'unit' else None
+            if self.mission_execution and item == 'SCOUT' and cap is None:
+                cap = 2
             if cap is not None and row['effective'] >= cap:
                 eligible, reason = False, 'explicit_unit_target_satisfied'
             row.update(eligible=eligible, reason=reason, growth_role=role, target=cap,
@@ -478,6 +608,7 @@ class GrowthPolicy:
                    'healthy_strength_gap': power_gap, 'queued_reserved_strength': future_power,
                    'production_strength_gap': production_power_gap,
                    'production_defense_needed': needs_defense,
+                   'bounded_expansion_escort_gap': bool(escort_gap),
                    'available_infrastructure': sorted(item for item, row in catalog.items()
                                                        if row['kind'] == 'building'),
                    'mission': self.mission, 'execution': 'proposal_only_no_game_actions'})

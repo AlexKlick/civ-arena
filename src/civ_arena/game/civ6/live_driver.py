@@ -496,7 +496,8 @@ def _agent_profile(agent: AgentSpec) -> AgentProfile:
         agent_id=agent.agent_id, player_id=agent.player_id,
         policy=agent.policy, seed=agent.seed, model=agent.model,
         llm=agent.llm, proposer=agent.proposer,
-        case_base=agent.case_base, decision_mode=agent.decision_mode)
+        case_base=agent.case_base, decision_mode=agent.decision_mode,
+        growth_autopilot=agent.growth_autopilot)
 
 
 @dataclass(frozen=True)
