@@ -206,6 +206,28 @@ class InitialCapitalPlan:
                                 'previous_cities': [c['city_id'] for c in state['get_cities']
                                                     if _owner(c) == self.player_id]}
 
+    def dispatch_error(self, state, action, args, recovery):
+        """Check the latest post-action projection immediately before explicit input."""
+        if (self.disabled or self.mission is None
+                or args.get('unit_id') != self.mission['unit_id']
+                or action not in {'move_unit', 'found_city'}):
+            return None
+        pending = self.pending
+        if (not pending or pending['status'] != 'awaiting_explicit_receipt'
+                or pending['action'] != action):
+            return 'capital_dispatch_receipt_binding_changed'
+        actor = self._actor(state)
+        if actor is None or actor['coord'] != pending['origin']:
+            return 'capital_dispatch_founder_binding_changed'
+        site = args.get('dest') if action == 'move_unit' else actor['coord']
+        if site != self.mission['site']:
+            return 'capital_dispatch_site_binding_changed'
+        order = {'unit_id': actor['unit_id'],
+                 'action': 'move' if action == 'move_unit' else 'found_city'}
+        if action == 'move_unit':
+            order['dest'] = site
+        return self.directive_error(state, {'tactical_overrides': [order]}, recovery)
+
     def reserved_roles(self, state):
         actor = self._actor(state)
         return {actor['unit_id']: 'settler'} if not self.disabled and actor else {}

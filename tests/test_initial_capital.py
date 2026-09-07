@@ -409,3 +409,57 @@ async def test_actor_loss_on_post_scout_refresh_stops_without_founding_input():
         await advance(ctl, rt, f, 1)
     assert model.posts_sent == 1 and not f.cities
     assert not [c for c in f.calls if isinstance(c, tuple) and c[0] == 'found_city']
+
+
+@pytest.mark.parametrize('action', ['found_city', 'move'])
+@pytest.mark.parametrize('change', ['contact', 'hp', 'ownership', 'site', 'founder_coord'])
+async def test_explicit_founder_revalidates_latest_projection_before_dispatch(action, change):
+    order = {'unit_id': 'settler', 'action': action}
+    if action == 'move':
+        order['dest'] = '1,0'
+    ctl, rt, _, f, records = capital_setup(directive={'tactical_overrides': [
+        {'unit_id': 'a_guard', 'action': 'move', 'dest': '1,0'}, order]})
+    original = f.move_unit
+    async def move(unit_id, dest, **kwargs):
+        result = await original(unit_id, dest, **kwargs)
+        if unit_id == 'a_guard':
+            actor = next(u for u in f.units if u['unit_id'] == 'settler')
+            if change == 'contact':
+                f.units.append(unit('new_contact', owner=1, coord='0,1', is_barbarian=False))
+            elif change == 'hp':
+                actor['hp'] = 40
+            elif change == 'ownership':
+                f.tiles['1,0' if action == 'move' else '0,0']['owner_id'] = 1
+            elif change == 'site':
+                del f.tiles['1,0' if action == 'move' else '0,0']
+            else:
+                actor['coord'] = '2,0'
+        return result
+    f.move_unit = move
+    with pytest.raises(MatchAborted, match='capital_unresolved'):
+        await advance(ctl, rt, f, 1)
+    assert ('move_unit', 'a_guard', '1,0') in f.calls
+    assert not [c for c in f.calls if isinstance(c, tuple) and c[1] == 'settler'
+                and c[0] in {'move_unit', 'found_city'}]
+    assert ctl._capital.pending['status'] == 'awaiting_explicit_receipt'
+    assert ctl._capital.completion is None
+    withheld = [r for r in records if r['audit'] == 'strategy_initial_capital'
+                and r.get('outcome') == 'not_dispatched']
+    if change == 'site' and action == 'move':
+        # The scouting selector already refuses an absent target before dispatch.
+        assert not withheld
+        assert ctl._capital.failure_reason == 'selected_founder_action_not_dispatched'
+    else:
+        assert len(withheld) == 1 and withheld[0]['execution'] == []
+        assert 'result' not in withheld[0] and 'status' not in withheld[0]
+    assert not [r for r in records if r['audit'] == 'strategy_turn_closed']
+
+
+async def test_existing_city_does_not_apply_initial_guard_to_ordinary_model_unit_move():
+    ctl, rt, _, f, _ = capital_setup(directive={'tactical_overrides': [
+        {'unit_id': 'a_guard', 'action': 'move', 'dest': '1,0'}]})
+    f.cities.append(city())
+    next(u for u in f.units if u['unit_id'] == 'a_guard')['hp'] = 40
+    await advance(ctl, rt, f, 1)
+    assert ctl._capital.disabled
+    assert ('move_unit', 'a_guard', '1,0') in f.calls
