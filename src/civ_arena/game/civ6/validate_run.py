@@ -11,6 +11,9 @@ from civ_arena.session.legality import KNOWN_ACTION_TOOLS
 def validate(run_dir: Path, rounds: int = 30, *, require_live: bool = True) -> dict:
     records = [json.loads(line) for line in (run_dir / 'events.jsonl').read_text().splitlines()]
     summary = json.loads((run_dir / 'summary.json').read_text())
+    if summary.get('phase') == 'spectate':
+        return validate_spectate(run_dir, rounds, records=records,
+                                 summary=summary, require_live=require_live)
     errors = []
     def require(condition, message):
         if not condition:
@@ -104,6 +107,84 @@ def validate(run_dir: Path, rounds: int = 30, *, require_live: bool = True) -> d
                 completed_seat_turns=len(rows), completed_rounds=summary.get('completed_rounds'),
                 structural_replay='event structure only; engine-state replay not proven',
                 movement_allowance=allowance)
+
+
+def validate_spectate(run_dir: Path, rounds: int = 30, *, records=None,
+                     summary=None, require_live: bool = True) -> dict:
+    """Spectate-mode audit: a run with zero driven tool calls. The
+    hotseat checks (leases, seat pairs, end_turn closures) do not apply —
+    a spectator never acts; the input-free proof is the absence of every
+    action kind plus command_census.game_writes == 0."""
+    if records is None:
+        records = [json.loads(line) for line in
+                   (run_dir / 'events.jsonl').read_text().splitlines()]
+    if summary is None:
+        summary = json.loads((run_dir / 'summary.json').read_text())
+    errors = []
+
+    def require(condition, message):
+        if not condition:
+            errors.append(message)
+
+    require([r.get('seq') for r in records] == list(range(len(records))),
+            'event sequence')
+    starts = [r for r in records if r['kind'] == 'MATCH_START']
+    ends = [r for r in records if r['kind'] == 'MATCH_END']
+    require(len(starts) == 1 and records[0]['kind'] == 'MATCH_START',
+            'one initial MATCH_START')
+    require(len(ends) == 1 and records[-1]['kind'] == 'MATCH_END',
+            'one final MATCH_END')
+    require(bool(ends) and ends[-1]['summary'] == summary,
+            'event/summary equality')
+    require(summary.get('clean') is True and summary.get('aborted') is None,
+            'clean outcome')
+    require(summary.get('cleanup', {}).get('status') ==
+            'disconnect_only_no_game_actions_no_leases', 'disconnect-only cleanup')
+    require(summary.get('violations_total') == 0, 'zero watchdog violations')
+    for kind in ('TOOL_CALL', 'TOOL_RESULT', 'LEASE_GRANT', 'LEASE_RELEASE',
+                 'LEASE_EXPIRED', 'VIOLATION', 'UNAUTHORIZED_TOOL_CALL'):
+        require(not any(r['kind'] == kind for r in records),
+                f'no {kind} events (a spectator never acts)')
+    hs = [r for r in records if r['kind'] == 'HUMAN_TURN_START']
+    he = [r for r in records if r['kind'] == 'HUMAN_TURN_END']
+    snaps = [r for r in records if r['kind'] == 'SPECTATOR_SNAPSHOT']
+    require(len(hs) == len(he) == len(snaps) == rounds,
+            'round event counts')
+    turns = [r['turn'] for r in hs]
+    require(turns == sorted(set(turns)) and len(turns) == rounds,
+            'strictly increasing human turns')
+    round_seq = [r['kind'] for r in records if r['kind'] in
+                 ('HUMAN_TURN_START', 'SPECTATOR_SNAPSHOT', 'HUMAN_TURN_END')]
+    require(round_seq == ['HUMAN_TURN_START', 'SPECTATOR_SNAPSHOT',
+                          'HUMAN_TURN_END'] * rounds,
+            'START/SNAPSHOT/END interleave per round')
+    require(all(isinstance(s.get('digest', {}).get('before'), str)
+                and isinstance(s.get('digest', {}).get('after'), str)
+                and isinstance(s.get('digest', {}).get('consistent'), bool)
+                for s in snaps), 'snapshot digest bracket')
+    require(summary.get('completed_rounds') == rounds
+            and summary.get('requested_rounds') == rounds, 'round counts')
+    census = summary.get('command_census', {})
+    require(census.get('game_writes') == 0, 'zero game writes')
+    require(census.get('status_polls', 0) >= rounds, 'polled every round')
+    require(isinstance(summary.get('operator'), str)
+            and summary.get('operator'), 'operator identity')
+    require(bool(summary.get('observed_players')), 'observed players')
+    identity = summary.get('identity') or {}
+    require(bool(identity.get('commit')) and bool(identity.get('mod_sha256')),
+            'implementation identity')
+    if require_live:
+        require(identity.get('dirty') is False, 'clean commit identity')
+        run_identity = [r for r in records if r.get('audit') == 'run_identity']
+        require(len(run_identity) == 1
+                and run_identity[0]['identity'] == identity
+                and run_identity[0].get('fake') is False,
+                'identity audit / real engine run')
+    return dict(status='FAIL' if errors else 'PASS', errors=errors,
+                completed_rounds=summary.get('completed_rounds'),
+                structural_replay='structural certificate only; no driven '
+                                  'tool calls to re-execute',
+                operator=summary.get('operator'))
 
 
 def main():

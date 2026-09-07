@@ -1035,7 +1035,8 @@ async def phase_spectate(
     await adapter.setup({})
     await adapter.inject_mod(mod_lua)
     await driver.match_start()
-    audit("run_identity", identity=implementation_identity(spec, mod_lua))
+    audit("run_identity", identity=implementation_identity(spec, mod_lua),
+          fake=adapter._simulate is not None)  # noqa: SLF001
     audit("spectate_config", **asdict(sc))
     try:
         async with asyncio.timeout(limits.match_s):
@@ -1098,12 +1099,6 @@ async def phase_spectate(
                         observe_reads += 1 + (
                             2 if sc.snapshot_scope == "full" else 0)
                         driver._write(  # noqa: SLF001
-                            "SPECTATOR_SNAPSHOT", turn=entry_turn,
-                            phase_player_id=human, player_id=None,
-                            agent_id=None, visibility_scope="spectator",
-                            round=round_no, phase="turn_start",
-                            ambient=ai_manifests, **snapshot)
-                        driver._write(  # noqa: SLF001
                             "HUMAN_TURN_START", turn=entry_turn,
                             phase_player_id=human, player_id=None,
                             agent_id=None, visibility_scope="spectator",
@@ -1112,6 +1107,12 @@ async def phase_spectate(
                             and round_no == 1 else "turn_start",
                             turn_active_corroborated=(
                                 status.get("TURN_ACTIVE") is True))
+                        driver._write(  # noqa: SLF001
+                            "SPECTATOR_SNAPSHOT", turn=entry_turn,
+                            phase_player_id=human, player_id=None,
+                            agent_id=None, visibility_scope="spectator",
+                            round=round_no, phase="turn_start",
+                            ambient=ai_manifests, **snapshot)
                         if human not in windows_open:
                             await open_window(human)
                         active = True

@@ -188,3 +188,108 @@ def test_phase_spectate_source_has_no_acting_paths() -> None:
                       "write_raw"):
         assert forbidden not in body, (
             f"phase_spectate must never contain {forbidden!r}")
+
+
+# -- validate_spectate ---------------------------------------------------------
+
+async def _rerun(tmp_path, turns: int = 2) -> Path:
+    import shutil
+
+    from civ_arena.game.civ6.validate_run import validate  # noqa: F401
+    run_dir = tmp_path / "run"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    mod = _spectate_mod()
+    rc, _, _, _ = await run_spectate(tmp_path, mod, turns=turns)
+    assert rc == 0
+    return run_dir
+
+
+async def test_validate_spectate_passes_on_fake_run(tmp_path) -> None:
+    from civ_arena.game.civ6.validate_run import validate
+    run_dir = await _rerun(tmp_path, turns=2)
+    result = validate(run_dir, rounds=2, require_live=False)
+    assert result["status"] == "PASS", result["errors"]
+    assert result["operator"] == "alexk"
+
+
+def _rewrite_events(run_dir: Path, mutate) -> None:
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    lines = mutate(lines)
+    (run_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def _rewrite_summary(run_dir: Path, mutate) -> None:
+    summary = json.loads((run_dir / "summary.json").read_text())
+    summary = mutate(summary) or summary
+    (run_dir / "summary.json").write_text(json.dumps(summary, sort_keys=True))
+    # event/summary equality: the MATCH_END event carries the old summary;
+    # resync it so each tamper tests exactly ONE rule
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    last = json.loads(lines[-1])
+    last["summary"] = summary
+    lines[-1] = json.dumps(last, sort_keys=True)
+    (run_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def _drop_last_snapshot(lines: list[str]) -> list[str]:
+    parsed = [json.loads(row) for row in lines]
+    snap_i = max(i for i, r in enumerate(parsed)
+                 if r["kind"] == "SPECTATOR_SNAPSHOT")
+    del parsed[snap_i]
+    return [json.dumps(r, sort_keys=True) for r in parsed]
+
+
+def _swap_last_start_and_snapshot(lines: list[str]) -> list[str]:
+    parsed = [json.loads(row) for row in lines]
+    snap_i = max(i for i, r in enumerate(parsed)
+                 if r["kind"] == "SPECTATOR_SNAPSHOT")
+    start_i = max(i for i, r in enumerate(parsed)
+                  if r["kind"] == "HUMAN_TURN_START")
+    if start_i < snap_i:
+        parsed[snap_i], parsed[start_i] = parsed[start_i], parsed[snap_i]
+    return [json.dumps(r, sort_keys=True) for r in parsed]
+
+
+async def test_validate_spectate_tamper_matrix(tmp_path) -> None:
+    from civ_arena.game.civ6.validate_run import validate
+
+    # (a) drop the last SPECTATOR_SNAPSHOT
+    run_dir = await _rerun(tmp_path)
+    _rewrite_events(run_dir, _drop_last_snapshot)
+    result = validate(run_dir, rounds=2, require_live=False)
+    assert result["status"] == "FAIL"
+    assert any("round event counts" in e or "interleave" in e
+               for e in result["errors"])
+
+    # (b) flip clean in the summary
+    run_dir = await _rerun(tmp_path)
+    _rewrite_summary(run_dir, lambda s: {**s, "clean": False})
+    result = validate(run_dir, rounds=2, require_live=False)
+    assert result["status"] == "FAIL" and "clean outcome" in result["errors"]
+
+    # (c) inject a TOOL_CALL before MATCH_END
+    run_dir = await _rerun(tmp_path)
+    _rewrite_events(run_dir, lambda ls: ls[:-1] + [
+        json.dumps({"schema": 1, "seq": 999, "kind": "TOOL_CALL",
+                    "ts": "2026-09-07T00:00:00+00:00", "match_id": "x",
+                    "game_instance_id": "x", "turn": 1, "phase_player_id": 0,
+                    "player_id": 0, "agent_id": "a", "tool": "move_unit",
+                    "args": {}, "args_digest": "d",
+                    "visibility_scope": "spectator"}, sort_keys=True)] + [ls[-1]])
+    result = validate(run_dir, rounds=2, require_live=False)
+    assert result["status"] == "FAIL"
+    assert any("TOOL_CALL" in e for e in result["errors"])
+
+    # (d) break seq contiguity
+    run_dir = await _rerun(tmp_path)
+    _rewrite_events(run_dir, lambda ls: ls[:3] + ls[4:])
+    result = validate(run_dir, rounds=2, require_live=False)
+    assert result["status"] == "FAIL" and "event sequence" in result["errors"]
+
+    # (e) reorder a START after its SNAPSHOT
+    run_dir = await _rerun(tmp_path)
+    _rewrite_events(run_dir, _swap_last_start_and_snapshot)
+    result = validate(run_dir, rounds=2, require_live=False)
+    assert result["status"] == "FAIL"
+    assert any("interleave" in e for e in result["errors"])
