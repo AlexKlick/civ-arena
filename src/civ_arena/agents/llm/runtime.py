@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import random
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -137,6 +138,10 @@ class LLMAgentRuntime:
             raise MatchAborted("strategic_autopilot runtime was not bound by the factory")
         if self.llm.adaptive_context is not None:
             raise MatchAborted('adaptive context requires the strategic controller')
+        # CAP-03 (F-07): every legacy-path turn is one decision unit for
+        # cost attribution (the strategic controller assigns its own ids).
+        if self.client is not None:
+            self.client.decision_id = uuid.uuid4().hex
         diary_text = (self.diary.get(self.profile.player_id)
                       if self.diary is not None else "")
         memory = (render_memory(self.strategy, self.profile.player_id,

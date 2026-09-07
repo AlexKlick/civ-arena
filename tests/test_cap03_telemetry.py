@@ -11,6 +11,7 @@ isolate: a sink fault never fails or retransmits the provider request.
 
 
 import httpx
+import pytest
 
 from civ_arena.agents.llm.client import MiniMaxMessagesClient
 from civ_arena.config import LLMSpec
@@ -120,3 +121,91 @@ async def test_usage_alias_spellings_resolve(monkeypatch):
     client = _client(monkeypatch, handler, on_attempt=records.append)
     await _create(client)
     assert records[0]["input_tokens"] == 7 and records[0]["output_tokens"] == 3
+
+
+# -- decision boundaries (strategic controller) --------------------------------
+
+@pytest.fixture
+def controller_env(monkeypatch):
+    """Same harness shape as test_strategic_controller.setup, local so the
+    decision-boundary assertions own their construction."""
+    from unittest.mock import AsyncMock
+
+    from civ_arena.agents.llm.runtime import LLMAgentRuntime
+    from civ_arena.agents.llm.strategic_controller import StrategicController
+    from civ_arena.agents.runtime import AgentProfile
+    from civ_arena.config import LLMSpec
+    from fakes import FakeModel, use
+    from test_strategic_controller import Facade
+
+    scout = AsyncMock(return_value={'nodes': [], 'seed': 'fixture'})
+    monkeypatch.setattr(
+        'civ_arena.agents.llm.strategic_controller.run_scouting', scout)
+    model = FakeModel([[use('submit_directive', {'version': 1})]])
+    llm = LLMSpec('http://unused', 'UNUSED', 'fake')
+    runtime = LLMAgentRuntime.build(
+        AgentProfile('a', 0, 'llm', 4, llm=llm), client=model)
+    records = []
+    controller = StrategicController('cap03-test', cadence=5,
+                                     audit=records.append)
+    return controller, runtime, model, Facade(), records
+
+
+async def _advance(controller, runtime, facade, turn):
+    runtime.begin_turn(turn)
+    await controller.take_turn(runtime, facade)
+
+
+async def test_quiet_directive_turn_records_zero_provider_calls_and_actual_tool_cost(
+        controller_env):
+    controller, runtime, model, facade, records = controller_env
+    # this harness fires model decisions at turns 1 and 6 (initial review +
+    # cadence 5); turns 2-5 are quiet procedural turns
+    await _advance(controller, runtime, facade, 1)
+    for turn in range(2, 6):
+        before = model.posts_sent
+        tool_calls = len(facade.calls)
+        await _advance(controller, runtime, facade, turn)
+        boundaries = [r for r in records if r['audit'] == 'decision_boundary'
+                      and r['turn'] == turn]
+        assert len(boundaries) == 1
+        b = boundaries[0]
+        assert b['source'] == 'autopilot'
+        assert b['provider_requests'] == model.posts_sent - before == 0
+        assert b['decision_id']
+        # quiet turns still execute procedurally — the facade saw work
+        assert len(facade.calls) > tool_calls
+
+
+async def test_decision_boundary_carries_ids_on_model_turns(controller_env):
+    controller, runtime, model, facade, records = controller_env
+    for turn in range(1, 7):
+        await _advance(controller, runtime, facade, turn)
+    model_turns = [r for r in records if r['audit'] == 'decision_boundary'
+                   and r['source'] == 'model']
+    assert [b['turn'] for b in model_turns] == [1, 6]
+    b = model_turns[-1]
+    assert b['provider_requests'] >= 1
+    assert b['directive_id']  # accepted directive got its own id
+    # every boundary turn has a distinct decision id
+    ids = [r['decision_id'] for r in records
+           if r['audit'] == 'decision_boundary']
+    assert len(set(ids)) == len(ids) == 6
+    # the client carried the CURRENT decision id during the model call
+    assert model.decision_id == b['decision_id']
+
+
+async def test_legacy_runtime_turns_assign_decision_ids():
+    from civ_arena.agents.llm.runtime import LLMAgentRuntime
+    from civ_arena.agents.runtime import AgentProfile
+    from civ_arena.config import LLMSpec
+    from fakes import FakeModel, use
+    from test_strategic_controller import Facade
+
+    model = FakeModel([[use('end_turn', {})]])
+    llm = LLMSpec('http://unused', 'UNUSED', 'fake')
+    runtime = LLMAgentRuntime.build(
+        AgentProfile('a', 0, 'llm', 4, llm=llm), client=model)
+    runtime.begin_turn(1)
+    await runtime.take_turn(Facade())
+    assert model.decision_id  # legacy turns are decision units too
