@@ -57,14 +57,24 @@ correction `647fdfb` retains the accepted receipt until observed settlement clos
 and provides one bounded model review for an unresolved outcome. The earlier
 NO-GO and failing probe remain preserved. The combined affected gate at `a980963`
 passed 439 tests with no failures or skips; that is not the full release gate.
-Independent final review and the full release gate remain required before launch.
+The continuity correction passed 22 independent probes; the productive policy
+passed 19. Native commit `6e7e1b2` was separately rejected for accepting an interior
+hole in a Lua placement array. Additive correction `f3b8e84` passed 19 independent
+probes and 177 author tests. All original NO-GO records remain preserved.
+The pre-correction integrated release `efd2bf1` passed 1764 tests with one optional
+Neo4j skip and full Ruff, but does not qualify the corrected source. The corrected
+integration requires its own final full gate and source rebind before launch.
 The exact committed `6e7e1b2` production query and parser also ran read-only against
 the preserved turn-39 game. Evidence is
 `productive-compiled-read-6e7e1b2/result.json` in the same support directory; query
 SHA-256 is `3dcfb70923031864e9bcfbba43320d602d529786d028f7a7f521590d95716e6e`.
 It returned five units plus Campus, native cost 78 / seven turns, with five clear
 canonical placements. The query and parser both completed and disconnected.
-These reads establish available APIs/options only. District submission and exact
+The corrected `f3b8e84` query was then independently rendered and read against the
+same stopped game, with the same six option rows. Evidence is
+`productive-compiled-read-f3b8e84/result.json`; query SHA-256 is
+`89f9c93a219964f4828f1ae9f7017937e1b17a2a8a3d945e67c281fc388a4186`.
+It completed and disconnected. These reads establish available APIs/options only. District submission and exact
 plot readback require a separately bounded postmortem action probe after the
 source gates. Project admission/completion will be observed in the fresh game
 once its district finishes; no artificial completion or extra game rehearsal is
