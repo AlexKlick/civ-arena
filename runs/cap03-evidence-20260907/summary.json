@@ -1,0 +1,19 @@
+{
+  "base": "5d5221b",
+  "commits": [
+    "598cbd9 cap03: dataset exporter v0 \u2014 decision-linked samples with strict class separation",
+    "389cc09 cap03: ledger identity fields + sink-failure isolation",
+    "4a99e5c cap03: decision boundaries \u2014 per-turn decision/directive identity + audits",
+    "cabb44a cap03: logical request identity + unknown-usage semantics in attempt records (F-07)",
+    "22d98d0 cap03: fix single-seat client-sink audit signature (F-04)"
+  ],
+  "full_gate": "2 failed, 2013 passed, 1 skipped in 776.92s (0:12:56)",
+  "head": "598cbd97840f6371a32538874254e74df0523a76",
+  "lane": "cap03-decision-telemetry-20260907",
+  "review_status": "pending independent Codex round",
+  "ruff": "clean",
+  "smoke": {
+    "driven_run": "38 controlled_decision samples, 0 ref failures",
+    "spectate_run": "66 spectator intervals (65 closed, 1 open, 7 turn_label_mismatch)"
+  }
+}
