@@ -126,3 +126,53 @@ def test_quiet_census_is_consistent() -> None:
     d2 = mod.respond(lua_translator.mod_digest())
     assert d1 is not None and d2 is not None and units is not None
     assert d1 == d2
+
+
+# -- CAP-01 adversarial timeline: the game moves on OTHER poll types too ------
+
+def test_advance_on_trace_poll_rolls_a_round_without_status() -> None:
+    mod = _spectate_mod(polls_per_human_turn=2, advance_on=["trace"])
+    _status(mod)  # attach (Status does NOT advance in this configuration)
+    assert mod.turn == 1
+    _trace(mod)
+    assert mod.turn == 1  # one trace poll: not yet
+    _trace(mod)  # second trace poll advances the whole round
+    assert mod.turn == 2
+    assert "1|HOOK_DEACT|0" in mod.trace and "2|HOOK_ENTER|0" in mod.trace
+
+
+def test_advance_on_digest_poll() -> None:
+    mod = _spectate_mod(polls_per_human_turn=1, advance_on=["digest"])
+    _status(mod)
+    assert mod.turn == 1
+    mod.respond(lua_translator.mod_digest())
+    assert mod.turn == 2
+
+
+def test_default_timeline_still_advances_on_status_only() -> None:
+    mod = _spectate_mod(polls_per_human_turn=1)
+    _status(mod)
+    for _ in range(4):
+        _trace(mod)
+        mod.respond(lua_translator.mod_digest())
+    assert mod.turn == 1  # nothing but Status advances the default fake
+    _status(mod)
+    assert mod.turn == 2
+
+
+def test_attach_between_turns_models_stale_history() -> None:
+    mod = _spectate_mod(attach_turn_active=False)
+    # pre-seed a STALE ring (an older round the recorder never saw)
+    mod.trace = ["1|HOOK_ENTER|0", "1|HOOK_DEACT|0", "1|HOOK_ENTER|1",
+                 "1|HOOK_DEACT|1", "2|HOOK_ENTER|0"]
+    status = _status(mod)
+    assert status["TURN_ACTIVE"] == "false"  # attached between turns
+    # attach does NOT append a fresh HOOK_ENTER (the human's next turn
+    # has not started); the stale history stays for the drain logic
+    assert "3|HOOK_ENTER|0" not in mod.trace
+
+
+def _trace(mod: FakeMod) -> list[str]:
+    lines = mod.respond(lua_translator.mod_trace())
+    assert lines is not None
+    return lines

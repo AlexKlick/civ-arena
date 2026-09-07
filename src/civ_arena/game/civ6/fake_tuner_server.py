@@ -125,21 +125,28 @@ class FakeMod:
 
     # -- spectator-capture engine timeline -----------------------------------
 
-    def _spectate_poll_tick(self) -> None:
-        """Advance the fake game on Status polls. First poll establishes
-        the attach state (human turn already in progress, its HOOK_ENTER
-        in the ring as history); every polls_per_human_turn-th poll after
-        that completes the human's turn, runs the AI seats, and starts the
-        next human turn."""
+    def _spectate_poll_tick(self, source: str = "status") -> None:
+        """Advance the fake game on the configured poll types (CAP-01
+        adversarial timeline: ``advance_on`` defaults to ["status"], but
+        tests can make Trace or Digest polls advance the game so
+        interleavings the Status-only timeline cannot produce are
+        exercisable). First poll establishes the attach state —
+        mid-human-turn by default (its HOOK_ENTER in the ring as history),
+        or between-turns with ``attach_turn_active: False`` (stale ring
+        history stays for the driver's drain logic, no fresh ENTER)."""
         if self.spectate is None:
             return
-        human = self.spectate["human_seat"]
+        advance_on = self.spectate.get("advance_on", ["status"])
         if not self._spectate_started:
             self._spectate_started = True
+            human = self.spectate["human_seat"]
             self._switch_local_player(human)
-            self.turn_active = True
-            # attach-mid-turn: the hook fired before we attached
-            self.trace.append(f"{self.turn}|HOOK_ENTER|{human}")
+            if self.spectate.get("attach_turn_active", True):
+                self.turn_active = True
+                # attach-mid-turn: the hook fired before we attached
+                self.trace.append(f"{self.turn}|HOOK_ENTER|{human}")
+            return
+        if source not in advance_on:
             return
         self._spectate_polls += 1
         if self._spectate_polls < int(self.spectate.get("polls_per_human_turn", 3)):
@@ -658,11 +665,12 @@ class FakeMod:
         if "Puppeteer.Status" in code:
             if not self.has_status:
                 return ["MOD_STATUS|unavailable"]
-            self._spectate_poll_tick()
+            self._spectate_poll_tick("status")
             return self._status_rows()
         if "Puppeteer.Digest" in code:
             if not self.has_digest:
                 return ["MOD_DIGEST|unavailable"]
+            self._spectate_poll_tick("digest")
             return [self._digest()]
         if "NotificationManager.GetList" in code:
             if self.pending_blockers:
@@ -681,6 +689,7 @@ class FakeMod:
         if "Puppeteer.Trace" in code:
             # the mod v0.3.1 hook ring (minimal model: the turn-start /
             # lease / deactivate events the driver's targeting reads)
+            self._spectate_poll_tick("trace")
             return ["\n".join(self.trace)] if self.trace else ["---END---"]
         match = re.search(r"Puppeteer.BeginRewardCommand\(\d+, \d+, \d+, '([0-9a-f]{64})'", code)
         if match:
