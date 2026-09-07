@@ -11,7 +11,7 @@ match:
 spectate:
   operator: alexk
   human_seat: 0
-  observed_players: [0, 1]
+  observed_players: [0, 1, 2, 3, 4, 5, 6]
   snapshot_scope: full      # ambient | census | full
   turn_budget_s: 3600.0     # AUDIT-ONLY: an overrun is recorded, never acted on
   poll_s: 2.0
