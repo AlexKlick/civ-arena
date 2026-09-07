@@ -144,7 +144,7 @@ class FakeMod:
             if self.spectate.get("attach_turn_active", True):
                 self.turn_active = True
                 # attach-mid-turn: the hook fired before we attached
-                self.trace.append(f"{self.turn}|HOOK_ENTER|{human}")
+                self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
             return
         if source not in advance_on:
             return
@@ -154,14 +154,23 @@ class FakeMod:
         self._spectate_polls = 0
         self._spectate_advance()
 
+    def _spectate_trace_append(self, entry: str) -> None:
+        """Append to the hook ring, honoring the optional ``trace_ring_cap``
+        knob — the REAL mod's ring is a bounded window (64 entries) that
+        evicts from the front; the cap lets tests reproduce wrap gaps."""
+        self.trace.append(entry)
+        cap = int(self.spectate.get("trace_ring_cap", 0)) if self.spectate else 0
+        if cap > 0 and len(self.trace) > cap:
+            self.trace = self.trace[-cap:]
+
     def _spectate_advance(self) -> None:
         human = self.spectate["human_seat"]
         self.turn_active = False
-        self.trace.append(f"{self.turn}|HOOK_DEACT|{human}")
+        self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
         for ai in self.spectate.get("ai_seats", []):
-            self.trace.append(f"{self.turn}|HOOK_ENTER|{ai}")
+            self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{ai}")
             self._spectate_ai_effect(ai)
-            self.trace.append(f"{self.turn}|HOOK_DEACT|{ai}")
+            self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{ai}")
         self._advance_turn_effects()
         self.turn += 1
         # the engine refreshes every unit's movement at the new turn —
@@ -169,7 +178,7 @@ class FakeMod:
         for unit in self.units.values():
             unit["moves"] = 2
         self.turn_active = True
-        self.trace.append(f"{self.turn}|HOOK_ENTER|{human}")
+        self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
 
     def _spectate_ai_effect(self, ai: int) -> None:
         """The engine AI's turn action — a REAL mini-engine mutation so the
