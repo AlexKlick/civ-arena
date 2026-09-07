@@ -427,6 +427,8 @@ async def test_actual_vendor_transport_strips_sentinel_preserves_own_frames(monk
     [
         "CityManager.GetOperationTargets=function() return {} end",
         "CityManager.GetOperationTargets=function() return {plots={[2]=42}} end",
+        "CityManager.GetOperationTargets=function() local p={42,43,44,45}; "
+        "p[2]=nil; assert(#p==4); return {plots=p} end",
     ],
 )
 def test_missing_or_sparse_plot_schema_is_unavailable_not_empty(tmp_path, change):

@@ -64,10 +64,13 @@ local function targets(row)
     local plots = result[CityOperationResults.PLOTS]
     if plots == nil then error('productive PLOTS result unavailable') end
     if type(plots) ~= 'table' or #plots > 256 then error('productive target bound/type') end
+    local keyCount = 0
     for key in pairs(plots) do
+        keyCount = keyCount + 1
         if type(key) ~= 'number' or key ~= math.floor(key) or key < 1 or key > #plots then
             error('productive targets must be a dense array') end
     end
+    if keyCount ~= #plots then error('productive targets must be a dense array') end
     local accepted, seen = {}, {}
     for _, index in ipairs(plots) do
         totalTargetCount = totalTargetCount + 1
