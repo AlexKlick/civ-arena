@@ -26,6 +26,15 @@ observed founding completion remain unchanged. Ordinary training against a valid
 site preserves that intent. Completing one preparation cannot commit a later
 unrelated expansion.
 
+An accepted founder-training receipt now persists across turns for both ordinary
+and preparatory training. Losing its observed queue never frees a replacement
+slot. The controller reports a missing outcome in at most one additional strategy
+review per receipt, including when no site mission exists. Queue presence and a
+new owned founder are recorded as observations; founder origin is not inferred.
+Only confirmed settlement closure retires the commitment. If the founder is lost,
+foreign, or never observed, this correction holds production rather than silently
+retraining; automatic cancellation/replacement remains unsupported.
+
 Before a founder is queued or owned, an uncommitted escort can survey instead of
 waiting indefinitely. Training reserves a currently suitable escort. No extra
 native input, movement restoration, provider request per quiet turn or army cap
@@ -60,6 +69,17 @@ reconstruction and mutation records are retained under
 lifecycle fixture later assumed a fixed founding turn and failed because its
 escort had already surveyed before training. It now observes founding and closure
 instead. The original 385-pass/1-fail log remains preserved.
+
+Independent review of `84f0982` reproduced a real unresolved-training defect:
+a queue disappearing before an observed founder permitted another reserve. Its
+15-pass/1-fail retained probe remains under
+`runs/continuity-independent-84f0982/`. The additive correction adds ten lifecycle
+regressions and passes **396 tests, 0 failed, 0 skipped** in 2.05 seconds
+(`receipt-focused-settled.log`). The sole initial Ruff finding was an import
+format; the corrected import aliases and remaining AST are verified equivalent.
+Final Ruff output is `receipt-ruff-final.log`. Both ordinary and preparatory
+receipts, absent/foreign/lost founders, disappeared producer, later site binding,
+confirmed closure release and an actual once-only controller review are covered.
 
 ## Follow-up probes
 

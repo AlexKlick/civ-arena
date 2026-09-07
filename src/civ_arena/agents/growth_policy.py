@@ -142,6 +142,7 @@ class GrowthPolicy:
         self._replan_observations = set()
         self._founder_reservations = {}
         self._preparation = None
+        self._founder_training = None
 
     @property
     def assessment(self):
@@ -307,6 +308,7 @@ class GrowthPolicy:
                 'capability_columns': columns, 'observed_capabilities': rows,
                 'capabilities_omitted': max(0, len(self._capabilities) - len(rows)),
                 'preparatory_training': copy.deepcopy(self._preparation),
+                'founder_training': copy.deepcopy(self._founder_training),
                 'meaning': 'Observed catalog memory, not current availability. '
                     'Waiting reasons are feasibility holds, not optimality. '
                     'Unknown contacts do not establish war; strength sums are not odds.'}
@@ -357,6 +359,10 @@ class GrowthPolicy:
             if (self._preparation and
                     self._preparation.get('mission_id') == self._mission['mission_id']):
                 self._preparation['status'] = 'completed'
+            if (self._founder_training and
+                    self._founder_training.get('mission_id') == self._mission['mission_id']):
+                self._founder_training.update(status='completed', review_due=False,
+                                              completed_turn=turn)
             self._completed_missions = (self._completed_missions + [self.mission])[-8:]
             self._mission = None
 
@@ -394,6 +400,46 @@ class GrowthPolicy:
                 and 'training_accepted_turn' not in mission
                 and not mission.get('execution_attempted'))
 
+    def _training_pending(self):
+        return bool(self._founder_training and self._founder_training['status'] != 'completed')
+
+    def training_review_reasons(self, turn):
+        """Schedule at most one model review per unresolved accepted training receipt."""
+        if self._turn != turn:
+            raise ValueError('training review requires active matching own turn')
+        if (not self._training_pending() or not self._founder_training.get('review_due')
+                or 'review_reported_turn' in self._founder_training):
+            return []
+        self._founder_training['review_reported_turn'] = turn
+        return ['founder_training_outcome_unavailable']
+
+    def _observe_founder_training(self, state):
+        """Observe progress; a missing queue never cancels accepted production authority."""
+        if not self._training_pending():
+            return
+        receipt = self._founder_training
+        _, _, own, mine, _ = self._state(state)
+        producer = next((c for c in mine if c['city_id'] == receipt['city_id']), None)
+        queue = producer.get('production_queue') or [] if producer else []
+        queue = [queue] if isinstance(queue, str) else queue
+        queued = receipt['item_id'] in queue
+        founders = sorted(u['unit_id'] for u in own
+                          if _role(self._capabilities.get(u.get('type'))) == 'settler'
+                          and u['unit_id'] not in receipt['owned_founder_ids_before'])
+        if queued:
+            receipt['queue_observed_turn'] = self._turn
+        if not receipt.get('observed_founder_id') and founders:
+            receipt.update(observed_founder_id=founders[0], founder_observed_turn=self._turn)
+        founder_present = receipt.get('observed_founder_id') in founders
+        missing = not queued and not founder_present and (
+            self._turn > receipt['accepted_turn'] or 'queue_observed_turn' in receipt)
+        receipt.update(status='founder_observed' if founder_present else
+                       'queued_observed' if queued else
+                       'outcome_unavailable' if missing else 'accepted_unresolved',
+                       review_due=missing, observed_queue_matches=queued,
+                       observed_founder_present=founder_present,
+                       observed_producer_owned=producer is not None)
+
     def _founder_queued(self, state, reservations=None):
         reservations = {**self._founder_reservations, **(reservations or {})}
         for city in state['get_cities']:
@@ -410,6 +456,13 @@ class GrowthPolicy:
         if self._turn is None or city_id not in {c['city_id'] for c in self._state(state)[3]}:
             raise ValueError('founder reservation requires active owned city')
         if _role(self._capabilities.get(item_id)) == 'settler':
+            if self.mission_execution and self._training_pending():
+                receipt = self._founder_training
+                if (receipt['accepted_turn'] == self._turn and receipt['city_id'] == city_id
+                        and receipt['item_id'] == item_id):
+                    self._founder_reservations[city_id] = item_id
+                    return True  # The same accepted same-turn reservation is idempotent.
+                raise ValueError('accepted founder training remains unresolved; no replacement')
             if preparatory:
                 escort = self._preparatory_escort(state, city_id)
                 if not self._unstarted(self._mission) or escort is None:
@@ -423,6 +476,15 @@ class GrowthPolicy:
             elif self._mission:
                 self._mission['training_accepted_turn'] = self._turn
                 self._mission['training_city_id'] = city_id
+            if self.mission_execution:
+                self._founder_training = {'status': 'accepted_unresolved',
+                    'city_id': city_id, 'item_id': item_id, 'accepted_turn': self._turn,
+                    'mission_id': self._mission['mission_id'] if self._mission else None,
+                    'owned_founder_ids_before': sorted(u['unit_id'] for u in self._state(state)[2]
+                        if _role(self._capabilities.get(u.get('type'))) == 'settler'),
+                    'review_due': False,
+                    'authority': 'accepted_training_until_confirmed_settlement_closure'}
+                self._observe_founder_training(state)
             self._founder_reservations[city_id] = item_id
             if self._assessment is not None:
                 self._assessment['settlement_mission'] = self.mission
@@ -452,6 +514,7 @@ class GrowthPolicy:
                      and _distance(u['coord'], origin) <= 1), None)
 
     def _plan_settlement(self, state):
+        self._observe_founder_training(state)
         units, cities, own, mine, tiles = self._state(state)
         mission = self._mission
         if mission and mission['status'] in _TERMINAL_MISSIONS:
@@ -535,7 +598,8 @@ class GrowthPolicy:
         candidates = candidates_for(sites)
         replanning = None
         if (not candidates and mission and self.mission_execution and self._unstarted(mission)
-                and not settlers and not self._founder_queued(state)):
+                and not settlers and not self._founder_queued(state)
+                and not self._training_pending()):
             tile = tiles.get(mission['site'], {})
             mission['site_feasibility_issues'] = (
                 ['site_ownership_unavailable'] if 'owner_id' not in tile else
@@ -582,6 +646,10 @@ class GrowthPolicy:
                 self._preparation.update(status='site_selected', mission_id=mission['mission_id'])
                 mission['training_accepted_turn'] = self._preparation['training_accepted_turn']
                 mission['training_city_id'] = self._preparation['city_id']
+            if self._training_pending() and self._founder_training['mission_id'] is None:
+                self._founder_training['mission_id'] = mission['mission_id']
+                mission['training_accepted_turn'] = self._founder_training['accepted_turn']
+                mission['training_city_id'] = self._founder_training['city_id']
         mission['unit_id'] = settler['unit_id'] if settler else None
         if self.mission_execution and settler:
             mission.setdefault('travel_started_turn', self._turn)
@@ -699,6 +767,7 @@ class GrowthPolicy:
                          or escort_gap)
         preparatory_escort = self._preparatory_escort(state, city_id) if (
             self.mission_execution and mode == 'grow' and self._unstarted(self._mission)
+            and not self._training_pending()
             and civilian['settler'] == 0 and 0 < len(
                 [c for c in state['get_cities'] if _owner(c) == player_id])
             < self.controls.max_cities) else None
@@ -727,10 +796,12 @@ class GrowthPolicy:
             elif role == 'settler':
                 feasible = (mode == 'grow' and self._mission is not None
                             and self._mission['status'] == 'awaiting_settler'
-                            and civilian['settler'] == 0)
+                            and civilian['settler'] == 0 and not self._training_pending()
+                            and 'training_accepted_turn' not in self._mission)
                 eligible = feasible or preparatory_escort is not None
                 reason = ('feasible_escorted_expansion' if feasible else
                           'bounded_preparatory_founder_reserve' if eligible
+                          else 'accepted_founder_training_unresolved' if self._training_pending()
                           else 'expansion_not_ready')
             if (row['kind'] == 'unit' and _armed(capability(catalog[item]))
                     and occupied_slots >= self.controls.military_cap):
