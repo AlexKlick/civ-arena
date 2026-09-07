@@ -325,11 +325,11 @@ def _spectate_certificate(run_dir: Path) -> dict[str, Any]:
             "HUMAN_TURN_START/HUMAN_TURN_END do not strictly alternate")
     summary = json.loads((Path(run_dir) / "summary.json").read_text()) \
         if (Path(run_dir) / "summary.json").exists() else {}
-    if isinstance(summary.get("completed_rounds"), int):
-        if summary["completed_rounds"] != len(boundaries) // 2:
-            problems.append(
-                f"summary completed_rounds={summary['completed_rounds']} "
-                f"but the log carries {len(boundaries) // 2} human turns")
+    if isinstance(summary.get("completed_rounds"), int) \
+            and summary["completed_rounds"] != len(boundaries) // 2:
+        problems.append(
+            f"summary completed_rounds={summary['completed_rounds']} "
+            f"but the log carries {len(boundaries) // 2} human turns")
     return {
         "summary": summary,
         "identical": not problems,

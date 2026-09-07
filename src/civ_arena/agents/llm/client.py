@@ -16,6 +16,7 @@ import asyncio
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any, Protocol
 
 import httpx
@@ -31,6 +32,11 @@ from civ_arena.config import LLMSpec
 
 ANTHROPIC_VERSION = "2023-06-01"
 _RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
+
+
+def _utcnow_iso() -> str:
+    from datetime import datetime
+    return datetime.now(UTC).isoformat()
 
 
 class ModelUnavailable(RuntimeError):
@@ -95,11 +101,19 @@ class MiniMaxMessagesClient:
 
     def __init__(self, spec: LLMSpec, auth_style: str = "x-api-key",
                  on_post: Callable[[], None] | None = None,
-                 on_request_post: Callable[[str], None] | None = None) -> None:
+                 on_request_post: Callable[[str], None] | None = None,
+                 on_attempt: Callable[[dict[str, Any]], None] | None = None
+                 ) -> None:
         self.spec = spec
         self.auth_style = auth_style
         self.on_post = on_post
         self.on_request_post = on_request_post
+        # spectator-capture lane: fires after EVERY counted attempt
+        # (success, retryable failure, terminal failure) with the full
+        # request/response record — powers llm_costs.jsonl + the opt-in
+        # wire transcript. on_post semantics are untouched (budget/spend
+        # parity depends on them).
+        self.on_attempt = on_attempt
         self.posts_by_kind = {'generation': 0, 'count_tokens': 0}
         self.posts_sent = 0  # every POST, retries included (budget authority)
         self._http: httpx.AsyncClient | None = None
@@ -213,6 +227,33 @@ class MiniMaxMessagesClient:
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(self.spec.request_timeout_s))
 
+        import time as _time
+
+        def _fire(attempt: int, status_code: int | None, latency_ms: int,
+                  sent_key: str, response_doc: Any = None,
+                  error: str | None = None) -> None:
+            if self.on_attempt is None:
+                return
+            input_tokens = output_tokens = None
+            if isinstance(response_doc, dict):
+                usage = response_doc.get("usage")
+                if isinstance(usage, dict):
+                    try:
+                        input_tokens = int(usage.get(
+                            "input_tokens", usage.get("prompt_tokens", 0)) or 0)
+                        output_tokens = int(usage.get(
+                            "output_tokens", usage.get("completion_tokens", 0)) or 0)
+                    except (TypeError, ValueError):
+                        input_tokens = output_tokens = None
+            self.on_attempt({
+                "ts": _utcnow_iso(), "request_kind": request_kind,
+                "attempt": attempt, "status_code": status_code,
+                "latency_ms": latency_ms, "model": body.get("model"),
+                "payload_hash": payload_hash(body), "request": body,
+                "response": response_doc, "error": error,
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+            })
+
         last_error = "no attempt made"
         for attempt in range(self.spec.max_retries + 1):
             if admission is not None and (self.spec.model_id != admitted_body['model']
@@ -231,6 +272,7 @@ class MiniMaxMessagesClient:
                 self.on_request_post(request_kind)
             if self.on_post is not None:
                 self.on_post()  # durable spend ledger (per attempt)
+            t0 = _time.monotonic()
             try:
                 resp = await self._http.post(
                     url, **({'content': dispatch_json} if dispatch_json is not None
@@ -243,29 +285,39 @@ class MiniMaxMessagesClient:
                                 else {"x-api-key": sent_key})})
             except httpx.TransportError as exc:
                 last_error = self._redact(f"transport error: {exc}", sent_key)
+                _fire(attempt, None, int((_time.monotonic() - t0) * 1000),
+                      sent_key, error=last_error)
                 if attempt < self.spec.max_retries:
                     await asyncio.sleep(0.5 * 2 ** attempt)
                     continue
                 raise ModelUnavailable(last_error) from exc
+            latency_ms = int((_time.monotonic() - t0) * 1000)
             if resp.status_code == 200:
                 try:
-                    return resp.json()
+                    doc = resp.json()
                 except ValueError as exc:  # invalid JSON in a 200 body
+                    _fire(attempt, 200, latency_ms, sent_key,
+                          error=f"malformed response: body is not JSON ({exc})")
                     raise ModelUnavailable(
                         f"malformed response: body is not JSON ({exc})"
                     ) from exc
+                _fire(attempt, 200, latency_ms, sent_key, response_doc=doc)
+                return doc
             if resp.status_code in _RETRYABLE_STATUS \
                     and attempt < self.spec.max_retries:
+                _fire(attempt, resp.status_code, latency_ms, sent_key,
+                      error=f"HTTP {resp.status_code} (retryable)")
                 await asyncio.sleep(0.5 * 2 ** attempt)
                 continue
             # 4xx and unretryable 5xx: fail immediately, carry a REDACTED body
             # (a reflecting proxy can echo the key back; it must never reach
             # the durable log via MatchAborted). Redact BEFORE slicing: a key
             # straddling the cut would leak its prefix.
-            raise ModelUnavailable(
-                f"HTTP {resp.status_code} from {self.spec.model_id}: "
-                f"{self._snippet(self._redact(resp.text, sent_key))}"
-            )
+            terminal = (f"HTTP {resp.status_code} from {self.spec.model_id}: "
+                        f"{self._snippet(self._redact(resp.text, sent_key))}")
+            _fire(attempt, resp.status_code, latency_ms, sent_key,
+                  error=terminal)
+            raise ModelUnavailable(terminal)
         raise ModelUnavailable(last_error)
 
     @staticmethod

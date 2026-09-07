@@ -55,6 +55,38 @@ from civ_arena.session.tools import SessionCtx
 from civ_arena.strategy.store import StrategyStore
 
 
+def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
+                       run_dir: Path) -> None:
+    """Attach the run-dir ledgers to a model client: durable spend
+    (spend.jsonl parity with the sim coordinator), the always-on
+    per-attempt cost ledger, the opt-in wire transcript, and the existing
+    provider_request audit — composed instead of clobbering whichever
+    callback happened to be set last."""
+    if client is None or not hasattr(client, "on_post"):
+        return
+    from civ_arena.agents.llm.wire_log import CostLedger, WireLog
+    from civ_arena.arena.spend import SpendLedger
+
+    spend = SpendLedger(run_dir / "spend.jsonl")
+    costs = CostLedger(run_dir)
+    wire = None
+    if agent.llm is not None and agent.llm.wire_log:
+        wire = WireLog(run_dir, agent.agent_id, agent.player_id, agent.llm)
+
+    def on_post(client=client, aid=agent.agent_id) -> None:
+        spend.note(aid, agent.player_id)
+        audit("provider_request", agent=aid, posts_sent=client.posts_sent)
+
+    client.on_post = on_post
+
+    def on_attempt(record: dict[str, Any]) -> None:
+        costs.note(agent.agent_id, agent.player_id, record)
+        if wire is not None:
+            wire.note(record)
+
+    client.on_attempt = on_attempt
+
+
 class TapConnection(GameConnection):
     """Every command + response appended to wire.jsonl — diagnostic
     transcript, explicitly NOT a trust root (the event log is). A transcript
@@ -295,6 +327,9 @@ async def phase_dispatch(
     runtime = build_runtime(profile, match_id=spec.match_id,
                             audit=lambda payload: _strategic_audit(driver, payload),
                             opening_units_frozen=adapter._simulate is None)
+    _wire_client_sinks(getattr(runtime, "client", None), agent,
+                       lambda payload: _strategic_audit(driver, payload),
+                       run_dir)
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
     # Arena-owned services reach the runtime exactly as the coordinator
     # wires them (LLM runtimes read diary/strategy at turn start; without
@@ -840,10 +875,8 @@ async def phase_dispatch_hotseat(
                     configure_pacing(recall_available=recall_available)
                     audit("turn_pacing", agent=agent.agent_id, mode="visible_briefing_v1",
                           recall_available=recall_available)
-                client = getattr(runtime, "client", None)
-                if client is not None and hasattr(client, "on_post"):
-                    client.on_post = lambda client=client, aid=agent.agent_id: audit(
-                        "provider_request", agent=aid, posts_sent=client.posts_sent)
+                _wire_client_sinks(getattr(runtime, "client", None), agent,
+                                   audit, run_dir)
             await adapter.setup({})
             caps = await adapter.inject_mod(mod_lua)
             audit("mod_capabilities", capabilities=caps)
