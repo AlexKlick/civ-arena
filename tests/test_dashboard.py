@@ -96,7 +96,8 @@ def test_terminal_summary_is_authoritative_and_failure_is_visible(tmp_path, monk
     result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
     assert result['status'] == 'aborted'
     assert result['metrics'] == {'completed_rounds': 1, 'completed_seat_turns': 2,
-                                 'requests': 0, 'violations': 1}
+                                 'requests': 0, 'violations': 1,
+                                 'spectator_snapshots': 0, 'human_turns': 0}
     assert any('watchdog' in warning for warning in result['warnings'])
     assert 'secret-in-exception' not in json.dumps(result)
     (run / 'summary.json').write_text('{"clean":true}')

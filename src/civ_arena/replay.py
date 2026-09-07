@@ -166,6 +166,12 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
         raise ValueError(
             f"replay dir {replay_dir} is the SOURCE run dir — refusing "
             "to replay into it (the wipe would delete the trust root)")
+    # A spectate run has ZERO driven tool calls (a human played the seat;
+    # the harness only observed) — re-executing through an Arena would
+    # fabricate a synthetic sim match. Return a structural certificate
+    # before any Arena construction.
+    if _is_spectate_run(run_dir):
+        return _spectate_certificate(run_dir)
     # a replay dir is a DERIVED artifact, never a trust root: a stale one
     # from an earlier replay would have the Arena APPEND a second match
     # into the same events.jsonl (observed 2026-09-03: 388+308 'identical'
@@ -270,6 +276,68 @@ def _is_live_run(run_dir: Path) -> bool:
         return False
 
 
+def _is_spectate_run(run_dir: Path) -> bool:
+    summary = Path(run_dir) / "summary.json"
+    if not summary.exists():
+        return False
+    try:
+        return json.loads(summary.read_text()).get("phase") == "spectate"
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+_SPECTATE_FORBIDDEN_KINDS = frozenset({
+    "TOOL_CALL", "TOOL_RESULT", "LEASE_GRANT", "LEASE_RELEASE",
+    "LEASE_EXPIRED", "VIOLATION", "UNAUTHORIZED_TOOL_CALL",
+})
+
+
+def _spectate_certificate(run_dir: Path) -> dict[str, Any]:
+    """Structural certificate for a spectate run: there is nothing to
+    re-execute (no driven tool calls), so the certificate asserts the
+    envelope invariants instead — seq contiguity, MATCH_START first /
+    MATCH_END last, no action kinds, and strict HUMAN_TURN_START/END
+    alternation. A tampered log fails here, loudly."""
+    records = _load_records(Path(run_dir) / "events.jsonl")
+    problems: list[str] = []
+    if not records:
+        problems.append("empty event log")
+    else:
+        if records[0]["kind"] != "MATCH_START":
+            problems.append("first record is not MATCH_START")
+        if records[-1]["kind"] != "MATCH_END":
+            problems.append("last record is not MATCH_END")
+        seqs = [rec.get("seq") for rec in records]
+        if seqs != list(range(len(records))):
+            problems.append("seq is not contiguous from 0 (tampered or torn log)")
+    for rec in records:
+        if rec.get("kind") in _SPECTATE_FORBIDDEN_KINDS:
+            problems.append(
+                f"{rec.get('kind')} at seq {rec.get('seq')} — a spectator "
+                "never acts")
+            break
+    boundaries = [rec for rec in records
+                  if rec.get("kind") in ("HUMAN_TURN_START", "HUMAN_TURN_END")]
+    expected = ["HUMAN_TURN_START", "HUMAN_TURN_END"] * (
+        len(boundaries) // 2)
+    if [rec["kind"] for rec in boundaries] != expected:
+        problems.append(
+            "HUMAN_TURN_START/HUMAN_TURN_END do not strictly alternate")
+    summary = json.loads((Path(run_dir) / "summary.json").read_text()) \
+        if (Path(run_dir) / "summary.json").exists() else {}
+    return {
+        "summary": summary,
+        "identical": not problems,
+        "problems": problems,
+        "mode": "spectate",
+        "live_events": len(records),
+        "replayed_events": len(records),
+        "live_final_hash": summary.get("final_state_hash"),
+        "replayed_final_hash": None,
+        "live_mode": True,
+    }
+
+
 def _live_turn_offset(records: list[dict[str, Any]]) -> int:
     """The live log's first driven turn minus one (a live dispatch that
     attached at engine turn 2 has offset 1). 0 when there are no calls."""
@@ -321,6 +389,16 @@ async def _main_async(argv: list[str] | None = None) -> int:
     spec = load_config(opts.config)
     replay_dir = opts.replay_dir or (opts.run_dir.parent / f"{opts.run_dir.name}-replay")
     result = await replay_run(opts.run_dir, spec, replay_dir, live=opts.live)
+    if result.get("mode") == "spectate":
+        if result["identical"]:
+            print(f"SPECTATE run — no driven tool calls to re-execute; "
+                  f"structural certificate over {result['live_events']} events: OK")
+            return 0
+        print(f"SPECTATE run — structural certificate FAILED over "
+              f"{result['live_events']} events:")
+        for problem in result["problems"]:
+            print("  ", problem)
+        return 4
     if result["identical"]:
         print(f"REPLAY OK: {result['live_events']} comparable events identical; "
               f"final hash {result['replayed_final_hash']}"
