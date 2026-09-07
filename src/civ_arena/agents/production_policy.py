@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from civ_arena.agents.productive_policy import REPEATABLE_PROJECTS, placement_choice
 from civ_arena.agents.strategy_directive import MAX_UNIT_TARGET, coordinate
 
 # Exact base-ruleset IDs, considered only when the current city offers them.
@@ -100,12 +101,16 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
         raise ValueError("production catalog unavailable or exceeds bounded size")
     catalog = {}
     for row in options:
-        if not isinstance(row, dict) or row.get("kind") not in ("unit", "building"):
-            raise ValueError("production catalog requires observed unit/building kind")
+        if (not isinstance(row, dict)
+                or row.get("kind") not in ("unit", "building", "district", "project")):
+            raise ValueError("production catalog requires an observed supported kind")
         item = _item(row.get("item_id"))
         if item in catalog:
             raise ValueError("production catalog has duplicate exact item ID")
-        catalog[item] = row["kind"]
+        kind = row["kind"]
+        if kind in ("district", "project") and not item.startswith(kind.upper() + "_"):
+            raise ValueError("productive item requires exact native prefixed identity")
+        catalog[item] = kind
     owned = Counter(_item(unit.get("type")) for unit in units)
     # Preserve opaque tokens as occupied queues, but never guess their item kind
     # or count an unresolved native hash toward any desired unit inventory.
@@ -124,9 +129,19 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
     targets = directive.get("unit_targets", {})
     assigned = "SCOUT" in directive["scouting"]["unit_types"]
     candidates = []
+    options_by_id = {row["item_id"]: row for row in options}
     for item, kind in sorted(catalog.items()):
         target = None
         reason = "building_available"
+        placement = None
+        if kind == "district":
+            placement = placement_choice(options_by_id[item], state, player_id=player_id,
+                                         city_id=city_id)
+            reason = "district_available" if placement['dest'] else "no_projected_placement"
+        elif kind == "project":
+            reason = ("project_available" if item in REPEATABLE_PROJECTS
+                      or item in directive['production_preferences']
+                      else "project_requires_explicit_preference")
         if kind == "unit":
             default = 1
             if item == "SCOUT":
@@ -143,8 +158,11 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
         candidates.append({"item_id": item, "kind": kind, "target": target,
                            "owned": owned[item], "queued": queued[item],
                            "reserved": reserved[item], "effective": effective[item],
-                           "eligible": reason in ("building_available", "below_unit_target"),
+                           "eligible": reason in ("building_available", "district_available",
+                                                  "project_available", "below_unit_target"),
                            "reason": reason})
+        if placement is not None:
+            candidates[-1]["placement"] = placement
     eligible = {row["item_id"] for row in candidates if row["eligible"]}
     prefs = directive["production_preferences"]
     selected, reason = None, "no_eligible_production"
@@ -161,6 +179,12 @@ def choose_production(state: dict, *, player_id: int, city_id: str, options: lis
         selected = next((item for item in sorted(eligible) if catalog[item] == "building"), None)
         if selected is not None:
             reason = "available_building_fallback"
+    if selected is None:
+        for kind in ("district", "project"):
+            selected = next((item for item in sorted(eligible) if catalog[item] == kind), None)
+            if selected is not None:
+                reason = "available_" + kind + "_fallback"
+                break
     if selected is None:
         unit_order = ["BUILDER", *DEFENDERS, "SCOUT", "SETTLER", *sorted(eligible)]
         selected = next((item for item in unit_order if item in eligible), None)
