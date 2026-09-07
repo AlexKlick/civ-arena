@@ -154,6 +154,11 @@ class ContextCurator:
             self.dirty.add('get_units')
         if name == 'set_city_production':
             self.dirty.add('get_cities')
+            if isinstance(args.get('item_id'), str) and args['item_id'].startswith('DISTRICT_'):
+                # Placement affects the map and city economics outside the old digest.
+                self.dirty.update({'get_visible_map', 'get_overview'})
+                self.production_dirty.update(self.production)
+                self.research_dirty = True
             if isinstance(result, dict) and result.get('status') == 'rejected':
                 self.production_dirty.add(args['city_id'])
             else:
@@ -240,6 +245,7 @@ class ContextCurator:
                        'health_valid', 'hp_bucket', 'strength', 'ranged_strength', 'fortified',
                        'is_barbarian')
         city_fields = ('city_id', 'coord', 'population', 'production_queue', 'hp')
+        production_fields = ('item_id', 'kind', 'cost', 'turns', 'placements')
         mine_u = self.own('get_units')
         mine_c = self.own('get_cities')
         overview = self.state['get_overview']
@@ -252,7 +258,7 @@ class ContextCurator:
                'you': overview.get('you', {}), 'public': overview.get('public', {}),
                'research_options': self.state.get('get_available_research', []),
                'option_sources': self.choice_status(),
-               'production_options': {cid: [selected(x, ('item_id', 'kind', 'cost', 'turns'))
+               'production_options': {cid: [selected(x, production_fields)
                                             for x in options]
                                       for cid, options in sorted(self.production.items())},
                'terrain': [], 'terrain_omitted': 0,

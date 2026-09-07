@@ -30,6 +30,7 @@ from civ_arena.agents.llm.request_budget import (
 )
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.production_policy import choose_production
+from civ_arena.agents.productive_policy import production_args
 from civ_arena.agents.recovery import RecoveryPolicy, RecoveryTracker
 from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
 from civ_arena.agents.settlement_executor import SettlementExecutor
@@ -115,8 +116,17 @@ Training does not authorize travel through unknown ownership or unsafe founding.
 Preparatory training retires any infeasible unsent site; surveying must establish
 a currently feasible site before a new travel mission can start.
 Before founder commitment, a spare escort may survey rather than wait indefinitely.
-Production options currently enumerate only units/buildings. Unlisted districts
-and city projects have unknown native availability; do not infer none exist.
+Production options include exact observed units, buildings, districts and projects.
+Use full DISTRICT_* and PROJECT_* item IDs in recurring production_preferences.
+District placements are native legal, owned-visible, consequence-free targets;
+the controller rechecks projected ownership and chooses a stable nearby target.
+This distance tie-break does not optimize adjacency or city yields. Requested
+production is accepted only after observed queue/placement admission; that is not
+proof of completion. Available infrastructure follows defense and bounded expansion
+needs. Routine district projects can repeat when other productive choices run out;
+other projects require an explicit preference. Active queues are never replaced.
+Native catalogs are filtered to supported operations: unlisted choices do not
+prove an absent prerequisite or that no other engine action exists.
 """
 
 
@@ -662,15 +672,20 @@ class StrategicController:
                            outcome='no_eligible_production')
                 if self._growth is not None:
                     raise MatchAborted(f'no eligible supported production for {cid}; '
-                                       'district/project choices remain unrepresented')
+                                       'current options and placement constraints exhausted')
                 raise MatchAborted(f'no eligible production within unit targets for {cid}')
-            args = {'city_id': cid, 'item_id': item}
+            args = production_args(policy, curator.production.get(cid, []), curator.state,
+                                   player_id=runtime.profile.player_id, city_id=cid)
             result = await curator.execute('set_city_production', args)
             self._emit(runtime, 'strategy_economy', source='autopilot',
                        tool='set_city_production', args=args, result=result,
                        production_policy=policy)
             if result.get('status') not in ('accepted', 'rejected'):
                 raise MatchAborted('production action returned no canonical status')
+            selected_kind = next(row['kind'] for row in policy['candidates']
+                                 if row['item_id'] == item)
+            if result['status'] == 'rejected' and selected_kind in ('district', 'project'):
+                raise MatchAborted(f'productive production rejected for {cid}; no automatic retry')
             if result['status'] == 'accepted':
                 reservations[cid] = item
                 if self._growth is not None:

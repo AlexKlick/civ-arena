@@ -12,6 +12,7 @@ import math
 from collections import deque
 from dataclasses import asdict, dataclass
 
+from civ_arena.agents.productive_policy import PRODUCTIVE_KINDS
 from civ_arena.agents.strategy_directive import coordinate
 from civ_arena.game.sim.state import hex_dist, neighbors
 
@@ -134,6 +135,7 @@ class GrowthPolicy:
         self._mode = 'grow'
         self._quiet = 0
         self._capabilities = {}
+        self._catalog_kinds = {}
         self._mission = None
         self._assessment = None
         self._completed_missions = []
@@ -216,6 +218,16 @@ class GrowthPolicy:
                 if cid not in own_cities or not isinstance(rows, list) or len(rows) > 256:
                     raise ValueError('growth catalog must belong to observed owned city')
                 for row in rows:
+                    item, kind = row.get('item_id'), row.get('kind')
+                    if (not isinstance(item, str) or not item or len(item) > 64
+                            or kind not in {'unit', *PRODUCTIVE_KINDS}):
+                        raise ValueError('growth requires exact observed production kind')
+                    previous = self._catalog_kinds.get(item)
+                    if previous is not None and previous != kind:
+                        raise ValueError('conflicting observed production kind')
+                    if item not in self._catalog_kinds and len(self._catalog_kinds) >= 1024:
+                        raise ValueError('growth production kind memory exceeds bound')
+                    self._catalog_kinds[item] = kind
                     if row.get('kind') != 'unit':
                         continue
                     cap = capability(row)
@@ -669,7 +681,8 @@ class GrowthPolicy:
                     if _role(cap) == 'military':
                         land_queued_count += 1
                         future_power += max(cap['combat'], cap['ranged'])
-                elif _unknown_arms(cap) and catalog.get(item, {}).get('kind') != 'building':
+                elif (_unknown_arms(cap)
+                      and self._catalog_kinds.get(item) not in PRODUCTIVE_KINDS):
                     uncertain_slots.append({'city_id': city['city_id'], 'item_id': item})
         total_military = field_count + queued_count
         occupied_slots = total_military + len(uncertain_slots)
@@ -692,10 +705,13 @@ class GrowthPolicy:
         rank = {}
         for row in candidates:
             item = row['item_id']
-            role = 'building' if row['kind'] == 'building' else _role(capability(catalog[item]))
+            role = (row['kind'] if row['kind'] in PRODUCTIVE_KINDS
+                    else _role(capability(catalog[item])))
             eligible, reason = False, 'growth_role_not_observed_or_not_needed'
-            if role == 'building':
-                eligible, reason = True, 'infrastructure_opportunity'
+            if role in PRODUCTIVE_KINDS:
+                # Never relax the base policy's projected-target or project admission.
+                eligible = row['eligible']
+                reason = 'infrastructure_opportunity' if eligible else row['reason']
             elif item == 'SCOUT' and not base['scout_role_assigned']:
                 reason = 'scouting_role_disabled'
             elif self.mission_execution and item == 'SCOUT':
@@ -728,7 +744,9 @@ class GrowthPolicy:
                        target_basis='explicit_per_item_cap_plus_aggregate_growth_policy')
             if eligible:
                 priority = (0 if role == 'military' and needs_defense else
-                            1 if role == 'settler' else 2)
+                            1 if role == 'settler' else
+                            3 if role == 'project' and item not in
+                            directive['production_preferences'] else 2)
                 efficiency = 0.0
                 if role == 'military':
                     observed = capability(catalog[item])
@@ -758,11 +776,13 @@ class GrowthPolicy:
                                        'bounded_preparatory_founder_reserve' for row in candidates),
                        'meaning': 'Training capacity only; no route or founding authority.'},
                    'available_infrastructure': sorted(item for item, row in catalog.items()
-                                                       if row['kind'] == 'building'),
-                   'production_option_scope': {'supported_kinds': ['unit', 'building'],
-                       'unrepresented_native_choices': ['district_placement', 'city_projects'],
+                                                       if row['kind'] in PRODUCTIVE_KINDS),
+                   'production_option_scope': {
+                       'supported_kinds': ['unit', 'building', 'district', 'project'],
+                       'district_placement_scope': 'fresh_owned_visible_consequence_free_targets',
+                       'unrepresented_native_choices': ['district_resume_or_tile_removal'],
                        'native_availability_of_unrepresented_choices': 'unobserved',
                        'no_eligible_choice_requires': None if chosen else
-                           'qualify_productive_capability_or_wait_for_observed_safe_growth'},
+                           'observe_new_eligible_option_or_adjust_strategy_within_constraints'},
                    'mission': self.mission, 'execution': 'proposal_only_no_game_actions'})
         return out

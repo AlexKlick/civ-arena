@@ -182,7 +182,7 @@ def test_no_feasible_productive_choice_is_explicit_supported_subset_not_native_a
     result = choose(g, f)
     assert result['item_id'] is None
     scope = result['growth']['production_option_scope']
-    assert scope['unrepresented_native_choices'] == ['district_placement', 'city_projects']
+    assert scope['unrepresented_native_choices'] == ['district_resume_or_tile_removal']
     assert scope['no_eligible_choice_requires']
 
 
