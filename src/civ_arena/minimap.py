@@ -189,12 +189,24 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
                     'packet_terrain_count': len(tiles),
                     'packet_terrain_omitted': state.get('terrain_omitted'), 'graph': graph}
         seat['snapshots'].append(snapshot)
+    from civ_arena.productive_map import project
+    for pid, seat in seats.items():
+        seat['productive_actions'] = project(events, pid)
+        own_events = [e for e in events if type(e.get('player_id')) is int
+                      and e['player_id'] == pid and type(e.get('turn')) is int
+                      and e['turn'] >= 1]
+        latest = max(own_events, key=lambda e: e['seq']) if own_events else seat['snapshots'][-1]
+        seat['productive_cutoff'] = {'seq': latest['seq'],
+                                     'turn': max([e['turn'] for e in own_events] +
+                                                 [seat['snapshots'][-1]['turn']])}
     result = {'version': 1, 'scope': 'combined_observation_preview' if spectator else 'player_only',
               'limits': ['Retained model packets, not full explored map or live engine state.',
                          'Receipt age is known; actual tile visibility/observation age is unknown.',
                          'Empty space is unsupplied; extents are not map bounds. Wrap is unknown.',
                          'Audit choices do not guarantee legality or confirmed displacement.',
-                         'Selection weights are not success probabilities. No expansion forecast.'],
+                         'Selection weights are not success probabilities. No expansion forecast.',
+                         'Production receipts prove historical queue/placement admission, '
+                         'not completion.'],
               'event_binding': {'status': 'matched_context_hash' if events else 'unverified',
                                 'run_ids': [list(item) for item in sorted(run_ids)]},
               'axis': 'Increasing r is engine-grid north; screen north is a viewer convention.',
