@@ -98,15 +98,19 @@ action per turn, preserving explicit tactical commands and health holds. A pendi
 unconfirmed action will not automatically repeat. You may issue explicit tactical
 orders for recovery/repositioning; they do not replace the persistent mission/site.
 Capabilities are retained exact native observations, not current availability.
-Before the first owned city, found immediately with an explicit SETTLER tactical
-order or move that settler one known adjacent tile to select a fixed capital site.
-That first relocation selects a persistent initial-capital intent: after observed
-arrival, the controller will attempt founding there on a later quiet turn, subject
-to current ownership, health, terrain, city spacing and nearby contact guards.
-It never relocates that site automatically. No production catalog or spare escort
-is needed for this initial prerequisite. Other tactical orders still last one turn.
-Rejected or unconfirmed founding is not retried automatically. If no site was
-selected, one additional choice review is available; no optimal site is invented.
+Before the first owned city, the controller defaults to one guarded founding at
+its owned settler's observed current tile; this is procedural authority, not a
+model tactical override. You may instead explicitly select an adjacent known safe
+site by moving that settler, or explicitly found now. Automatic founding never
+bypasses observed health/contact/ownership guards. A relocation without confirmed
+displacement by the next fresh own-turn observation requires an explicit founder
+resolution: found on the current guarded tile, move to a different guarded tile,
+or hold only when an observed guard blocks progress. Warrior-only tactics do not
+resolve this prerequisite. Never repeat a failed relocation edge or attempted
+founding site. At most two relocations, two guard-hold turns and six own-turn
+intervals are available; these are operational failure budgets, not strategy
+optimality claims. If no safe resolution exists the controller stops honestly.
+An explicit revision retires the old intent and requires its own observed effects.
 An unsent expansion intent may select another currently observed feasible site,
 at most three times; committed travel intents and attempted missions preserve their sites.
 One preparatory founder may train below the city cap in growth mode with a verified
@@ -253,6 +257,8 @@ class StrategicController:
                 self._growth.begin_turn(curator.state, turn=turn, catalogs=curator.production)
                 self._settlement.observe(self._growth, curator.state, turn)
                 self._capital.observe(curator.state, turn)
+                if self._capital.failure_reason:
+                    raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
             reasons.extend(recovery['review_reasons'])
@@ -263,6 +269,10 @@ class StrategicController:
                 reasons.extend(self._capital.review_reasons(turn))
             if reasons:
                 await curator.refresh()
+                if self._capital is not None:
+                    self._capital.observe(curator.state, turn)
+                    if self._capital.failure_reason:
+                        raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
                 directive = await self._decide(runtime, curator, reasons)
                 self.directive = copy.deepcopy(directive)
                 self._last_decision = turn
@@ -281,7 +291,9 @@ class StrategicController:
 
             reserved = self._growth.reserved_roles(curator.state) if self._growth else {}
             if self._capital is not None:
-                self._capital.prepare(curator.state, directive, turn)
+                self._capital.prepare(curator.state, directive, turn, recovery['units'])
+                if self._capital.failure_reason:
+                    raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
                 reserved.update(self._capital.reserved_roles(curator.state))
             graph = await run_scouting(
                 curator.state, directive=directive, player_id=runtime.profile.player_id,
@@ -316,7 +328,10 @@ class StrategicController:
                     curator.state, turn=turn, match_id=self.match_id, graph=graph,
                     execute=curator.execute, refresh=refresh, recovery=recovery['units'],
                     tactical_ids=tactical_ids, untouched_frozen_ids=frozen_ids - attempted)
-                self._emit(runtime, 'strategy_initial_capital', **capital_report)
+                self._emit(runtime, 'strategy_initial_capital', **capital_report,
+                           progress=self._capital.summary())
+                if self._capital.failure_reason:
+                    raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
                 if capital_report['execution']:
                     mission_report = {'source': 'automatic_settlement_mission', 'execution': [],
                                       'outcome': 'initial_capital_used_mission_action',
@@ -343,7 +358,9 @@ class StrategicController:
                 self._capital.complete_turn(turn)
             pending = self._scouting_feedback.remember_completed(graph, turn=turn)
             self._emit(runtime, 'strategy_turn_closed', source='controller',
-                       scouting_pending_confirmation=pending)
+                       scouting_pending_confirmation=pending,
+                       **({'initial_capital_completion': copy.deepcopy(self._capital.completion)}
+                          if self._capital is not None else {}))
             self._failed = False
         except ModelUnavailable as exc:
             self._emit(runtime, 'strategy_failed', reason='model_unavailable')
@@ -569,7 +586,15 @@ class StrategicController:
                             directive = validate_directive(
                                 value, player_id=runtime.profile.player_id,
                                 owned_unit_ids={u['unit_id'] for u in curator.own('get_units')})
-                            if adaptive and task == 'economy' and directive['tactical_overrides']:
+                            if self._capital is not None and opening_actions_pending:
+                                capital_error = self._capital.directive_error(
+                                    curator.state, directive,
+                                    (self._recovery_proposal or {}).get('units', {}))
+                                if capital_error:
+                                    directive = None
+                                    reason = capital_error
+                            if (directive is not None and adaptive and task == 'economy'
+                                    and directive['tactical_overrides']):
                                 directive = None
                                 reason = 'tactical_authority_disabled'
                     except (ValueError, TypeError, OverflowError, RecursionError):
@@ -598,7 +623,8 @@ class StrategicController:
                 self._decision_observation = observation
                 return directive
             if not repair_available:
-                raise MatchAborted(f'strategic directive rejected: {category}/{reason}; '
+                prefix = 'capital_unresolved: ' if reason.startswith('capital_') else ''
+                raise MatchAborted(prefix + f'strategic directive rejected: {category}/{reason}; '
                                    'no format repair budget remains')
             metadata['format_repair'] = {
                 'attempt': 2, 'previous_category': category, 'previous_reason': reason,

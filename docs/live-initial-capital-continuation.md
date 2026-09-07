@@ -1,78 +1,103 @@
-# Initial capital continuation
+# Bounded initial capital progress
 
-With `growth_autopilot: true`, the first explicit tactical move of a sole observed
-owned `SETTLER`, while there are no owned cities, now records that destination as
-an initial-capital intent. The move still executes as an ordinary one-turn model
-order. Observed arrival enables one automatic `found_city` request on a later
-quiet turn at that same site. It does not require a production catalog or spare
-escort, which depend on the capital already existing.
+With `growth_autopilot: true`, a cityless seat with one observed owned `SETTLER`
+uses one guarded in-place `found_city` action by default. The model can instead
+request immediate founding or one adjacent relocation through its existing
+one-turn tactical directive. A relocation continues to guarded founding only after
+arrival is observed. The controller never inserts its default into model tactical
+overrides. Growth-disabled behavior and ordinary escorted expansion retain their
+existing paths.
 
-The existing `GROWTH_SYSTEM` prompt discloses this behavior. The directive schema
-and count/admission/generation body construction are unchanged. No site is chosen
-automatically and no optimality is claimed. An explicit immediate founding order
-continues to use the existing tactical path. Growth-disabled behavior and ordinary
-escorted expansion missions retain their previous behavior.
+The current projection must show the selected owned settler, health at least 90%
+with valid health observations and no active recovery overlay, known land with
+known unowned/own ownership, no city within four hexes and no observed foreign
+unit within two hexes. Foreign contacts represent uncertainty, not automatic war.
+These are conservative execution restrictions, not native legality, visibility
+freshness or safety proofs. The existing facade performs native legality checks.
+Automatic founding uses positive observed movement or the existing verified,
+untouched opening frozen allowance; it introduces no movement restoration.
+Explicit model input remains on the existing tactical path and is validated
+against the current capital guards before dispatch.
 
-Before automatic founding, the current projection must show the same owned
-settler at the selected site, verified recovered health, known land with known
-unowned/own ownership, no existing city within four hexes and no observed foreign
-unit within two hexes. These are conservative feasibility guards, not native
-legality or safety proofs. The engine checks the request through the existing
-facade. Current tactical orders and recovery holds have priority. Existing
-untouched opening frozen movement may be used once; no new movement restoration
-or native operation is introduced.
+A rejected relocation, or an accepted relocation with no arrival at the first
+fresh later own-turn observation, requires a founder-specific resolution. A
+warrior-only directive cannot clear this requirement. The existing two-attempt
+format-repair mechanism admits a guarded founding at the current tile, a different
+adjacent relocation, or a hold justified by an observed guard. No new provider
+request loop or request cap is added. A failed origin/destination edge cannot be
+sent again by this plan. Explicit revisions archive the previous mission and
+pending receipt instead of silently overwriting their correlation.
 
-Input acceptance alone cannot complete the plan. Completion requires an accepted
-automatic founding request, a new owned city at the selected site, absence of the
-founder in the current projection and then verified turn closure. Rejected,
-ambiguous and superseded input never repeats automatically. A terminal city
-observation without that receipt cannot later be upgraded into causal completion.
-The initial-capital path stays disabled once an owned city is observed, including
-after later city loss.
+Operational heuristics bound the entire initial plan: at most two relocation
+submissions, two guarded hold turns, and six elapsed own-turn intervals from the
+first cityless observation. Revisions do not reset these budgets. These constants
+are uncalibrated reliability limits for establishing a first capital, not strategy
+quality targets, production deadlines or additional match clocks. Exhaustion
+raises `capital_unresolved`; the runner retains its ordinary terminal and cleanup
+behavior. Accepted but still unconfirmed founding stops at the next own-turn
+observation. Rejected founding permits a meaningful explicit relocation review,
+but never another founding request at the same already-attempted tile. An unknown
+input outcome poisons the current controller rather than authorizing a resend.
 
-One additional model review is available for a missing choice or blocked progress;
-quiet turns do not each trigger a provider call. A plan expires after twelve own
-turns from selection. This is a bounded continuation heuristic, not an empirically
-optimal travel limit. Existing match deadlines and ordinary strategy cadence
-remain unchanged. The site is immutable; recovery/repositioning needs explicit
-model orders, and there is no automatic relocation or save recovery.
+## Observed completion and audit contract
+
+All three founding paths use the same completion correlation: an accepted
+`found_city` response, a newly observed owned city at the selected site, and the
+selected founder absent from all projected units. `strategy_initial_capital.mission`
+and `.progress.mission` carry `unit_id`, `site`, `selection_basis`,
+`observed_city_id`, `observed_player_id`, `founder_consumed`,
+`observed_completion_turn`, and
+`completion_basis=accepted_founder_consumed_new_owned_city_at_site`.
+
+`selection_basis` distinguishes `controller_default_guarded_in_place`,
+`explicit_model_founding`, `explicit_model_relocation_then_guarded_founding`, and
+`explicit_guard_hold_then_controller_default`. Explicit actions remain in the
+scouting graph; automatic founding has its own execution row. Only after turn
+closure does `strategy_turn_closed.initial_capital_completion` include the same
+identity plus `completed_turn`. A failed closure never emits that completed turn.
+An unrelated owned city disables the initial path without claiming correlated
+founding, and cannot later be upgraded into success. Later city loss does not
+reactivate an opening plan.
 
 ## Verified findings
 
-The read-only retained prefix from `minimax100-20260907T011202Z` established the
-trigger. P1 turn 1 directive sequence 119 moved settler `u1:65536` from `-4,26` to
-`-3,25`. Turns 2 through 5 contained no tactical orders and no settlement mission.
-Turn 6 sequence 541 moved warrior `u1:131073`; the settler remained cityless. These
-are immutable prefix observations, not a terminal result for that active match.
+The stopped `minimax100-20260907T024441Z` event log contained 11 complete rounds
+and 22 seat turns. P0's turn-1 relocation from `30,11` to `31,11` was accepted
+without observed displacement; the turn-3 progress review contained only a
+warrior order, and turn 10 repeated the same settler edge. This establishes a
+missing progress-resolution contract, not the native cause of that failed move.
+The retained diagnostic is `runs/capital-reliability-review-a941` in the separate
+dashboard-productive worktree.
 
-Local affected tests: **363 passed, 0 failed, 0 skipped**, complete capture in
-`runs/initial-capital-evidence-20260907/focused-release.log`. The isolated regression
-file covers 29 cases, including quiet-turn founding, no catalog, health/site guards,
-frozen allowance, rejected/ambiguous input, bounded review, expiry, cancellation,
-closure failure and compatibility. The initial 24-pass/2-fail run used a fake model
-that replayed its first relocation at every review; that fixture was corrected to
-return an empty later directive. All initial logs remain preserved.
-Full Ruff over `src tests scripts` passed in the same directory's `ruff-release.log`.
-The final cases also cover P1 identity/capture and exact counted adaptive dispatch
-followed by quiet-turn founding with no further provider POST.
+Current repository evidence is recorded under `runs/capital-progress-evidence`.
+The initial focused run had 18 failures/11 passes: obsolete continuation
+expectations plus a real delayed-arrival guard defect, which was corrected.
+The next run passed 29 cases. Added regressions initially had three fixture
+failures/34 passes: fake responses were indexed from total request count, and
+actor loss occurred after a scouting refresh rather than before the initial
+request. Corrected fixtures passed all 37 capital cases. The affected gate passed 261 tests with no failures, errors, skips or deselections
+in 39.55 seconds (`focused-final.log`). Six new line-length warnings were corrected;
+Ruff then passed all three Python files (`ruff-final.log`). The post-format capital
+check passed 37 tests in 0.19 seconds (`capital-after-format.log`); formatting did
+not change behavior. These checks are not the full repository release gate.
 
 ## Follow-up probes
 
-Independently review this frozen commit and validate any later integration. A
-fresh native match should confirm the selected initial site, subsequent facade
-founding, new city, consumed founder, lease release and request accounting. The
-active `538f84b` match is not changed by this worktree.
+Independently review the frozen candidate, then bind the parent integration and
+release gate. A fresh live match must show both initial capitals with causal
+founder/city receipts and completed seat turns, plus the existing request and
+movement-allowance accounting. Completed seat counts alone do not establish this
+capital milestone.
 
 ## Blocked checks
 
-No external blocker affected repository implementation. Native execution is
-pending integration and qualification; it is not established by these fixtures.
+No native, provider, desktop or service action was performed in this worktree.
+The parent owns live qualification and the full repository release gate.
 
 ## Evidence gaps
 
-There is no claim of an optimal capital site, full-game strategy, live 100-round
-completion or a live pass for this new continuation. Foreign proximity does not
-establish war, and remembered terrain does not prove the absence of hidden units.
-Multiple initial settlers are intentionally ambiguous: no automatic selection is
-made. Failed or superseded plans require explicit model action; automatic replanning
-is outside this correction.
+Projected fixtures do not prove native city founding, an optimal capital site,
+complete information about nearby danger, victory or a fresh 100-round result.
+The conservative contact guard can stop a viable but uncertain opening. Multiple
+initial settlers are intentionally ambiguous. This repair establishes a bounded
+first-capital action contract, not general city-loss recovery or global strategy.
