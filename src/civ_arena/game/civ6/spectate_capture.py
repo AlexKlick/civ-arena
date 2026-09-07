@@ -37,10 +37,9 @@ MAX_SNAPSHOT_BYTES = 256 * 1024
 
 @dataclass(frozen=True)
 class SpectateLimits:
-    """Spectate pacing. ``turn_budget_s`` is AUDIT-ONLY — an overrun is
-    recorded, never acted on (no budget ever sends input)."""
+    """Spectate pacing (the human-turn budget lives on SpectateSpec —
+    AUDIT-ONLY there, never acted on; one source of truth)."""
 
-    turn_budget_s: float
     poll_s: float
     heartbeat_s: float
     match_s: float

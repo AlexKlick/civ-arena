@@ -43,6 +43,11 @@ from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
 from civ_arena.game.civ6 import lua_translator, response_parser, ui_control
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
+from civ_arena.game.civ6.spectate_capture import (
+    SpectateLimits,
+    SpectatorCensus,
+    TurnWatch,
+)
 from civ_arena.game.civ6.spectator import PopupMonitor
 from civ_arena.game.civ6.vendor.connection import GameConnection
 from civ_arena.session.player_session import PlayerSession
@@ -947,6 +952,270 @@ async def phase_dispatch_hotseat(
           f"seat turns; {failure or 'completed'}", flush=True)
     return 0 if ok else 2
 
+
+async def phase_spectate(
+    spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
+    turns: int, mod_lua: str, limits: SpectateLimits,
+) -> int:
+    """Watch-and-record a live game the OPERATOR plays against the engine's
+    own AI. The harness NEVER acts: no puppet arming (a lease would freeze
+    the human's units), no local-player switch, no blocker housekeeping, no
+    popup dismissal, no desktop input of any kind — polls, observes, and
+    the mod's lease-free ambient-window recorder commands only. Turn
+    boundaries come from the unconditional hook ring (HOOK_ENTER/HOOK_DEACT
+    for the human seat), corroborated by TURN_ACTIVE. Attaching mid-human-
+    turn records that (partial) turn as round 1 with window="attach". The
+    turn budget is AUDIT-ONLY: an overrun is recorded, never acted on."""
+    events = run_dir / "events.jsonl"
+    _refuse_rerun(events)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if spec.spectate is None:
+        raise RuntimeError(
+            "--phase spectate requires a spectate: block in the config")
+    if spec.agents:
+        raise RuntimeError(
+            "a spectate run rosters no driven agents (config refused it "
+            "already; this is the driver-side belt-and-braces)")
+    sc = spec.spectate
+    human = sc.human_seat
+    ai_players = [p for p in sc.observed_players if p != human]
+    driver = LiveDriver(spec, adapter, run_dir,
+                        f"{spec.match_id}-i{os.getpid()}")
+    census = SpectatorCensus(adapter, sc)
+    watch = TurnWatch()
+    started = time.monotonic()
+
+    def audit(tag: str, **fields: Any) -> None:
+        turn = fields.pop("turn", 0)
+        driver._write("HEARTBEAT", turn=turn, phase_player_id=human,  # noqa: SLF001
+                      player_id=None, agent_id=None,
+                      visibility_scope="spectator", audit=tag, **fields)
+
+    per_round: list[dict[str, Any]] = []
+    windows_open: set[int] = set()
+    failure: str | None = None
+    clean = False
+    attached_mid_turn = False
+    engine_turn_at_attach = -1
+    ai_hook_events = 0
+    overrun_flagged = False
+    human_turn = -1
+    snapshot: dict[str, Any] = {}
+    ai_manifests: dict[str, list[dict[str, Any]]] = {}
+    status_polls = trace_polls = digest_reads = observe_reads = \
+        recorder_commands = 0
+    # the phase has NO write path at all — pinned structurally by
+    # test_live_spectate's source pin and by the wire-level command
+    # allowlist over the fake server's received_commands
+    game_writes = 0
+
+    async def counted_status() -> dict[str, Any]:
+        nonlocal status_polls
+        status_polls += 1
+        return await adapter.poll_status()
+
+    async def counted_trace() -> list[str]:
+        nonlocal trace_polls
+        trace_polls += 1
+        return await adapter.read_trace()
+
+    async def open_window(pid: int) -> None:
+        nonlocal recorder_commands
+        recorder_commands += 1
+        await census.open_window(pid)
+        windows_open.add(pid)
+
+    async def close_window(pid: int) -> list[dict[str, Any]]:
+        nonlocal recorder_commands
+        recorder_commands += 1
+        rows = await census.close_window(pid)
+        windows_open.discard(pid)
+        return rows
+
+    await adapter.setup({})
+    await adapter.inject_mod(mod_lua)
+    await driver.match_start()
+    audit("run_identity", identity=implementation_identity(spec, mod_lua))
+    audit("spectate_config", **asdict(sc))
+    try:
+        async with asyncio.timeout(limits.match_s):
+            status = await counted_status()
+            trace = await counted_trace()
+            engine_turn_at_attach = int(status.get("TURN", -1))
+            attached_mid_turn = status.get("TURN_ACTIVE") is True
+            audit("engine_status", turn=engine_turn_at_attach,
+                  turn_active=status.get("TURN_ACTIVE"),
+                  attached_mid_turn=attached_mid_turn)
+            # baseline windows from attach: every observed player (the
+            # attach round's human window opens here — window="attach")
+            for pid in sc.observed_players:
+                await open_window(pid)
+
+            round_no = 0
+            active = False
+            history_drained = False
+            last_heartbeat = time.monotonic()
+            turn_started = time.monotonic()
+            while not clean:
+                new, gap = watch.new_entries(trace)
+                if gap:
+                    audit("trace_gap", ring_size=len(trace))
+                if not history_drained:
+                    # the FIRST read sees ring HISTORY. Attached mid-human-
+                    # turn: keep only the current turn's entries (the
+                    # human's ENTER is real and unprocessed). Attached
+                    # between/AI turns: every history entry is stale (the
+                    # human's next turn has not started) — drop it all and
+                    # wait for the next fresh HOOK_ENTER.
+                    history_drained = True
+                    if attached_mid_turn:
+                        new = [e for e in new
+                               if (TurnWatch.parse(e) or (-1, "", -1))[0]
+                               == engine_turn_at_attach]
+                    else:
+                        if new:
+                            audit("attach_history_discarded",
+                                  entries=len(new))
+                        new = []
+                for entry in new:
+                    parsed = TurnWatch.parse(entry)
+                    if parsed is None:
+                        continue
+                    entry_turn, event, pid = parsed
+                    if pid == human and event == "HOOK_ENTER" and not active:
+                        # -- round start: close the AI windows (their
+                        # deltas since they last opened), census, snapshot,
+                        # ensure the HUMAN window is open, START
+                        round_no += 1
+                        human_turn = entry_turn
+                        ai_manifests = {}
+                        for ai in ai_players:
+                            if ai in windows_open:
+                                ai_manifests[str(ai)] = await close_window(ai)
+                            await open_window(ai)
+                        snapshot = await census.snapshot()
+                        digest_reads += 2
+                        observe_reads += 1 + (
+                            2 if sc.snapshot_scope == "full" else 0)
+                        driver._write(  # noqa: SLF001
+                            "SPECTATOR_SNAPSHOT", turn=entry_turn,
+                            phase_player_id=human, player_id=None,
+                            agent_id=None, visibility_scope="spectator",
+                            round=round_no, phase="turn_start",
+                            ambient=ai_manifests, **snapshot)
+                        driver._write(  # noqa: SLF001
+                            "HUMAN_TURN_START", turn=entry_turn,
+                            phase_player_id=human, player_id=None,
+                            agent_id=None, visibility_scope="spectator",
+                            operator=sc.operator,
+                            window="attach" if attached_mid_turn
+                            and round_no == 1 else "turn_start",
+                            turn_active_corroborated=(
+                                status.get("TURN_ACTIVE") is True))
+                        if human not in windows_open:
+                            await open_window(human)
+                        active = True
+                        overrun_flagged = False
+                        turn_started = time.monotonic()
+                    elif pid == human and event == "HOOK_DEACT" and active:
+                        # -- round end: close the human window (their
+                        # in-turn delta), digest, END, reopen AI windows
+                        human_rows = await close_window(human)
+                        duration = time.monotonic() - turn_started
+                        digest_reads += 1
+                        digest_after = await adapter.refresh_digest()
+                        overrun = duration > sc.turn_budget_s
+                        driver._write(  # noqa: SLF001
+                            "HUMAN_TURN_END", turn=entry_turn,
+                            phase_player_id=human, player_id=None,
+                            agent_id=None, visibility_scope="spectator",
+                            operator=sc.operator,
+                            duration_s=round(duration, 3),
+                            human_ambient=human_rows,
+                            digest_after=digest_after, overrun=overrun)
+                        for ai in ai_players:
+                            if ai not in windows_open:
+                                await open_window(ai)
+                        per_round.append({
+                            "round": round_no, "turn": entry_turn,
+                            "human_duration_s": round(duration, 3),
+                            "human_ambient_rows": len(human_rows),
+                            "ai_ambient_rows": {k: len(v) for k, v in
+                                                ai_manifests.items()},
+                            "census_consistent":
+                                snapshot.get("digest", {}).get("consistent"),
+                            "digest": digest_after, "overrun": overrun,
+                        })
+                        active = False
+                        if round_no >= turns:
+                            clean = True
+                            break
+                    elif pid != human:
+                        ai_hook_events += 1
+                if clean:
+                    break
+                await asyncio.sleep(limits.poll_s)
+                status = await counted_status()
+                trace = await counted_trace()
+                now = time.monotonic()
+                if active and not overrun_flagged \
+                        and now - turn_started > sc.turn_budget_s:
+                    overrun_flagged = True
+                    audit("human_turn_overrun", turn=human_turn,
+                          elapsed_s=round(now - turn_started, 1),
+                          note="audit only — the phase never acts")
+                if now - last_heartbeat >= limits.heartbeat_s:
+                    last_heartbeat = now
+                    audit("engine_status", turn=status.get("TURN"),
+                          turn_active=status.get("TURN_ACTIVE"),
+                          round=round_no, active=active)
+    except TimeoutError:
+        failure = "match timeout"
+    except asyncio.CancelledError:
+        failure = "cancelled"
+        raise
+    except Exception as exc:  # noqa: BLE001 — recorded, then re-raised
+        failure = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        summary = {
+            "phase": "spectate", "operator": sc.operator,
+            "observed_players": list(sc.observed_players),
+            "snapshot_scope": sc.snapshot_scope,
+            "human_turn_budget_s": sc.turn_budget_s,
+            "per_round": per_round,
+            "completed_rounds": len(per_round), "requested_rounds": turns,
+            "clean": clean and failure is None,
+            "aborted": failure, "failure_reason": failure,
+            "failure_stage": None if failure is None else "spectate",
+            "attach": {"attached_mid_turn": attached_mid_turn,
+                       "engine_turn_at_attach": engine_turn_at_attach},
+            "command_census": {
+                "status_polls": status_polls, "trace_polls": trace_polls,
+                "digest_reads": digest_reads, "observe_reads": observe_reads,
+                "recorder_commands": recorder_commands,
+                "game_writes": game_writes,
+            },
+            "trace_gaps": watch.gaps, "census_retries": census.retries,
+            "ai_hook_events": ai_hook_events,
+            "limits": {"match_s": limits.match_s, "poll_s": limits.poll_s,
+                       "heartbeat_s": limits.heartbeat_s,
+                       "turn_budget_s": sc.turn_budget_s},
+            "identity": implementation_identity(spec, mod_lua),
+            "cleanup": {"status":
+                        "disconnect_only_no_game_actions_no_leases"},
+            "elapsed_s": round(time.monotonic() - started, 3),
+        }
+        await driver.match_end(
+            per_round[-1]["turn"] if per_round else engine_turn_at_attach,
+            summary)
+        await adapter.teardown()
+    print(f"SPECTATE {'CLEAN' if clean and failure is None else 'ENDED'}: "
+          f"{len(per_round)}/{turns} rounds; {failure or 'completed'}",
+          flush=True)
+    return 0 if clean and failure is None else 2
+
+
 # research housekeeping preference: era-1 techs the wire actually offers,
 # then the sorted fallback — a deterministic pick that NEVER leaves
 # research empty while techs remain (an empty slot is the freeze)
@@ -1211,7 +1480,7 @@ def main() -> None:
     ap.add_argument("config", type=Path)
     ap.add_argument("--phase", required=True,
                     choices=["probe", "exclusive-control", "dispatch",
-                             "dispatch-hotseat"])
+                             "dispatch-hotseat", "spectate"])
     ap.add_argument("--turns", type=int, default=1)
     ap.add_argument("--run-id", default=None,
                     help="run dir name under runs/ (default: match_id)")
@@ -1249,9 +1518,22 @@ def main() -> None:
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGTERM, task.cancel)
         if opts.fake:
+            fake_cfg: dict | None = None
+            if opts.phase == "spectate":
+                if spec.spectate is None:
+                    raise SystemExit(
+                        "--phase spectate requires a spectate: config block")
+                sc = spec.spectate
+                fake_cfg = {
+                    "human_seat": sc.human_seat,
+                    "ai_seats": [p for p in sc.observed_players
+                                 if p != sc.human_seat],
+                    "polls_per_human_turn": 3,
+                }
             server = FakeTunerServer(mod=FakeMod(
                 hotseat=[a.player_id for a in spec.agents]
-                if opts.phase == "dispatch-hotseat" else None))
+                if opts.phase == "dispatch-hotseat" else None,
+                spectate=fake_cfg, ambient_diffs=fake_cfg is not None))
             port = await server.start()
             adapter = FireTunerAdapter(
                 "127.0.0.1", port,
@@ -1288,6 +1570,16 @@ async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
                                  agent_turn=opts.agent_turn_timeout,
                                  recovery=opts.recovery_timeout, sweeps=opts.recovery_sweeps),
             controller=ui_control.FakeController() if opts.fake else ui_control.Controller())
+    if opts.phase == "spectate":
+        sc = spec.spectate or None
+        if sc is None:
+            raise RuntimeError(
+                "--phase spectate requires a spectate: block in the config")
+        return await phase_spectate(
+            spec, adapter, run_dir, opts.turns, mod_lua,
+            limits=SpectateLimits(
+                poll_s=sc.poll_s, heartbeat_s=sc.heartbeat_s,
+                match_s=opts.match_timeout))
     return await phase_dispatch(
         spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,
         bootstrap=opts.bootstrap_end_turn)

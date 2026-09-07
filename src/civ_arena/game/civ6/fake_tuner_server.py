@@ -157,6 +157,10 @@ class FakeMod:
             self.trace.append(f"{self.turn}|HOOK_DEACT|{ai}")
         self._advance_turn_effects()
         self.turn += 1
+        # the engine refreshes every unit's movement at the new turn —
+        # without this the AI effect could only ever fire once
+        for unit in self.units.values():
+            unit["moves"] = 2
         self.turn_active = True
         self.trace.append(f"{self.turn}|HOOK_ENTER|{human}")
 
