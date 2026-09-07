@@ -1,10 +1,12 @@
 'use strict';
 const data = JSON.parse(document.getElementById('data').textContent);
+const palette = JSON.parse(document.getElementById('palette').textContent);
+const T = palette.tokens;
 const $ = id => document.getElementById(id);
 const ns = 'http://www.w3.org/2000/svg';
 const svg = (tag, attrs, parent) => {
   const e = document.createElementNS(ns, tag);
-  Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
+  Object.entries(attrs).forEach(([k, v]) => { if (v !== null && v !== undefined) e.setAttribute(k, v); });
   if (parent) parent.append(e);
   return e;
 };
@@ -17,24 +19,9 @@ const pretty = value => JSON.stringify(value, null, 2);
 const option = (parent, value, label) => {
   const e = text('option', label, parent); e.value = value; return e;
 };
-const point = coord => {
-  const [q, r] = coord.split(',').map(Number);
-  return [Math.sqrt(3) * 14 * (q + r / 2), -21 * r];
-};
-const hex = coord => {
-  const [x, y] = point(coord);
-  return Array.from({length: 6}, (_, i) => {
-    const a = (60 * i + 30) * Math.PI / 180;
-    return `${x + 14 * Math.cos(a)},${y + 14 * Math.sin(a)}`;
-  }).join(' ');
-};
-const color = t => {
-  const raw = t.native_terrain?.type || '', biome = t.native_terrain?.biome || t.terrain;
-  if (raw.includes('MOUNTAIN')) return '#80898d';
-  return {GRASS:'#568473',GRASSLAND:'#568473',PLAINS:'#9b995f',DESERT:'#b39862',
-    TUNDRA:'#9da79f',SNOW:'#d8e0df',COAST:'#346985',OCEAN:'#244e6b',HILL:'#828766'}[biome] || '#52656a';
-};
+const civName = value => typeof value === 'string' && value !== '' ? value : null;
 let snapshots = [], rows = [], actors = [], productions = [], windows = [], bounds, view, selected = null;
+let tiles = new Map(), seatIds = [], roster = {ids: null, names: new Map()}, layers = {}, latestSeq = () => undefined;
 for (const seat of data.seats) option($('perspective'), String(seat.player_id), `Player ${seat.player_id}`);
 if (data.scope === 'combined_observation_preview') option($('perspective'), 'union', 'Spectator · combined receipts');
 $('scope').textContent = data.scope === 'player_only'
@@ -48,6 +35,95 @@ if (data.dashboard_source) {
   text('pre', pretty(data.dashboard_source), $('custody'));
   $('scope').append(document.createTextNode(' Dashboard snapshot: refresh explicitly for newer packets.' +
     (data.dashboard_source.partial_trailing_record_ignored ? ' An incomplete trailing event was ignored; only the complete prefix is shown.' : '')));
+}
+// Shared pattern definitions: the legend swatches reference them by id too.
+{
+  const d = svg('defs', {}, $('map'));
+  const p = svg('pattern', {id: 'unknown-hatch', patternUnits: 'userSpaceOnUse', width: 6, height: 6, patternTransform: 'rotate(45)'}, d);
+  svg('rect', {width: 6, height: 6, fill: palette.terrain.UNKNOWN.fill}, p);
+  svg('line', {x1: 0, y1: 0, x2: 0, y2: 6, stroke: palette.terrain.UNKNOWN.hatch, 'stroke-width': 1.2}, p);
+}
+const terrainFill = key => key === 'UNKNOWN' ? 'url(#unknown-hatch)' : palette.terrain[key].fill;
+const classify = id => ownerClass(id, seatIds, roster.ids);
+const resolve = alternatives => resolveOwnership(alternatives, latestSeq);
+const ownerColorFor = id => ownerColor(id, classify(id), seatIds, roster.ids, palette);
+const ownerName = id => roster.names.has(id) ? ` · ${roster.names.get(id)}` : '';
+function ownerLabel(id) {
+  const cls = classify(id);
+  const kind = cls === 'seat' ? 'seat' : cls === 'major' ? 'roster major' : palette.owners[cls].label;
+  return `P${id}${ownerName(id)} — ${kind}`;
+}
+function ownershipSentence(own) {
+  if (own.status === 'owned') return `Owned by ${ownerLabel(own.owner_id)}`;
+  if (own.status === 'unowned') return 'Observed unowned (-1) at receipt';
+  if (own.status === 'null_field') return 'Ownership field supplied as null';
+  if (own.status === 'invalid') return 'Ownership value unsupported';
+  return 'Ownership not observed (remembered hex or owner key unsupplied)';
+}
+function receiptSentence(r) {
+  const latest = latestSeq(r.player_id);
+  return `seq ${r.seq} · T${r.turn} · ` + (r.seq === latest ? `latest for seat P${r.player_id}`
+    : `older than seat P${r.player_id}'s latest seq ${latest} (dimmed)`);
+}
+function computeRoster(snaps) {
+  const ids = new Set(), names = new Map();
+  let supplied = false;
+  for (const s of snaps) {
+    if (civName(s.you && s.you.civ_name)) names.set(s.receipt.player_id, s.you.civ_name);
+    if (!Array.isArray(s.public_players)) continue;
+    supplied = true;
+    for (const p of s.public_players) {
+      if (!p || !Number.isInteger(p.player_id)) continue;
+      ids.add(p.player_id);
+      if (civName(p.civ_name)) names.set(p.player_id, p.civ_name);
+    }
+  }
+  return {ids: supplied ? [...ids].sort((a, b) => a - b) : null, names};
+}
+// Elevation marks are paths, not font glyphs, so no font can turn them into tofu.
+const markPath = (x, y, kind) => kind === 'mountain'
+  ? `M${fmt(x)} ${fmt(y - 5.5)} L${fmt(x + 5.5)} ${fmt(y + 3.5)} L${fmt(x - 5.5)} ${fmt(y + 3.5)} Z`
+  : `M${fmt(x - 5.5)} ${fmt(y + 2)} q2.75 -4.5 5.5 0 q2.75 -4.5 5.5 0`;
+function drawMark(parent, d, kind, stale, count) {
+  const g = svg('g', {class: `elev elev-${kind}`, 'data-stale': stale ? 1 : 0, 'data-count': count}, parent);
+  svg('path', {class: 'elev-halo', d}, g);
+  svg('path', {class: 'elev-ink', d}, g);
+  return g;
+}
+function drawUnitBadge(parent, x, y, spec) {
+  const role = palette.roles[spec.spec.role] || palette.roles.unknown, r = 7;
+  const g = svg('g', {class: `badge badge-unit role-${spec.spec.role}`, 'data-glyph': spec.spec.glyph}, parent);
+  if (role.shape === 'square') {
+    svg('rect', {class: 'badge-halo', x: x - r - 1.2, y: y - r - 1.2, width: 2 * r + 2.4, height: 2 * r + 2.4, rx: 3.5}, g);
+    svg('rect', {class: 'badge-shape', x: x - r + .8, y: y - r + .8, width: 2 * r - 1.6, height: 2 * r - 1.6, rx: 2, fill: spec.color}, g);
+  } else {
+    svg('circle', {class: 'badge-halo', cx: x, cy: y, r: r + 1.2}, g);
+    svg('circle', {class: `badge-shape${role.dashed ? ' dashed' : ''}`, cx: x, cy: y, r, fill: spec.color}, g);
+  }
+  svg('text', {class: 'badge-glyph', x, y: y + 2.6}, g).textContent = spec.spec.glyph;
+  if (Number.isInteger(spec.hpBucket)) {
+    const rr = r + 3.4, filled = Math.max(0, Math.min(palette.hp_ring.segments, spec.hpBucket));
+    for (let k = 0; k < palette.hp_ring.segments; k++) {
+      const step = 360 / palette.hp_ring.segments, a0 = (-90 + k * step + 6) * Math.PI / 180, a1 = (-90 + (k + 1) * step - 6) * Math.PI / 180;
+      svg('path', {class: `hp-seg ${k < filled ? 'filled' : 'empty'}`, stroke: k < filled ? spec.color : null,
+        d: `M${fmt(x + rr * Math.cos(a0))} ${fmt(y + rr * Math.sin(a0))} A${rr} ${rr} 0 0 1 ${fmt(x + rr * Math.cos(a1))} ${fmt(y + rr * Math.sin(a1))}`}, g);
+    }
+  }
+  if (spec.fortified) svg('circle', {class: 'fortified', cx: x, cy: y, r: r - 2.2}, g);
+  return g;
+}
+function drawCityBadge(parent, x, y, spec) {
+  const g = svg('g', {class: 'badge badge-city'}, parent);
+  const ring = radius => hexVertices(x, y, radius).map(p => p.map(fmt).join(',')).join(' ');
+  svg('polygon', {class: 'badge-halo', points: ring(11)}, g);
+  svg('polygon', {class: 'badge-shape', points: ring(9.5), fill: spec.color}, g);
+  svg('text', {class: 'badge-glyph city-pop', x, y: y + 2.8}, g).textContent =
+    Number.isInteger(spec.population) ? String(spec.population) : '·';
+  return g;
+}
+function borderSample(s, color, style) {
+  const b = palette.borders[style];
+  svg('line', {class: 'border', x1: -13, y1: 0, x2: 13, y2: 0, stroke: color, 'stroke-width': b.width, 'stroke-dasharray': b.dash}, s);
 }
 function perspective() {
   const union = $('perspective').value === 'union';
@@ -78,50 +154,84 @@ function draw() {
     .map(a => a.result && (a.result.seq > windows[i].seq || a.result.turn > windows[i].turn)
       ? {...a, result:null, admission:null, status:'unconfirmed'} : a));
   // Keep each perspective's receipts. Overlap gets a single paint but retains all alternatives.
-  const tiles = new Map();
+  tiles = new Map();
   snapshots.forEach(s => s.terrain.forEach(row => {
     if (!tiles.has(row.observation.coord)) tiles.set(row.observation.coord, []);
     tiles.get(row.observation.coord).push(row);
   }));
   rows = [...tiles.values()]; actors = snapshots.flatMap(s => s.actors);
+  seatIds = snapshots.map(s => s.receipt.player_id);
+  const seqBySeat = new Map(snapshots.map(s => [s.receipt.player_id, s.seq]));
+  latestSeq = pid => seqBySeat.get(pid);
+  roster = computeRoster(snapshots);
   $('world').replaceChildren(); $('mini-world').replaceChildren(); $('actors').replaceChildren();
   option($('actors'), '', 'Select an actor…');
+  layers = {};
+  for (const name of ['tiles', 'tints', 'borders', 'elevation', 'paths', 'districts', 'actors']) {
+    layers[name] = svg('g', {class: `layer layer-${name}`}, $('world'));
+  }
+  const marks = {hills: {0: [], 1: []}, mountain: {0: [], 1: []}};
+  const tileFragment = document.createDocumentFragment(), miniFragment = document.createDocumentFragment();
   rows.forEach(alternatives => {
-    const row = alternatives[0], t = row.observation;
-    const latest = snapshots.find(s => s.receipt.player_id === row.receipt.player_id).seq;
-    const attrs = {points:hex(t.coord), fill:color(t), opacity:row.receipt.seq === latest ? 1 : .50};
-    const h = svg('polygon', {...attrs, tabindex:0, role:'button', 'aria-label':`Hex ${t.coord}`}, $('world'));
+    const row = alternatives[0], t = row.observation, cls = classifyTile(t, palette);
+    const stale = row.receipt.seq !== latestSeq(row.receipt.player_id) ? 1 : 0;
+    const attrs = {points: hexPoints(t.coord), fill: terrainFill(cls.fillKey), opacity: stale ? .5 : 1};
+    const h = svg('polygon', {...attrs, class: 'tile', 'data-terrain': cls.fillKey, 'data-elevation': cls.elevation,
+      tabindex: 0, role: 'button', 'aria-label': `Hex ${t.coord} · ${terrainName(t, palette)} · ${ownershipSentence(resolve(alternatives))}`});
+    tileFragment.append(h);
     const pick = () => selectTile(alternatives);
     h.addEventListener('click', pick);
     h.addEventListener('keydown', e => {if (e.key === 'Enter' || e.key === ' ') {e.preventDefault(); pick();}});
-    svg('polygon', attrs, $('mini-world'));
-    if (t.native_terrain?.hills || t.native_terrain?.type?.includes('MOUNTAIN')) {
-      const [x,y] = point(t.coord); svg('text', {x,y:y+3}, $('world')).textContent = '▲';
-    }
+    miniFragment.append(svg('polygon', {points: attrs.points, fill: cls.fillKey === 'UNKNOWN' ? palette.terrain.UNKNOWN.fill : attrs.fill, opacity: attrs.opacity}));
+    if (cls.elevation) marks[cls.elevation][stale].push(markPath(...point(t.coord), cls.elevation));
   });
+  layers.tiles.append(tileFragment); $('mini-world').append(miniFragment);
+  for (const [key, g] of tintGroups(tiles, resolve, classify)) {
+    svg('path', {class: 'tint', d: hexOutlinePath(g.hexes), fill: ownerColorFor(g.owner_id), 'fill-opacity': palette.tint_opacity,
+      'data-owner-class': g.ownerClass, 'data-owner': g.owner_id, 'data-stale': g.stale ? 1 : 0, 'data-key': key}, layers.tints);
+  }
+  for (const [key, g] of borderSegments(tiles, resolve, classify, palette.borders.inset)) {
+    const style = palette.borders[g.style];
+    svg('path', {class: 'border', d: segmentPath(g.segments), stroke: ownerColorFor(g.owner_id), 'stroke-width': style.width,
+      'stroke-dasharray': style.dash, 'data-owner-class': g.ownerClass, 'data-owner': g.owner_id, 'data-style': g.style,
+      'data-stale': g.stale ? 1 : 0, 'data-segments': g.segments.length, 'data-key': key}, layers.borders);
+  }
+  for (const kind of ['hills', 'mountain']) for (const stale of [0, 1]) {
+    if (marks[kind][stale].length) drawMark(layers.elevation, marks[kind][stale].join(' '), kind, stale, marks[kind][stale].length);
+  }
   actors.forEach((a, i) => {
-    const o = a.observation, [x,y] = point(o.coord), city = a.kind.includes('cities');
-    const owned = a.kind.startsWith('own'), fill = o.is_barbarian === true ? '#f38c76' :
-      owned ? (a.receipt.player_id === 0 ? '#f4d884' : '#80dcd5') : '#c5abd9';
-    const attrs = {class:'actor',fill,tabindex:0,role:'button','aria-label':`${a.id} at ${o.coord}`};
-    const e = city ? svg('path', {...attrs,d:`M${x},${y-10} l10,10 -10,10 -10,-10 Z`}, $('world')) :
-      svg('circle', {...attrs,cx:x,cy:y,r:5.5}, $('world'));
+    const o = a.observation, [x, y] = point(o.coord), city = a.kind.includes('cities'), owned = a.kind.startsWith('own');
+    const barbarian = o.is_barbarian === true, pid = a.receipt.player_id;
+    const ownerKnown = Number.isInteger(o.owner_id) && o.owner_id >= 0;
+    const color = barbarian ? T.coral : owned ? ownerColorFor(pid) : ownerKnown ? ownerColorFor(o.owner_id) : T.foreign;
+    const ownerText = owned ? `own (P${pid})` : barbarian ? 'explicitly classified barbarian'
+      : ownerKnown ? `foreign · ${ownerLabel(o.owner_id)}` : 'foreign · owner not supplied';
+    const spec = city ? null : unitSpec(o.type, palette);
+    const label = city ? (owned ? `P${pid} city` : civName(o.name) || 'foreign city') : barbarian ? '!' : '';
+    const g = svg('g', {class: `actor ${city ? 'city' : 'unit'}${owned ? ' own' : ' foreign'}`, tabindex: 0, role: 'button',
+      'data-owner-known': owned || ownerKnown ? 1 : 0,
+      'aria-label': `${city ? 'City' : spec.label} ${a.id} at ${o.coord} · ${ownerText}${city || spec.known ? '' : ' · unit type not in glyph table'}`}, layers.actors);
+    if (city) {
+      drawCityBadge(g, x, y, {color, population: o.population});
+    } else {
+      const hpBucket = Number.isInteger(o.hp_bucket) ? o.hp_bucket : Number.isInteger(o.hp) ? Math.min(4, Math.floor(o.hp / 25)) : null;
+      drawUnitBadge(g, x, y, {spec, color, hpBucket, fortified: o.fortified === true});
+    }
     const pick = () => selectActor(i);
-    e.addEventListener('click', pick); e.addEventListener('keydown', ev => {
+    g.addEventListener('click', pick); g.addEventListener('keydown', ev => {
       if (ev.key === 'Enter' || ev.key === ' ') {ev.preventDefault(); pick();}
     });
-    svg('text',{x,y:y-11},$('world')).textContent = city ? (owned ? `P${a.receipt.player_id} city` : 'foreign city') :
-      o.is_barbarian === true ? '!' : '';
-    option($('actors'),String(i),`P${a.receipt.player_id} ${a.id} · ${o.type || 'city'} · ${o.coord}`);
+    if (label) svg('text', {class: `label${barbarian ? ' barbarian' : ''}`, x, y: city ? y - 14 : y - 13}, g).textContent = label;
+    option($('actors'), String(i), `P${pid} ${a.id} · ${o.type || 'city'} · ${o.coord}`);
   });
   productions.filter(a => a.admission?.kind === 'district').forEach(a => {
     const [x,y] = point(a.admission.coord);
     const e = svg('rect', {class:'production-marker', x:x-8, y:y-8, width:16, height:16,
-      tabindex:0, role:'button', 'aria-label':`${a.item_id} placement observed at ${a.admission.coord}`}, $('world'));
+      tabindex:0, role:'button', 'aria-label':`${a.item_id} placement observed at ${a.admission.coord}`}, layers.districts);
     const pick = () => selectProduction(a);
     e.addEventListener('click', pick);
     e.addEventListener('keydown', ev => {if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();pick();}});
-    svg('text',{x,y:y+3},$('world')).textContent='D';
+    svg('text',{class:'label',x,y:y+3},layers.districts).textContent='D';
   });
   const coords = [...rows.map(r => r[0].observation.coord), ...actors.map(a => a.observation.coord),
     ...productions.filter(a=>a.admission?.coord).map(a=>a.admission.coord)];
@@ -136,15 +246,68 @@ function draw() {
   $('selection-summary').textContent=union ? 'Combined seats may disagree or have different ages. Overlapping tile receipts remain separately inspectable.' : 'Actors belong to the selected packet only. Old terrain is retained with its receipt age; actual visibility is unknown.';
   $('selection').replaceChildren(); $('graph').replaceChildren();
   $('graph-note').textContent='Select an owned unit for recorded candidate choices, or a city for its observed production queue.';
+  renderLegend(union);
   showProductionJournal();
   fit();
+}
+// The key is drawn by the same functions as the map, so it cannot drift from it.
+function renderLegend(union) {
+  const root = $('legend-groups'); root.replaceChildren();
+  const group = title => { const g = text('div', '', root, 'legend-group'); text('h4', title, g); return g; };
+  const item = (g, build, label) => {
+    const it = text('div', '', g, 'legend-item');
+    if (build) build(svg('svg', {class: 'swatch', viewBox: '-16 -16 32 32', 'aria-hidden': 'true'}, it));
+    else text('span', '', it, 'swatch swatch-blank');
+    text('span', label, it, 'legend-label');
+    return it;
+  };
+  const ring = radius => hexVertices(0, 0, radius).map(p => p.map(fmt).join(',')).join(' ');
+  const tile = (s, key, elevation, stale) => {
+    svg('polygon', {class: 'tile', points: ring(12.5), fill: terrainFill(key), opacity: stale ? .5 : 1, 'data-terrain': key}, s);
+    if (elevation) drawMark(s, markPath(0, 0, elevation), elevation, false, 1);
+  };
+  const unit = (s, type, color, hpBucket, fortified) =>
+    drawUnitBadge(s, 0, 0, {spec: type ? palette.units[type] : {...palette.unit_fallback, known: false}, color, hpBucket, fortified});
+  let g = group('Terrain');
+  for (const [key, t] of Object.entries(palette.terrain)) item(g, s => tile(s, key), t.label);
+  g = group('Elevation');
+  item(g, s => tile(s, 'GRASS', 'hills'), palette.elevation.hills.label);
+  item(g, s => tile(s, 'MOUNTAIN', 'mountain'), palette.elevation.mountain.label);
+  g = group('Actors');
+  for (const [type, u] of Object.entries(palette.units)) item(g, s => unit(s, type, T.seat0, null, false), `${u.glyph} = ${u.label} (${u.role}; ${palette.roles[u.role].shape})`);
+  item(g, s => unit(s, null, T.seat0, null, false), `? = ${palette.unit_fallback.label} (dashed)`);
+  item(g, s => drawCityBadge(s, 0, 0, {color: T.seat0, population: 12}), 'city — population inside; own actors wear the seat colour');
+  item(g, s => unit(s, 'WARRIOR', T.coral, null, false), 'coral + ! = explicitly classified barbarian');
+  item(g, s => unit(s, 'WARRIOR', T.foreign, null, false), 'white = foreign · owner not supplied in packet');
+  item(g, s => unit(s, 'WARRIOR', T.seat1, 2, false), palette.hp_ring.label);
+  item(g, s => unit(s, 'WARRIOR', T.seat1, null, true), 'inner ring = fortified (own units only)');
+  item(g, s => svg('rect', {class: 'production-marker', x: -8, y: -8, width: 16, height: 16}, s), '□ historical district placement (queue admission, not completion)');
+  g = group('Ownership');
+  seatIds.forEach(pid => item(g, s => borderSample(s, ownerColorFor(pid), 'frontier'), ownerLabel(pid)));
+  (roster.ids || []).filter(id => !seatIds.includes(id)).forEach(id => item(g, s => borderSample(s, ownerColorFor(id), 'frontier'), ownerLabel(id)));
+  if (roster.ids) item(g, s => borderSample(s, palette.owners.nonmajor.stroke, 'frontier'), palette.owners.nonmajor.label);
+  else item(g, s => borderSample(s, palette.owners.unclassified.stroke, 'frontier'), palette.owners.unclassified.label);
+  item(g, null, palette.owners.unowned.label);
+  item(g, null, palette.owners.unobserved.label);
+  item(g, s => borderSample(s, T.ink, 'frontier'), palette.borders.frontier.label);
+  item(g, s => borderSample(s, T.ink, 'unknown_beyond'), palette.borders.unknown_beyond.label);
+  item(g, s => { tile(s, 'GRASS'); svg('polygon', {class: 'tint', points: ring(12.5), fill: T.seat0, 'fill-opacity': palette.tint_opacity}, s); },
+    'tint = owner colour over observed owned hexes');
+  g = group('Provenance');
+  item(g, s => tile(s, 'GRASS', null, true), 'Dim = older packet receipt for that seat (hexes, borders, tints) — receipt age, not visibility');
+  item(g, null, 'Blank = unsupplied, not empty world. Extents are observed receipts, not map bounds.');
+  item(g, s => svg('line', {class: 'path', x1: -12, y1: 7, x2: 12, y2: -7}, s), 'dashed path = recorded choice, not movement or current orders');
+  if (union) item(g, null, 'Union view: each hex takes the newest receipt carrying an owner key; seats are asynchronous.');
 }
 function setView() {$('map').setAttribute('viewBox',view.join(' '));
   ['x','y','width','height'].forEach((k,i)=>$('viewport').setAttribute(k,view[i]));}
 function fit(){
   const aspect=$('map').clientWidth/$('map').clientHeight;
   let [x,y,w,h]=bounds;
-  if(w/h<aspect){const nw=h*aspect;x-=(nw-w)/2;w=nw;}else{const nh=w/aspect;y-=(nh-h)/2;h=nh;}
+  // A hidden or mid-resize map has no finite aspect; keep the raw observed bounds then.
+  if(Number.isFinite(aspect)&&aspect>0){
+    if(w/h<aspect){const nw=h*aspect;x-=(nw-w)/2;w=nw;}else{const nh=w/aspect;y-=(nh-h)/2;h=nh;}
+  }
   view=[x,y,w,h];setView();
 }
 function zoom(factor){
@@ -154,10 +317,20 @@ function zoom(factor){
 function selectTile(alternatives){
   $('actors').value='';$('graph').replaceChildren();
   $('world').querySelectorAll('.path').forEach(e=>e.remove());
-  $('selection-title').textContent=`Hex ${alternatives[0].observation.coord}`;
+  const t = alternatives[0].observation, cls = classifyTile(t, palette), own = resolve(alternatives);
+  $('selection-title').textContent=`Hex ${t.coord}`;
   $('selection-summary').textContent='Source terrain and ownership at receipt. Actual fog visibility and current ownership are unknown.';
   $('selection').replaceChildren();
-  alternatives.forEach(row=>text('pre',pretty(row),$('selection')));
+  const dl = document.createElement('dl'); dl.className = 'facts'; $('selection').append(dl);
+  const fact = (k, v) => { text('dt', k, dl); text('dd', v, dl); };
+  fact('Terrain', `${terrainName(t, palette)} — normalized class ${typeof t.terrain === 'string' ? t.terrain : 'unsupplied'}; fill ${cls.fillKey}${cls.elevation ? `, ${cls.elevation} mark` : ''}`);
+  fact('Ownership', ownershipSentence(own));
+  if (own.receipt) fact('Ownership receipt', receiptSentence(own.receipt));
+  fact('City centre', t.city_id === '' ? 'none observed on this hex at receipt' : typeof t.city_id === 'string' ? t.city_id : 'not observed');
+  alternatives.forEach(row => fact(`Receipt P${row.receipt.player_id}`, receiptSentence(row.receipt)));
+  const detail=document.createElement('details');$('selection').append(detail);
+  text('summary','Raw receipts',detail);
+  alternatives.forEach(row=>text('pre',pretty(row),detail));
   $('graph-note').textContent='No legal-action or expansion valuation is inferred for this hex.';
 }
 function selectActor(i){
@@ -166,7 +339,8 @@ function selectActor(i){
   $('selection-summary').textContent=`P${a.receipt.player_id} packet T${a.receipt.turn}, seq ${a.receipt.seq}. `+
     (a.kind.startsWith('own') ? 'Owned in that packet.' : o.is_barbarian === true ? 'Explicitly classified barbarian in that packet.' : 'Visible foreign actor; hostility is not established.');
   $('selection').replaceChildren();
-  text('p',`Coordinate ${o.coord} · ${o.hp !== undefined ? 'HP '+o.hp : o.hp_bucket !== undefined ? 'HP bucket '+o.hp_bucket : 'health unknown'} · movement ${o.movement ?? 'unknown'}`,$('selection'));
+  text('p',`Coordinate ${o.coord} · ${o.hp !== undefined ? 'HP '+o.hp : o.hp_bucket !== undefined ? 'HP bucket '+o.hp_bucket : 'health unknown'} · movement ${o.movement ?? 'unknown'}`+
+    (a.kind.startsWith('own') ? '' : Number.isInteger(o.owner_id) ? ` · ${ownerLabel(o.owner_id)}` : ' · owner not supplied in packet'),$('selection'));
   const detail=document.createElement('details');$('selection').append(detail);
   text('summary','Source observation & packet provenance',detail);text('pre',pretty(a),detail);
   $('graph').replaceChildren();$('world').querySelectorAll('.path').forEach(e=>e.remove());
@@ -190,7 +364,7 @@ function selectActor(i){
     text('div',`${d.origin} → ${d.selected?.args?.dest || 'no destination'} · ${d.reason}`,$('graph'),'card selected');
     const start=point(d.origin),dest=d.selected?.args?.dest;
     if(dest && /^-?\d+,-?\d+$/.test(dest)){
-      const end=point(dest);svg('path',{class:'path',d:`M${start.join(',')} L${end.join(',')}`},$('world'));
+      const end=point(dest);svg('path',{class:'path',d:`M${start.join(',')} L${end.join(',')}`},layers.paths);
     }
     (d.candidates||[]).forEach(c=>{
       const card=text('div',`${c.dest} · ${c.excluded || 'candidate'}`,$('graph'),`card ${c.excluded?'excluded':''}`);

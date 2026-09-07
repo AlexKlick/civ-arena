@@ -100,6 +100,23 @@ that exceeds the read/artifact limits is unavailable; that does not abort a game
 or reduce a model briefing. The tested stopped run has 48 packets and 240 combined
 accumulated coordinates, not a full-world or map-scale performance proof.
 
+## Readability foundation (2026-09-07)
+
+The atlas key, colours, elevation marks, unit glyphs and observed borders are
+documented in [observed-minimap-preview.md](observed-minimap-preview.md) and
+proven in [atlas-readability-m1.md](atlas-readability-m1.md). Dashboard-specific
+points: each snapshot now carries the packet's public majors roster as
+`public_players` (or `null` when unsupplied), which survives display redaction
+row for row; the atlas seat colours are the match room's `--gold`/`--teal`
+tokens, pinned by a drift-guard test against the shared palette; the atlas
+iframe chrome uses the match-room tokens instead of literal colours. Foreign
+units and cities in retained packets carry no `owner_id` or `name` because the
+curator's foreign field lists omit them, so foreign actors are drawn "owner not
+supplied" — adding those fields is a model-context change and is deliberately
+not part of the viewer work. Real retained runs contain tile owners outside the
+two-major roster (players 2, 3 and 6 in `minimax100-20260907T183425Z`); they
+draw non-major borders and are never labelled as civilizations.
+
 ## Verified findings
 
 - Repository proof: **75 focused tests passed, zero failed/skipped**, in 1.22s;

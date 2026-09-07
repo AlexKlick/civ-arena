@@ -122,6 +122,25 @@ def test_redaction_keeps_all_rows_and_separates_source_and_display_digests(tmp_p
     )
 
 
+def test_roster_survives_redaction_and_stays_seat_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAP_TEST_SECRET", "CIVILIZATION_SECRETLAND")
+    p = packet(seq=1)
+    p["projected_state"]["public"] = {
+        "players": [
+            {"player_id": 0, "civ_name": "CIVILIZATION_SECRETLAND", "alive": True},
+            {"player_id": 1, "civ_name": "CIVILIZATION_SUMERIA", "alive": True},
+        ],
+        "turn": 1,
+    }
+    write(tmp_path, records()[:1] + [source(bind(p))])
+    result = d.DashboardStore(tmp_path).load_map("fixture", player=0, turn=1)
+    roster = result["seats"][0]["snapshots"][0]["public_players"]
+    assert [row["player_id"] for row in roster] == [0, 1]
+    assert roster[1]["civ_name"] == "CIVILIZATION_SUMERIA"
+    assert "CIVILIZATION_SECRETLAND" not in minimap.canonical(result)
+    assert '"public_players"' in minimap.render(result)
+
+
 def test_redaction_that_corrupts_coordinates_fails_instead_of_relocating(tmp_path, monkeypatch):
     monkeypatch.setenv("MAP_TEST_SECRET", "0,0")
     write(tmp_path)

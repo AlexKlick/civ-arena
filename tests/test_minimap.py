@@ -16,7 +16,9 @@ def packet(pid=0, seq=10, turn=1, tile='0,0'):
              'own_units': [{'unit_id': f'u{pid}:1', 'coord': tile, 'type': 'SCOUT'}],
              'own_cities': [{'city_id': f'c{pid}:1', 'coord': tile,
                              'production_queue': ['SETTLER']}],
-             'visible_foreign_units': [], 'visible_foreign_cities': [], 'terrain_omitted': 12}
+             'visible_foreign_units': [], 'visible_foreign_cities': [], 'terrain_omitted': 12,
+             'public': {'players': [{'player_id': pid, 'civ_name': f'CIVILIZATION_P{pid}',
+                                     'alive': True}], 'turn': turn}}
     return bind({'event': {'player_id': pid, 'seq': seq, 'turn': turn},
                  'projected_state': state})
 
@@ -181,6 +183,27 @@ def test_negative_and_bounded_coordinate_projection_is_exact(coordinate):
     s = build([p], [], player=0)['seats'][0]['snapshots'][0]
     assert s['terrain'][0]['observation']['coord'] == coordinate
     assert s['actors'][0]['observation']['coord'] == coordinate
+
+
+def test_bundle_carries_public_major_roster_per_snapshot_or_none():
+    p = packet()
+    p['projected_state']['public'] = {'players': [
+        {'player_id': 1, 'civ_name': 'CIVILIZATION_SUMERIA', 'alive': True, 'extra': 'dropped'},
+        {'player_id': 0, 'civ_name': 'CIVILIZATION_EGYPT', 'alive': False}], 'turn': 1}
+    snapshot = build([bind(p)], [], player=0)['seats'][0]['snapshots'][0]
+    assert snapshot['public_players'] == [
+        {'player_id': 1, 'civ_name': 'CIVILIZATION_SUMERIA', 'alive': True},
+        {'player_id': 0, 'civ_name': 'CIVILIZATION_EGYPT', 'alive': False}]
+    del p['projected_state']['public']
+    assert build([bind(p)], [], player=0)['seats'][0]['snapshots'][0]['public_players'] is None
+    assert any('never inferred' in line for line in build([bind(p)], [], player=0)['limits'])
+    for bad in ({'players': 'x'}, {'players': [{'player_id': '0', 'civ_name': 'X', 'alive': True}]},
+                {'players': [{'player_id': 0, 'civ_name': 'X', 'alive': 'yes'}]},
+                {'players': [{'player_id': 0, 'civ_name': 'X' * 129, 'alive': True}]},
+                {'players': [{'player_id': 0, 'alive': True}]}, {'players': [None]}):
+        p['projected_state']['public'] = bad
+        with pytest.raises(ValueError, match='invalid public roster'):
+            build([bind(p)], [], player=0)
 
 
 def test_null_ownership_unknown_native_and_false_barbarian_stay_distinct():

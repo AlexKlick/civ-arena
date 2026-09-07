@@ -54,6 +54,28 @@ def integer(value, name, minimum=0):
     return value
 
 
+def public_roster(state):
+    """Closed copy of the packet's public majors roster; None when unsupplied.
+
+    The roster only names alive majors, so owner IDs outside it are non-major
+    (city-state or other) — the viewer must never promote them to a civ.
+    """
+    public = state.get('public')
+    if not isinstance(public, dict) or 'players' not in public:
+        return None
+    players = public['players']
+    if not isinstance(players, list) or len(players) > 64:
+        raise ValueError('invalid public roster')
+    roster = []
+    for row in players:
+        if not isinstance(row, dict) or type(row.get('alive')) is not bool or \
+                not isinstance(row.get('civ_name'), str) or len(row['civ_name']) > 128:
+            raise ValueError('invalid public roster')
+        roster.append({'player_id': integer(row.get('player_id'), 'public roster player'),
+                       'civ_name': row['civ_name'], 'alive': row['alive']})
+    return roster
+
+
 def build(packets: list[dict], events: list[dict], *, player: int | None = None,
           spectator: bool = False) -> dict:
     """Materialize receipt history, never infer live visibility or actor persistence.
@@ -187,7 +209,8 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
                     'you': deepcopy(state['you']), 'actors': actors,
                     'terrain': [deepcopy(seat['terrain'][k]) for k in sorted(seat['terrain'])],
                     'packet_terrain_count': len(tiles),
-                    'packet_terrain_omitted': state.get('terrain_omitted'), 'graph': graph}
+                    'packet_terrain_omitted': state.get('terrain_omitted'), 'graph': graph,
+                    'public_players': public_roster(state)}
         seat['snapshots'].append(snapshot)
     from civ_arena.productive_map import project
     for pid, seat in seats.items():
@@ -206,7 +229,9 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
                          'Audit choices do not guarantee legality or confirmed displacement.',
                          'Selection weights are not success probabilities. No expansion forecast.',
                          'Production receipts prove historical queue/placement admission, '
-                         'not completion.'],
+                         'not completion.',
+                         'Owner identity: seats and roster majors are named; other owner IDs '
+                         'are non-major or unclassified, never inferred.'],
               'event_binding': {'status': 'matched_context_hash' if events else 'unverified',
                                 'run_ids': [list(item) for item in sorted(run_ids)]},
               'axis': 'Increasing r is engine-grid north; screen north is a viewer convention.',
@@ -218,6 +243,45 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
     return result
 
 
+ASSETS = Path(__file__).with_name('minimap_static')
+PALETTE_PATH = ASSETS / 'palette.json'
+
+
+def load_palette() -> dict:
+    """Presentation palette: the single source for fills, glyphs, owners and tokens.
+
+    It is injected as a separate non-executable JSON block, never into the
+    observation bundle, so digests stay observation-only and redaction never
+    walks presentation strings.
+    """
+    palette = json.loads(PALETTE_PATH.read_bytes(), object_pairs_hook=unique_object)
+    if palette.get('version') != 1:
+        raise ValueError('unsupported palette version')
+    return palette
+
+
+def tokens_css(palette: dict) -> str:
+    tokens = palette['tokens']
+    if not isinstance(tokens, dict) or not 1 <= len(tokens) <= 256:
+        raise ValueError('invalid palette tokens')
+    parts = []
+    for key, value in tokens.items():
+        if (not re.fullmatch(r'[a-z][a-z0-9_]{0,31}', key) or not isinstance(value, str)
+                or not re.fullmatch(r'#[0-9a-f]{6}(?:[0-9a-f]{2})?', value)):
+            raise ValueError('invalid palette token')
+        parts.append(f'--{key}:{value};')
+    return ':root{' + ''.join(parts) + '}'
+
+
+def script_source(assets: Path = ASSETS) -> str:
+    """The one pinned script: pure geometry first, then the DOM renderer."""
+    return (assets / 'geometry.js').read_text() + '\n' + (assets / 'app.js').read_text()
+
+
+def escape_json_block(payload: str) -> str:
+    return payload.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
+
+
 def render(bundle: dict) -> str:
     if bundle.get('version') != 1 or bundle.get('digest') != digest(
             {k: v for k, v in bundle.items() if k != 'digest'}):
@@ -225,14 +289,14 @@ def render(bundle: dict) -> str:
     payload = canonical(bundle)
     if len(payload.encode()) > MAX_BYTES:
         raise ValueError('output exceeds 32 MiB')
-    assets = Path(__file__).with_name('minimap_static')
-    script = (assets / 'app.js').read_text()
+    palette = load_palette()
+    script = script_source(ASSETS)
     csp_hash = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
-    payload = payload.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
-    replacements = {'STYLE': (assets / 'style.css').read_text(),
-                    'CSP_HASH': csp_hash, 'DATA': payload, 'SCRIPT': script}
-    return re.sub(r'@@(STYLE|CSP_HASH|DATA|SCRIPT)@@',
-                  lambda match: replacements[match[1]], (assets / 'index.html').read_text())
+    replacements = {'STYLE': (ASSETS / 'style.css').read_text(), 'TOKENS': tokens_css(palette),
+                    'CSP_HASH': csp_hash, 'DATA': escape_json_block(payload),
+                    'PALETTE': escape_json_block(canonical(palette)), 'SCRIPT': script}
+    return re.sub(r'@@(STYLE|TOKENS|CSP_HASH|DATA|PALETTE|SCRIPT)@@',
+                  lambda match: replacements[match[1]], (ASSETS / 'index.html').read_text())
 
 
 
