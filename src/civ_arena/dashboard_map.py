@@ -91,6 +91,10 @@ def materialize(raw: bytes, *, player: int | None, spectator: bool, turn: int, r
     display.pop("digest")
     # Redacting a coordinate must not silently relocate/drop an observation.
     for seat in display["seats"]:
+        for action in seat.get("productive_actions", []):
+            admission = action["admission"]
+            if admission and admission["coord"] is not None:
+                minimap.coord(admission["coord"])
         for snapshot in seat["snapshots"]:
             for row in snapshot["terrain"] + snapshot["actors"]:
                 minimap.coord(row["observation"]["coord"])

@@ -34,7 +34,7 @@ const color = t => {
   return {GRASS:'#568473',GRASSLAND:'#568473',PLAINS:'#9b995f',DESERT:'#b39862',
     TUNDRA:'#9da79f',SNOW:'#d8e0df',COAST:'#346985',OCEAN:'#244e6b',HILL:'#828766'}[biome] || '#52656a';
 };
-let snapshots = [], rows = [], actors = [], bounds, view, selected = null;
+let snapshots = [], rows = [], actors = [], productions = [], windows = [], bounds, view, selected = null;
 for (const seat of data.seats) option($('perspective'), String(seat.player_id), `Player ${seat.player_id}`);
 if (data.scope === 'combined_observation_preview') option($('perspective'), 'union', 'Spectator · combined receipts');
 $('scope').textContent = data.scope === 'player_only'
@@ -58,14 +58,25 @@ function perspective() {
     const seat = data.seats.find(s => String(s.player_id) === $('perspective').value);
     seat.snapshots.forEach((s, i) => option($('snapshot'), String(i), `T${s.turn} · seq ${s.seq}`));
     $('snapshot').value = String(seat.snapshots.length - 1);
+    if ((seat.productive_actions || []).length) {
+      option($('snapshot'), 'receipts', 'Latest packet + later action receipts');
+      $('snapshot').value = 'receipts';
+    }
   }
   draw();
 }
 function draw() {
   selected = null;
   const union = $('perspective').value === 'union';
-  snapshots = union ? data.seats.map(s => s.snapshots.at(-1)) : [data.seats.find(
-    s => String(s.player_id) === $('perspective').value).snapshots[Number($('snapshot').value)]];
+  const seats = union ? data.seats : data.seats.filter(s => String(s.player_id) === $('perspective').value);
+  const latestReceipts = union || $('snapshot').value === 'receipts';
+  snapshots = seats.map(s => latestReceipts ? s.snapshots.at(-1) : s.snapshots[Number($('snapshot').value)]);
+  windows = seats.map((s, i) => ({player_id:s.player_id,
+    ...(latestReceipts ? s.productive_cutoff || snapshots[i] : snapshots[i])}));
+  productions = seats.flatMap((seat, i) => (seat.productive_actions || [])
+    .filter(a => a.call.seq <= windows[i].seq && a.call.turn <= windows[i].turn)
+    .map(a => a.result && (a.result.seq > windows[i].seq || a.result.turn > windows[i].turn)
+      ? {...a, result:null, admission:null, status:'unconfirmed'} : a));
   // Keep each perspective's receipts. Overlap gets a single paint but retains all alternatives.
   const tiles = new Map();
   snapshots.forEach(s => s.terrain.forEach(row => {
@@ -103,7 +114,17 @@ function draw() {
       o.is_barbarian === true ? '!' : '';
     option($('actors'),String(i),`P${a.receipt.player_id} ${a.id} · ${o.type || 'city'} · ${o.coord}`);
   });
-  const coords = [...rows.map(r => r[0].observation.coord), ...actors.map(a => a.observation.coord)];
+  productions.filter(a => a.admission?.kind === 'district').forEach(a => {
+    const [x,y] = point(a.admission.coord);
+    const e = svg('rect', {class:'production-marker', x:x-8, y:y-8, width:16, height:16,
+      tabindex:0, role:'button', 'aria-label':`${a.item_id} placement observed at ${a.admission.coord}`}, $('world'));
+    const pick = () => selectProduction(a);
+    e.addEventListener('click', pick);
+    e.addEventListener('keydown', ev => {if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();pick();}});
+    svg('text',{x,y:y+3},$('world')).textContent='D';
+  });
+  const coords = [...rows.map(r => r[0].observation.coord), ...actors.map(a => a.observation.coord),
+    ...productions.filter(a=>a.admission?.coord).map(a=>a.admission.coord)];
   const xy = coords.map(point), xs=xy.map(p=>p[0]), ys=xy.map(p=>p[1]);
   bounds = xy.length ? [Math.min(...xs)-25,Math.min(...ys)-25,
     Math.max(...xs)-Math.min(...xs)+50,Math.max(...ys)-Math.min(...ys)+50] : [0,0,100,100];
@@ -115,6 +136,7 @@ function draw() {
   $('selection-summary').textContent=union ? 'Combined seats may disagree or have different ages. Overlapping tile receipts remain separately inspectable.' : 'Actors belong to the selected packet only. Old terrain is retained with its receipt age; actual visibility is unknown.';
   $('selection').replaceChildren(); $('graph').replaceChildren();
   $('graph-note').textContent='Select an owned unit for recorded candidate choices, or a city for its observed production queue.';
+  showProductionJournal();
   fit();
 }
 function setView() {$('map').setAttribute('viewBox',view.join(' '));
@@ -153,6 +175,8 @@ function selectActor(i){
     $('graph-note').textContent='Observed queue → production intent. Completion timing, expansion site quality, and feasibility are unknown.';
     text('div',`City ${a.id}`,$('graph'),'card');text('div','↓ observed production queue',$('graph'),'graph-arrow');
     text('div',pretty(o.production_queue ?? 'Queue not supplied'),$('graph'),'card');
+    productions.filter(p=>p.admission?.city_id===a.id && p.call.player_id===a.receipt.player_id)
+      .forEach(p=>productionCard(p,$('graph')));
     if(g)text('pre',pretty({source:g.receipt,recorded_preferences:g.value.directive?.production_preferences,
       recorded_targets:g.value.directive?.unit_targets}),$('graph'));
     return;
@@ -178,6 +202,36 @@ function selectActor(i){
   executions.forEach(e=>text('pre',pretty({status:e.status,movement_outcome:e.movement_outcome,
     before:e.before,after:e.after,rejection:e.rejection}),$('graph')));
   text('pre',pretty(g.receipt),$('graph'));
+}
+function productionCard(a, parent) {
+  const receipt = a.result || a.call;
+  const window = windows.find(w=>w.player_id===a.call.player_id);
+  const packet = snapshots.find(s=>s.receipt.player_id===a.call.player_id);
+  const card=text('div',`P${a.call.player_id} ${a.item_id} · ${a.admission?.label || a.status}`,parent,'card');
+  text('p',`${a.city_id || 'city unavailable'}${a.admission?.coord ? ' · '+a.admission.coord : ''}`,card);
+  text('p',`Receipt T${receipt.turn}, seq ${receipt.seq} · ${window.turn-receipt.turn} turn(s) before receipt window. `+
+    `Board packet T${packet.turn}, seq ${packet.seq}.`,card);
+  text('p',a.admission ? 'Historical admission only. Construction/project completion and current queue are unproven.' :
+    'Journal status only. No placement or queue admission is inferred.',card);
+  const detail=document.createElement('details');card.append(detail);
+  text('summary','Exact receipt provenance',detail);text('pre',pretty(a),detail);
+}
+function showProductionJournal() {
+  $('production-journal').replaceChildren();
+  $('production-window').textContent=windows.map(w=>`P${w.player_id} receipt window T${w.turn}, seq ${w.seq}`).join(' · ');
+  if(!productions.length)text('p','No district/project action records in this selected receipt window.',$('production-journal'));
+  productions.forEach(a=>productionCard(a,$('production-journal')));
+}
+function selectProduction(a) {
+  $('actors').value='';$('graph').replaceChildren();$('selection').replaceChildren();
+  $('world').querySelectorAll('.path').forEach(e=>e.remove());
+  $('selection-title').textContent=`${a.item_id} · placement observed`;
+  $('selection-summary').textContent=`Historical P${a.call.player_id} district placement at ${a.admission.coord}. Not proof of a completed or currently present district.`;
+  productionCard(a,$('selection'));
+  $('graph-note').textContent='Requested district → exact queue and plot readback → completion unknown.';
+  text('div',`${a.item_id} requested for ${a.city_id}`,$('graph'),'card');
+  text('div','↓ accepted with separate native readback',$('graph'),'graph-arrow');
+  text('div',`Placement observed at ${a.admission.coord}; queued, not completed`,$('graph'),'card');
 }
 $('perspective').addEventListener('change',perspective);$('snapshot').addEventListener('change',draw);
 $('actors').addEventListener('change',()=>{if($('actors').value!=='')selectActor(Number($('actors').value));});

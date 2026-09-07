@@ -336,3 +336,12 @@ summary {
     min-height:52px;
   }
 }
+
+#world .production-marker {
+  fill:#6dadb222;
+  stroke:#e5c5ff;
+  stroke-width:1.7;
+  stroke-dasharray:3 2;
+  cursor:pointer;
+}
+#production-window {font-size:11px;}
