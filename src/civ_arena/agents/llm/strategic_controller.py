@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from civ_arena.agents.growth_policy import GrowthPolicy
 from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
@@ -30,6 +31,7 @@ from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.production_policy import choose_production
 from civ_arena.agents.recovery import RecoveryPolicy, RecoveryTracker
 from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
+from civ_arena.agents.settlement_executor import SettlementExecutor
 from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
 from civ_arena.arena.referee import MatchAborted
 
@@ -79,6 +81,24 @@ war. Probabilities in the controller graph are seeded action-selection weights,
 not calibrated success predictions. No prose or hidden reasoning is required."""
 
 
+GROWTH_SYSTEM = """
+Growth autopilot is enabled. Its aggregate military cap and observed capability
+policy govern production; exact unit_targets remain upper bounds, not commands to
+exceed the aggregate cap. Two scouts remains the default scout cap. Nearby guards,
+one spare escort and a persistent settler mission are reserved from routine scouting.
+A confirmed local barbarian triggers defensive priority; nonbarbarian contacts have
+unknown war/intent and constrain settlement routes without implying hostility.
+Three clear observed own turns are the configurable heuristic before returning to
+growth. Missing information never proves safety, optimal sites or victory odds.
+The growth metadata names why expansion is waiting, including no healthy spare
+escort or no observed route. The controller attempts at most one automatic mission
+action per turn, preserving explicit tactical commands and health holds. A pending
+unconfirmed action will not automatically repeat. You may issue explicit tactical
+orders for recovery/repositioning; they do not replace the persistent mission/site.
+Capabilities are retained exact native observations, not current availability.
+"""
+
+
 def _encode(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
@@ -89,6 +109,9 @@ class StrategicController:
     cadence: int = 5
     audit: Callable[[dict], None] | None = None
     opening_units_frozen: bool = False
+    growth_autopilot: bool = False
+    _growth: GrowthPolicy | None = field(default=None, init=False)
+    _settlement: SettlementExecutor | None = field(default=None, init=False)
     recovery_policy: RecoveryPolicy = field(default_factory=RecoveryPolicy)
     _recovery: RecoveryTracker = field(init=False)
     _recovery_proposal: dict | None = field(default=None, init=False)
@@ -105,6 +128,8 @@ class StrategicController:
         self._recovery = RecoveryTracker(self.recovery_policy)
         if not isinstance(self.match_id, str) or not self.match_id:
             raise ValueError('strategic controller requires match_id')
+        if type(self.growth_autopilot) is not bool:
+            raise ValueError('growth_autopilot must be an explicit boolean')
         if type(self.opening_units_frozen) is not bool:
             raise ValueError('opening_units_frozen must be an explicit boolean')
         if type(self.cadence) is not int or not 1 <= self.cadence <= 60:
@@ -181,9 +206,20 @@ class StrategicController:
                 curator.state['get_units'], player_id=runtime.profile.player_id,
                 turn=turn, completed_turn=self._last_turn)
             self._recovery_proposal = recovery
+            if self.growth_autopilot:
+                await curator.refresh()
+                if self._growth is None:
+                    self._growth = GrowthPolicy(runtime.profile.player_id, mission_execution=True)
+                    self._settlement = SettlementExecutor(runtime.profile.player_id)
+                if self._growth.player_id != runtime.profile.player_id:
+                    raise MatchAborted('growth controller player identity changed')
+                self._growth.begin_turn(curator.state, turn=turn, catalogs=curator.production)
+                self._settlement.observe(self._growth, curator.state, turn)
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
             reasons.extend(recovery['review_reasons'])
+            if self._settlement is not None:
+                reasons.extend(self._settlement.review_reasons(turn, self._growth.mission))
             if reasons:
                 await curator.refresh()
                 directive = await self._decide(runtime, curator, reasons)
@@ -202,12 +238,14 @@ class StrategicController:
                 await curator.refresh(include_options=False, include_overview=False)
                 return curator.state
 
+            reserved = self._growth.reserved_roles(curator.state) if self._growth else {}
             graph = await run_scouting(
                 curator.state, directive=directive, player_id=runtime.profile.player_id,
                 match_id=self.match_id, agent_id=runtime.profile.agent_id, turn=turn,
                 execute=curator.execute, refresh=refresh, seed=runtime.profile.seed,
                 frozen_unit_ids=frozen_ids, nonprogress=feedback["suppressed"],
-                recovery=recovery['units'], recovery_policy=self.recovery_policy)
+                recovery=recovery['units'], recovery_policy=self.recovery_policy,
+                reserved_roles=reserved)
             # A post-action refresh can first reveal unknown/damaged health in
             # another unit. Commit that newly held state only after turn closure.
             for uid, row in graph.get('recovery_overlay', {}).items():
@@ -227,6 +265,17 @@ class StrategicController:
                     decision['assignment_warning'] = 'SCOUT omitted from scouting.unit_types'
             self._emit(runtime, 'strategy_graph', source='autopilot', graph=graph,
                        probability_meaning='seeded action selection; not calibrated success')
+            if self._growth is not None:
+                attempted = {row['unit_id'] for row in graph.get('execution', [])}
+                mission_report = await self._settlement.run(
+                    self._growth, curator.state, turn=turn, match_id=self.match_id,
+                    execute=curator.execute, refresh=refresh, reserved_roles=reserved,
+                    recovery=recovery['units'],
+                    tactical_ids={row['unit_id'] for row in directive['tactical_overrides']},
+                    attempted_ids=attempted, untouched_frozen_ids=frozen_ids - attempted)
+                self._emit(runtime, 'strategy_settlement', **mission_report)
+                self._emit(runtime, 'strategy_growth', source='autopilot',
+                           assessment=self._growth.assessment, reserved_roles=reserved)
             await self._economy(runtime, curator, directive)
             # Overrides are ephemeral even if an action was rejected. Never replay
             # a stale attack or coordinate automatically on the following turn.
@@ -235,6 +284,8 @@ class StrategicController:
             self._previous = self._facts(curator)
             self._last_turn = turn
             self._recovery.commit(recovery)
+            if self._growth is not None:
+                self._growth.complete_turn(turn)
             pending = self._scouting_feedback.remember_completed(graph, turn=turn)
             self._emit(runtime, 'strategy_turn_closed', source='controller',
                        scouting_pending_confirmation=pending)
@@ -382,6 +433,9 @@ class StrategicController:
                         'natural_allowance': 'unobserved' if opening_authority
                             else 'use_projected_movement',
                         'legality': 'engine_checked_not_proven_by_this_metadata'}}
+        if self._growth is not None:
+            metadata['growth'] = self._growth.summary()
+            metadata['growth']['execution'] = self._settlement.summary()
         schema = {'name': 'submit_directive',
                   'description': 'Submit one strategy; tactical overrides expire this turn.',
                   'input_schema': copy.deepcopy(DIRECTIVE_SCHEMA) if adaptive else DIRECTIVE_SCHEMA}
@@ -416,7 +470,8 @@ class StrategicController:
                 if curator.budget < 1:
                     raise MatchAborted('strategic metadata exceeds context budget')
                 context = encoded_metadata + '\n' + curator.render()
-            kwargs = {'system': SYSTEM, 'messages': [{'role': 'user', 'content': context}],
+            kwargs = {'system': SYSTEM + (GROWTH_SYSTEM if self.growth_autopilot else ''),
+                      'messages': [{'role': 'user', 'content': context}],
                       'tools': [schema],
                       'tool_choice': {'type': 'tool', 'name': 'submit_directive'}}
             if adaptive:
@@ -527,9 +582,12 @@ class StrategicController:
                          if city['city_id'] == cid), None)
             if city is None or city.get('production_queue'):
                 continue
+            if self._growth is not None:
+                self._growth.refresh(curator.state, catalogs=curator.production)
             policy = choose_production(curator.state, player_id=runtime.profile.player_id,
                                        city_id=cid, options=curator.production.get(cid, []),
-                                       directive=directive, reservations=reservations)
+                                       directive=directive, reservations=reservations,
+                                       growth_policy=self._growth)
             item = policy['item_id']
             if item is None and policy['candidates'] and not refreshed_strategy:
                 self._emit(runtime, 'strategy_economy', source='autopilot',
@@ -549,9 +607,12 @@ class StrategicController:
                            reasons=['production_targets_satisfied'], phase='economy',
                            directive=directive, discarded_late_tactical_override_ids=discarded,
                            last_decision_turn=self._last_decision)
+                if self._growth is not None:
+                    self._growth.refresh(curator.state, catalogs=curator.production)
                 policy = choose_production(curator.state, player_id=runtime.profile.player_id,
                                            city_id=cid, options=curator.production.get(cid, []),
-                                           directive=directive, reservations=reservations)
+                                           directive=directive, reservations=reservations,
+                                           growth_policy=self._growth)
                 item = policy['item_id']
             if item is None:
                 self._emit(runtime, 'strategy_economy', source='autopilot',

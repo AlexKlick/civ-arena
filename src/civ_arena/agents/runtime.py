@@ -24,6 +24,7 @@ class AgentProfile:
     proposer: Any = None  # config.LLMSpec when policy == "planner" + proposer block
     case_base: Any = None  # config.CaseBaseSpec when policy == "planner" + case_base
     decision_mode: str = "legacy"
+    growth_autopilot: bool = False
 
 
 @dataclass
@@ -51,6 +52,10 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
         raise ValueError("unknown decision_mode")
     if profile.decision_mode != "legacy" and profile.policy != "llm":
         raise ValueError("strategic_autopilot requires policy llm")
+    if type(profile.growth_autopilot) is not bool:
+        raise ValueError("growth_autopilot must be an explicit boolean")
+    if profile.growth_autopilot and profile.decision_mode != "strategic_autopilot":
+        raise ValueError("growth_autopilot requires strategic_autopilot")
     if profile.policy == "llm":
         from civ_arena.agents.llm.runtime import LLMAgentRuntime
 
@@ -67,7 +72,8 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
             from civ_arena.agents.llm.strategic_controller import StrategicController
 
             runtime.configure_strategic_controller(StrategicController(
-                match_id=match_id, audit=audit, opening_units_frozen=opening_units_frozen))
+                match_id=match_id, audit=audit, opening_units_frozen=opening_units_frozen,
+                growth_autopilot=profile.growth_autopilot))
         return runtime
     if profile.policy == "expansionist":
         return ScriptedRuntime(profile=profile)
