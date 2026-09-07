@@ -25,7 +25,8 @@ async def test_growth_system_is_counted_then_sent_and_quiet_turn_has_no_posts(mo
         assert metadata['growth']['enabled'] is True
         assert metadata['growth']['mission']['unit_id'] == 'settler'
         assert controller._growth._completed == 1
-        assert controller._settlement.last_observation['outcome'] == 'requested_destination_observed'
+        assert (controller._settlement.last_observation['outcome']
+                == 'requested_destination_observed')
         await advance(controller, runtime, facade, 2)
         assert len(requests) == len(ledger) == 2
         assert facade.calls.count('end_turn') == 2
