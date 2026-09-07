@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from civ_arena.agents.growth_policy import GrowthPolicy
+from civ_arena.agents.initial_capital import InitialCapitalPlan
 from civ_arena.agents.llm.client import ModelUnavailable
 from civ_arena.agents.llm.context_curator import ContextCurator
 from civ_arena.agents.llm.decision_packet import decision_packet, decision_snapshot
@@ -96,6 +97,15 @@ action per turn, preserving explicit tactical commands and health holds. A pendi
 unconfirmed action will not automatically repeat. You may issue explicit tactical
 orders for recovery/repositioning; they do not replace the persistent mission/site.
 Capabilities are retained exact native observations, not current availability.
+Before the first owned city, found immediately with an explicit SETTLER tactical
+order or move that settler one known adjacent tile to select a fixed capital site.
+That first relocation selects a persistent initial-capital intent: after observed
+arrival, the controller will attempt founding there on a later quiet turn, subject
+to current ownership, health, terrain, city spacing and nearby contact guards.
+It never relocates that site automatically. No production catalog or spare escort
+is needed for this initial prerequisite. Other tactical orders still last one turn.
+Rejected or unconfirmed founding is not retried automatically. If no site was
+selected, one additional choice review is available; no optimal site is invented.
 """
 
 
@@ -112,6 +122,7 @@ class StrategicController:
     growth_autopilot: bool = False
     _growth: GrowthPolicy | None = field(default=None, init=False)
     _settlement: SettlementExecutor | None = field(default=None, init=False)
+    _capital: InitialCapitalPlan | None = field(default=None, init=False)
     recovery_policy: RecoveryPolicy = field(default_factory=RecoveryPolicy)
     _recovery: RecoveryTracker = field(init=False)
     _recovery_proposal: dict | None = field(default=None, init=False)
@@ -213,13 +224,18 @@ class StrategicController:
                     self._settlement = SettlementExecutor(runtime.profile.player_id)
                 if self._growth.player_id != runtime.profile.player_id:
                     raise MatchAborted('growth controller player identity changed')
+                if self._capital is None:
+                    self._capital = InitialCapitalPlan(runtime.profile.player_id)
                 self._growth.begin_turn(curator.state, turn=turn, catalogs=curator.production)
                 self._settlement.observe(self._growth, curator.state, turn)
+                self._capital.observe(curator.state, turn)
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
             reasons.extend(recovery['review_reasons'])
             if self._settlement is not None:
                 reasons.extend(self._settlement.review_reasons(turn, self._growth.mission))
+            if self._capital is not None:
+                reasons.extend(self._capital.review_reasons(turn))
             if reasons:
                 await curator.refresh()
                 directive = await self._decide(runtime, curator, reasons)
@@ -239,6 +255,9 @@ class StrategicController:
                 return curator.state
 
             reserved = self._growth.reserved_roles(curator.state) if self._growth else {}
+            if self._capital is not None:
+                self._capital.prepare(curator.state, directive, turn)
+                reserved.update(self._capital.reserved_roles(curator.state))
             graph = await run_scouting(
                 curator.state, directive=directive, player_id=runtime.profile.player_id,
                 match_id=self.match_id, agent_id=runtime.profile.agent_id, turn=turn,
@@ -267,12 +286,22 @@ class StrategicController:
                        probability_meaning='seeded action selection; not calibrated success')
             if self._growth is not None:
                 attempted = {row['unit_id'] for row in graph.get('execution', [])}
-                mission_report = await self._settlement.run(
-                    self._growth, curator.state, turn=turn, match_id=self.match_id,
-                    execute=curator.execute, refresh=refresh, reserved_roles=reserved,
-                    recovery=recovery['units'],
-                    tactical_ids={row['unit_id'] for row in directive['tactical_overrides']},
-                    attempted_ids=attempted, untouched_frozen_ids=frozen_ids - attempted)
+                tactical_ids = {row['unit_id'] for row in directive['tactical_overrides']}
+                capital_report = await self._capital.run(
+                    curator.state, turn=turn, match_id=self.match_id, graph=graph,
+                    execute=curator.execute, refresh=refresh, recovery=recovery['units'],
+                    tactical_ids=tactical_ids, untouched_frozen_ids=frozen_ids - attempted)
+                self._emit(runtime, 'strategy_initial_capital', **capital_report)
+                if capital_report['execution']:
+                    mission_report = {'source': 'automatic_settlement_mission', 'execution': [],
+                                      'outcome': 'initial_capital_used_mission_action',
+                                      'mission': self._growth.mission}
+                else:
+                    mission_report = await self._settlement.run(
+                        self._growth, curator.state, turn=turn, match_id=self.match_id,
+                        execute=curator.execute, refresh=refresh, reserved_roles=reserved,
+                        recovery=recovery['units'], tactical_ids=tactical_ids,
+                        attempted_ids=attempted, untouched_frozen_ids=frozen_ids - attempted)
                 self._emit(runtime, 'strategy_settlement', **mission_report)
                 self._emit(runtime, 'strategy_growth', source='autopilot',
                            assessment=self._growth.assessment, reserved_roles=reserved)
@@ -286,6 +315,7 @@ class StrategicController:
             self._recovery.commit(recovery)
             if self._growth is not None:
                 self._growth.complete_turn(turn)
+                self._capital.complete_turn(turn)
             pending = self._scouting_feedback.remember_completed(graph, turn=turn)
             self._emit(runtime, 'strategy_turn_closed', source='controller',
                        scouting_pending_confirmation=pending)
@@ -436,6 +466,7 @@ class StrategicController:
         if self._growth is not None:
             metadata['growth'] = self._growth.summary()
             metadata['growth']['execution'] = self._settlement.summary()
+            metadata['growth']['initial_capital'] = self._capital.summary()
         schema = {'name': 'submit_directive',
                   'description': 'Submit one strategy; tactical overrides expire this turn.',
                   'input_schema': copy.deepcopy(DIRECTIVE_SCHEMA) if adaptive else DIRECTIVE_SCHEMA}
