@@ -34,7 +34,11 @@ from civ_arena.agents.productive_policy import production_args
 from civ_arena.agents.recovery import RecoveryPolicy, RecoveryTracker
 from civ_arena.agents.scouting import ScoutingFeedback, run_scouting
 from civ_arena.agents.settlement_executor import SettlementExecutor
-from civ_arena.agents.strategy_directive import DIRECTIVE_SCHEMA, validate_directive
+from civ_arena.agents.strategy_directive import (
+    DIRECTIVE_SCHEMA,
+    validate_directive,
+    validation_diagnostic,
+)
 from civ_arena.arena.referee import MatchAborted
 
 SYSTEM = """You are the strategic commander of one Civilization seat. Submit exactly
@@ -586,6 +590,7 @@ class StrategicController:
             shape, uses = self._response_shape(reply)
             category, reason = 'invalid_shape', 'tool_count'
             directive = None
+            validation_error = None
             if reply.stop_reason == 'max_tokens':
                 reason = 'truncated'
             elif len(uses) == 1:
@@ -612,10 +617,11 @@ class StrategicController:
                                     and directive['tactical_overrides']):
                                 directive = None
                                 reason = 'tactical_authority_disabled'
-                    except (ValueError, TypeError, OverflowError, RecursionError):
+                    except (ValueError, TypeError, OverflowError, RecursionError) as exc:
                         # Validation exceptions may contain model values. Use only
                         # fixed categories in durable diagnostics and repair prompts.
                         reason = 'schema_or_ownership'
+                        validation_error = validation_diagnostic(exc)
                     if directive is not None:
                         category, reason = 'valid', 'complete_directive'
             repair_available = (directive is None and attempt < limit
@@ -625,7 +631,9 @@ class StrategicController:
                        reason=reason, shape=shape, input_tokens=reply.input_tokens,
                        output_tokens=reply.output_tokens, context_chars=len(context),
                        posts_attempted=getattr(runtime.client, 'posts_sent', posts) - posts,
-                       repair_available=repair_available)
+                       repair_available=repair_available,
+                       **({'validation_error': validation_error}
+                          if validation_error is not None else {}))
             if directive is not None:
                 self._emit(runtime, 'strategy_decision', source='model', reasons=reasons,
                            directive=directive, model=reply.model,
@@ -647,6 +655,8 @@ class StrategicController:
                                'matching its schema and the currently owned IDs. '
                                'No action from this rejected response has been executed. '
                                'This is the final format attempt.'}
+            if validation_error is not None:
+                metadata['format_repair']['validation_error'] = validation_error
         raise MatchAborted('strategic directive format attempts exhausted')
 
     async def _economy(self, runtime: Any, curator: ContextCurator, directive: dict) -> None:
