@@ -160,6 +160,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "item_id": {"type": "string",
                             "description": "item id, e.g. \"WARRIOR\", "
                                            "\"SETTLER\", \"MONUMENT\""},
+                "dest": {"type": "string", "description": "Required only for a DISTRICT_ item: "
+                         "one exact currently offered axial placement coordinate."},
             },
             "required": ["city_id", "item_id"],
         },

@@ -29,7 +29,7 @@ _ARG_SPEC: dict[str, dict[str, type]] = {
     "end_turn": {},
 }
 
-_OPTIONAL_STR_ARGS = frozenset({("found_city", "name")})
+_OPTIONAL_STR_ARGS = frozenset({("found_city", "name"), ("set_city_production", "dest")})
 
 
 def validate_args(tool: str, args: dict[str, Any]) -> RejectionReason | None:
@@ -45,6 +45,16 @@ def validate_args(tool: str, args: dict[str, Any]) -> RejectionReason | None:
     }
     for key in args:
         if key not in allowed:
+            return RejectionReason.ARGS_INVALID
+    if tool == "set_city_production":
+        from civ_arena.game.civ6.productive_native import validate
+        item, dest = args["item_id"], args.get("dest")
+        if item.startswith(("DISTRICT_", "PROJECT_")):
+            try:
+                validate(item, dest)
+            except ValueError:
+                return RejectionReason.ARGS_INVALID
+        elif "dest" in args:
             return RejectionReason.ARGS_INVALID
     name = args.get("name")
     if name is not None and not (1 <= len(name.strip()) <= 23):

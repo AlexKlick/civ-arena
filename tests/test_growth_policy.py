@@ -277,13 +277,15 @@ def test_translated_native_catalog_fields_with_local_lua(tmp_path):
 Game={GetLocalPlayer=function() return 0 end}
 CityOperationTypes={PARAM_UNIT_TYPE=1,BUILD=2}
 local queue={CanProduce=function() return true end,GetTurnsLeft=function() return 4 end}
-local city={GetID=function() return 1 end,GetBuildQueue=function() return queue end}
+local city={GetID=function() return 1 end,GetOwner=function() return 0 end,
+ GetBuildQueue=function() return queue end}
 CityManager={GetCity=function() return city end,CanStartOperation=function() return true end}
 GameInfo={Units=function()
  local done=false
  return function() if not done then done=true; return {UnitType='UNIT_MUSKETMAN',
  Hash=1,Cost=100,Combat=55,RangedCombat=0,Domain='DOMAIN_LAND',FoundCity=false,BuildCharges=0}
- end end end,Buildings=function() return function() end end}
+ end end end,Buildings=function() return function() end end,
+ Projects=function() return function() end end,Districts=function() return function() end end}
 '''
     path = tmp_path / 'growth-catalog.lua'
     path.write_text(source + lt.available_production_read('c0:1'))

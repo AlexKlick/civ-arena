@@ -50,7 +50,7 @@ from civ_arena.game.adapter import (
     ObserveRequest,
     RejectionReason,
 )
-from civ_arena.game.civ6 import lua_translator, response_parser
+from civ_arena.game.civ6 import lua_translator, productive_native, response_parser
 from civ_arena.game.civ6.entity_ids import decode
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
 from civ_arena.game.terrain_metadata import terrain_fields
@@ -140,6 +140,15 @@ def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
                 decode(value, "c" if key == "city_id" else "u")
             except ValueError:
                 return f"{tool}.{key} is not an exact owner-qualified ID"
+    if tool == "set_city_production":
+        item = args.get("item_id", "")
+        try:
+            if item.startswith(("DISTRICT_", "PROJECT_")):
+                productive_native.validate(item, args.get("dest"))
+            elif "dest" in args:
+                return "legacy production does not accept placement"
+        except ValueError:
+            return "invalid productive production shape"
     return None
 
 
@@ -207,7 +216,7 @@ _ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
     "set_research": lambda pid, a: (lua_translator.set_research(
         pid, a["tech_id"]), False),
     "set_city_production": lambda _pid, a: (lua_translator.set_city_production(
-        a["city_id"], a["item_id"]), True),
+        a["city_id"], a["item_id"], a.get("dest")), True),
     "purchase": lambda _pid, a: (lua_translator.purchase(
         a["city_id"], a["item_id"]), True),
 }
@@ -682,10 +691,12 @@ class FireTunerAdapter:
             if req.subject_id is None:
                 raise ValueError(
                     "AVAILABLE_PRODUCTION requires subject_id (city_id)")
+            if decode(req.subject_id, "c")[0] != req.player_id:
+                raise ValueError("production observation city owner mismatch")
             lines = await self._conn.execute_write(
                 lua_translator.available_production_read(
                     req.subject_id))
-            return response_parser.parse_available_production(lines)
+            return response_parser.parse_available_production(lines, require_productive=True)
         raise ValueError(f"unknown observe kind: {req.kind}")
 
     def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
@@ -734,6 +745,7 @@ class FireTunerAdapter:
         unit_id = cmd.args.get("unit_id")
         diff_seq = self._next_diff_seq()
         reward_nonce = None
+        productive_generation = productive_native.generation(self._conn)
         if cmd.tool == "move_unit":
             reward_nonce = _sha({"lease": cmd.lease_id, "key": cmd.idempotency_key,
                                  "turn": self._turn_mirror, "seq": diff_seq})
@@ -754,8 +766,12 @@ class FireTunerAdapter:
                     return ActionResult(status="rejected", result=None, mutations=(),
                                         rejection="unknown_entity", error=unit_id)
             lua, ingame = builder(cmd.player_id, cmd.args)
-            lines = await (self._conn.execute_write(lua) if ingame
-                           else self._conn.execute_read(lua))
+            if cmd.tool == "set_city_production" and productive_native.kind(cmd.args["item_id"]):
+                async with asyncio.timeout(_PRODUCTION_VERIFY_TIMEOUT_S):
+                    lines = await productive_native.execute_once(self._conn, lua)
+            else:
+                lines = await (self._conn.execute_write(lua) if ingame
+                               else self._conn.execute_read(lua))
             verdict = response_parser.parse_act(lines)
         except BaseException:
             if reward_nonce is not None:
@@ -784,8 +800,16 @@ class FireTunerAdapter:
                 rejection=_rejection_value(verdict["rejection"]),
                 error=verdict["detail"])
         production_hash = None
+        production_readback = None
         if cmd.tool == "set_city_production":
-            production_hash = await verify_production(self._conn, cmd.args["city_id"], lines)
+            if productive_native.kind(cmd.args["item_id"]):
+                production_readback = await productive_native.verify(
+                    self._conn, cmd.args["city_id"], cmd.args["item_id"], cmd.args.get("dest"),
+                    lines, timeout=_PRODUCTION_VERIFY_TIMEOUT_S,
+                    interval=_PRODUCTION_POLL_INTERVAL_S,
+                    connection_generation=productive_generation)
+            else:
+                production_hash = await verify_production(self._conn, cmd.args["city_id"], lines)
         # Codex P2-10: a landed act MUST refresh the digest before returning
         # — otherwise execute()'s post-hash is the PRE-command digest and the
         # log's hash trail goes stale mid-lease.
@@ -802,6 +826,8 @@ class FireTunerAdapter:
         result = {"tool": cmd.tool, "detail": verdict["detail"]}
         if causal_receipts:
             result["causal_receipts"] = causal_receipts
+        if production_readback is not None:
+            result['production_readback'] = production_readback
         if production_hash is not None:
             result.update(production_hash=production_hash,
                           verification="subsequent_ingame_read")
