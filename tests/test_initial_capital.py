@@ -194,9 +194,13 @@ async def test_unjustified_current_tactical_hold_cannot_silently_defer_capital()
     ctl, rt, _, f, records = capital_setup(frozen=True)
     await advance(ctl, rt, f, 1)
     ctl.directive['tactical_overrides'] = [{'unit_id': 'settler', 'action': 'hold'}]
-    with pytest.raises(MatchAborted, match='capital_hold_requires_observed_guard'):
-        await advance(ctl, rt, f, 2)
-    assert not any(r['execution'] for r in reports(records))
+    await advance(ctl, rt, f, 2)
+    # The unguarded hold is dropped and recorded, never silently deferred:
+    # the procedural guarded founding executes on the same turn.
+    assert f.cities and f.cities[0]['coord'] == '1,0'
+    assert ctl._capital.summary()['dropped_unguarded_holds'] == [
+        {'turn': 2, 'reason': 'capital_hold_without_observed_guard'}]
+    assert reports(records)[-1]['execution']
 
 
 async def test_later_explicit_relocation_retires_and_retargets_capital_plan():

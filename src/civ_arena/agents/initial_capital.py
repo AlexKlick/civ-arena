@@ -32,6 +32,7 @@ class InitialCapitalPlan:
         self._resolution_required = False
         self._guard_holds = 0
         self._last_hold_turn = None
+        self._dropped_holds = []
         self._history = []
 
     def summary(self):
@@ -41,6 +42,7 @@ class InitialCapitalPlan:
                 'failure_reason': self.failure_reason,
                 'failed_edges': [list(edge) for edge in sorted(self._failed_edges)],
                 'relocations_used': self._relocations, 'guard_holds': self._guard_holds,
+                'dropped_unguarded_holds': copy.deepcopy(self._dropped_holds),
                 'retired_intents': copy.deepcopy(self._history),
                 'limits': {'automatic_found_attempts_per_site': 1,
                            'plan_own_turns': self.MAX_PLAN_TURNS,
@@ -154,8 +156,10 @@ class InitialCapitalPlan:
         if order['action'] not in {'found_city', 'move', 'hold'}:
             return 'capital_requires_founder_action'
         if order['action'] == 'hold':
-            return None if self._guard(state, actor, actor['coord'], recovery) else \
-                'capital_hold_requires_observed_guard'
+            # A hold is schema-valid here; prepare() drops it when no observed
+            # guard justifies waiting, so the procedural guarded founding
+            # default executes instead of silently deferring the capital.
+            return None
         site = order.get('dest', actor['coord'])
         if self._guard(state, actor, site, recovery):
             return 'capital_action_blocked_by_observed_guard'
@@ -183,6 +187,18 @@ class InitialCapitalPlan:
         actor = self._actor(state)
         order = next((o for o in directive['tactical_overrides']
                       if o['unit_id'] == actor['unit_id']), None)
+        if order is not None and order['action'] == 'hold' and \
+                not self._guard(state, actor, actor['coord'], recovery):
+            # Unguarded hold: strategic dither, not a blocker. Drop it (loudly,
+            # via summary diagnostics) so the controller's guarded in-place
+            # founding default runs this turn instead of deferring the capital.
+            # Removing it from the directive keeps the founder out of this
+            # turn's tactical_ids, letting the automatic founding proceed.
+            self._dropped_holds.append({'turn': turn,
+                                        'reason': 'capital_hold_without_observed_guard'})
+            directive['tactical_overrides'] = [
+                o for o in directive['tactical_overrides'] if o is not order]
+            order = None
         if order or self.mission is None:
             self._retire('explicit_founder_revision' if order else 'procedural_default')
             site = order.get('dest', actor['coord']) if order else actor['coord']
