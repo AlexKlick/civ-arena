@@ -1,0 +1,19 @@
+# The operator's game: seat 0 played live at the keyboard vs the engine's
+# own AI majors; the harness ONLY watches and records (never acts).
+# observed_players must match the game's MAJOR count (duel default: 2).
+match:
+  match_id: live-spectator-human-001
+  seed: 1
+  max_turns: 300            # absolute round cap; --turns is the run's rounds
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  completeness_gate: false
+spectate:
+  operator: alexk
+  human_seat: 0
+  observed_players: [0, 1]
+  snapshot_scope: full      # ambient | census | full
+  turn_budget_s: 3600.0     # AUDIT-ONLY: an overrun is recorded, never acted on
+  poll_s: 2.0
+  heartbeat_s: 60.0
+agents: []                  # a spectate run rosters no driven agents
