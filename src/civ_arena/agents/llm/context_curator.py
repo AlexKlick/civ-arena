@@ -43,7 +43,11 @@ def selected(row: dict, fields: tuple[str, ...]) -> dict:
 
 
 class ContextCurator:
-    def __init__(self, facade: Any, player_id: int, budget: int, memory: str = ''):
+    def __init__(self, facade: Any, player_id: int, budget: int, memory: str = '', *,
+                 research_building_briefing: bool = False):
+        if type(research_building_briefing) is not bool:
+            raise ValueError('research briefing opt-in must be boolean')
+        self.research_building_briefing = research_building_briefing
         self.facade, self.player_id, self.budget = facade, player_id, budget
         self.state: dict[str, Any] = {'get_strategy': memory}
         self.dirty = {'get_visible_map', 'get_units', 'get_cities', 'get_overview'}
@@ -117,18 +121,33 @@ class ContextCurator:
             # An existing choice does not need a repeated full technology catalog.
             if not researching or self.research_force:
                 self.state.pop('get_available_research', None)
-                options = await self.read('get_available_research')
+                self.state.pop('research_building_unlocks', None)
+                if self.research_building_briefing:
+                    from civ_arena.game.civ6.research_briefing import project
+                    value = await self.read('get_available_research',
+                                            research_building_briefing=True)
+                    value = project(value, self.player_id)
+                    options = value['options']
+                    snapshot_turn = value['building_unlocks']['snapshot']['turn']
+                    observed_turn = self.state['get_overview'].get('turn')
+                    if observed_turn is not None and snapshot_turn != observed_turn:
+                        raise MatchAborted('research briefing observation turn changed')
+                    self.state['research_building_unlocks'] = value['building_unlocks']
+                else:
+                    options = await self.read('get_available_research')
                 if not isinstance(options, list):
                     raise MatchAborted('context research options have invalid shape')
                 self.state['get_available_research'] = options
                 self.research_source = 'observed'
             else:
                 self.state['get_available_research'] = []
+                self.state.pop('research_building_unlocks', None)
                 self.research_source = 'not_requested_active_choice'
             self.research_dirty = False
             self.research_force = False
         elif self.research_dirty:
             self.state.pop('get_available_research', None)
+            self.state.pop('research_building_unlocks', None)
         self.state['get_available_production'] = {'by_city': self.production}
         self.revision += 1
         return self.state
@@ -237,6 +256,8 @@ class ContextCurator:
                target_chars: int | None = None) -> str:
         if adaptive_task is not None and adaptive_task not in ('strategy', 'economy', 'contact'):
             raise ValueError('unsupported adaptive briefing task')
+        if self.research_building_briefing and adaptive_task is None:
+            raise ValueError('research building briefing requires adaptive context')
         if self.dirty:
             raise MatchAborted('controller context requires post-action refresh')
         units = self.state['get_units']
@@ -267,6 +288,19 @@ class ContextCurator:
                     'Known terrain may be remembered; no map limits or latitude are supplied.',
                'scope': 'Known terrain is not a legal-move list. Observations follow the previous '
                         'action batch; accepted movement may leave position unchanged.'}
+        if self.research_building_briefing:
+            doc['research_building_unlocks'] = self.state.get('research_building_unlocks', {
+                'status': 'deferred' if self.research_dirty else self.research_source,
+                'action_authority': 'none'})
+            # Metadata is conditional, not a substitute for unqueried city internals.
+            doc['research_building_city_conditions'] = {
+                city['city_id']: {'built_or_pillaged': 'unknown',
+                    'prerequisite_buildings_satisfied': 'unknown',
+                    'city_center_complete': 'unknown', 'river_and_terrain_requirements': 'unknown',
+                    'future_native_build_legality': 'unknown',
+                    'current_supported_catalog_source': 'observed' if city['city_id'] in
+                    self.production else 'not_requested_active_queue_or_deferred'}
+                for city in mine_c}
         tiles = self.state['get_visible_map'].get('tiles')
         if not isinstance(tiles, dict):
             raise MatchAborted('context map tiles have invalid shape')
