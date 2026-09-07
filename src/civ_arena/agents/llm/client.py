@@ -116,6 +116,11 @@ class MiniMaxMessagesClient:
         self.on_attempt = on_attempt
         self.posts_by_kind = {'generation': 0, 'count_tokens': 0}
         self.posts_sent = 0  # every POST, retries included (budget authority)
+        # CAP-03 (F-07): the ambient decision attribution for attempt
+        # records — the runtime/controller assigns one id per model
+        # decision unit; null means unattributed (e.g. count_tokens or a
+        # direct client user that never declared a decision boundary).
+        self.decision_id: str | None = None
         self._http: httpx.AsyncClient | None = None
 
     # ---------------------------------------------------------------- wire
@@ -228,6 +233,25 @@ class MiniMaxMessagesClient:
                 timeout=httpx.Timeout(self.spec.request_timeout_s))
 
         import time as _time
+        import uuid as _uuid
+
+        # CAP-03 (F-07): one logical identity for the whole retry chain of
+        # THIS request; the set key lets joins distinguish byte-identical
+        # payloads sent as distinct logical requests/decisions.
+        logical_request_id = _uuid.uuid4().hex
+        body_hash = payload_hash(body)
+        set_key = f"{body_hash}:{request_kind}"
+
+        def _usage_value(usage: dict[str, Any], *keys: str) -> int | None:
+            """Present key -> coerced int (explicit 0 stays 0); a key that
+            is absent OR uncoercible is UNKNOWN (None) — never 0."""
+            for key in keys:
+                if key in usage:
+                    try:
+                        return int(usage[key])
+                    except (TypeError, ValueError):
+                        return None
+            return None
 
         def _fire(attempt: int, status_code: int | None, latency_ms: int,
                   sent_key: str, response_doc: Any = None,
@@ -238,20 +262,20 @@ class MiniMaxMessagesClient:
             if isinstance(response_doc, dict):
                 usage = response_doc.get("usage")
                 if isinstance(usage, dict):
-                    try:
-                        input_tokens = int(usage.get(
-                            "input_tokens", usage.get("prompt_tokens", 0)) or 0)
-                        output_tokens = int(usage.get(
-                            "output_tokens", usage.get("completion_tokens", 0)) or 0)
-                    except (TypeError, ValueError):
-                        input_tokens = output_tokens = None
+                    input_tokens = _usage_value(usage, "input_tokens",
+                                                "prompt_tokens")
+                    output_tokens = _usage_value(usage, "output_tokens",
+                                                 "completion_tokens")
             self.on_attempt({
                 "ts": _utcnow_iso(), "request_kind": request_kind,
                 "attempt": attempt, "status_code": status_code,
                 "latency_ms": latency_ms, "model": body.get("model"),
-                "payload_hash": payload_hash(body), "request": body,
+                "payload_hash": body_hash, "request": body,
                 "response": response_doc, "error": error,
                 "input_tokens": input_tokens, "output_tokens": output_tokens,
+                "logical_request_id": logical_request_id,
+                "request_set_key": set_key,
+                "decision_id": self.decision_id,
             })
 
         last_error = "no attempt made"
