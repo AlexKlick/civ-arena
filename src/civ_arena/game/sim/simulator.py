@@ -140,6 +140,8 @@ class SimulatorAdapter:
                 "tiles": {k: copy.deepcopy(v) for k, v in state.tiles.items()},
             }
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
+            if req.research_building_briefing:
+                raise ValueError('native research-building briefing unsupported in simulator')
             return available_research(state, req.player_id)
         if req.kind is ObserveKind.AVAILABLE_PRODUCTION:
             if req.subject_id is None:

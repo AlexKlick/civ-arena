@@ -121,6 +121,9 @@ class VisibilityPolicy:
                 "you": self._own_player(doc, player_id),
                 "public": self._public_match(doc),
             }
+        if kind == 'available_research' and isinstance(doc, dict):
+            from civ_arena.game.civ6.research_briefing import project
+            return project(doc, player_id)
         # available_research / available_production are already player-derived
         return doc
 

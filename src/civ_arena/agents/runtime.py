@@ -66,6 +66,11 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
             )
         if profile.decision_mode == "strategic_autopilot" and not match_id:
             raise ValueError("strategic_autopilot requires trusted match_id")
+        briefing = getattr(profile.llm, 'research_building_briefing', False)
+        if type(briefing) is not bool or briefing and (
+                profile.decision_mode != 'strategic_autopilot'
+                or profile.llm.adaptive_context is None):
+            raise ValueError('research_building_briefing requires strategic adaptive context')
         runtime = LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
                                         strategy=strategy, on_post=on_post)
         if profile.decision_mode == "strategic_autopilot":

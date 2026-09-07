@@ -684,6 +684,10 @@ class FireTunerAdapter:
                     out[key] = terrain_fields(tile)
             return {"turn": turn, "tiles": out}
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
+            if req.research_building_briefing:
+                from civ_arena.game.civ6 import research_briefing
+                lines = await self._conn.execute_read(research_briefing.query(req.player_id))
+                return research_briefing.parse(lines, req.player_id)
             lines = await self._conn.execute_read(
                 lua_translator.available_research_read(req.player_id))
             return response_parser.parse_available_research(lines)

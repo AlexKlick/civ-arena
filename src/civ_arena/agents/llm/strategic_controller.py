@@ -230,7 +230,8 @@ class StrategicController:
         self._turn_strategy_requests = 0
         try:
             curator = ContextCurator(facade, runtime.profile.player_id,
-                                     runtime.llm.max_result_chars)
+                                     runtime.llm.max_result_chars,
+                                     research_building_briefing=runtime.llm.research_building_briefing)
             await curator.refresh(include_options=False)
             frozen_ids = ({u['unit_id'] for u in curator.own('get_units')}
                           if self.opening_units_frozen else set())

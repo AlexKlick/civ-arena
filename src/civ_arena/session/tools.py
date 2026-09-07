@@ -44,7 +44,12 @@ async def get_visible_map(ctx: SessionCtx) -> dict:
     return await ctx.referee.observe(ctx, ObserveKind.VISIBLE_MAP)
 
 
-async def get_available_research(ctx: SessionCtx) -> list[dict]:
+async def get_available_research(ctx: SessionCtx, *, research_building_briefing: bool = False):
+    if type(research_building_briefing) is not bool:
+        raise ValueError('research briefing opt-in must be boolean')
+    if research_building_briefing:
+        return await ctx.referee.observe(ctx, ObserveKind.AVAILABLE_RESEARCH,
+                                        research_building_briefing=True)
     return await ctx.referee.observe(ctx, ObserveKind.AVAILABLE_RESEARCH)
 
 

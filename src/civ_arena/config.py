@@ -53,6 +53,7 @@ class LLMSpec:
     max_retries: int = 2
     max_requests_per_match: int = 2000
     adaptive_context: AdaptiveContextSpec | None = None
+    research_building_briefing: bool = False
 
 
 def _parse_llm(block: Any, where: str) -> LLMSpec:
@@ -102,12 +103,16 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
                 or 'provider_context_tokens' not in adaptive:
             raise ConfigError('adaptive_context has unsupported or missing fields')
         adaptive = AdaptiveContextSpec(**adaptive)
+    briefing = block.get('research_building_briefing', False)
+    if type(briefing) is not bool or briefing and adaptive is None:
+        raise ConfigError('research_building_briefing requires boolean opt-in and adaptive_context')
     return LLMSpec(
         base_url=base_url, api_key_env=api_key_env, model_id=model_id,
         max_tokens=ints["max_tokens"], max_tool_rounds=ints["max_tool_rounds"],
         max_result_chars=ints["max_result_chars"],
         request_timeout_s=float(timeout), max_retries=ints["max_retries"],
         max_requests_per_match=ints["max_requests_per_match"], adaptive_context=adaptive,
+        research_building_briefing=briefing,
     )
 
 
@@ -243,6 +248,9 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             raise ConfigError(f"{where}: growth_autopilot must be an explicit boolean")
         if agent.growth_autopilot and agent.decision_mode != "strategic_autopilot":
             raise ConfigError(f"{where}: growth_autopilot requires strategic_autopilot")
+        if (agent.llm and agent.llm.research_building_briefing
+                and agent.decision_mode != 'strategic_autopilot'):
+            raise ConfigError(f'{where}: research_building_briefing requires strategic_autopilot')
         if agent.policy not in VALID_POLICIES:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
         if agent.policy == "llm" and agent.llm is None:

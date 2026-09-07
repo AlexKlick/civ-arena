@@ -70,7 +70,10 @@ class ReplayRuntime:
             call = self._queue.popleft()
             fn = getattr(facade, call.tool)
             pos = [call.args[k] for k in ARG_ORDER.get(call.tool, []) if k in call.args]
-            if call.tool == "purchase" or call.key is not None:
+            if call.tool == 'get_available_research' and 'research_building_briefing' in call.args:
+                result = await fn(
+                    research_building_briefing=call.args['research_building_briefing'])
+            elif call.tool == "purchase" or call.key is not None:
                 result = await fn(*pos, idempotency_key=call.key)
             else:
                 result = await fn(*pos)
