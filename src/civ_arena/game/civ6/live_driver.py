@@ -55,6 +55,17 @@ from civ_arena.session.tools import SessionCtx
 from civ_arena.strategy.store import StrategyStore
 
 
+def _provider_request_audit(driver: LiveDriver) -> Any:
+    """The (event, **payload)-shaped audit closure the client sinks call —
+    same HEARTBEAT shape as the hotseat closure. Kept module-level so the
+    single-seat call site and tests share the exact production callable
+    (F-04: the previous direct lambda passed _strategic_audit's one-dict
+    signature where (tag, **fields) was invoked)."""
+    def audit(event: str, **payload: Any) -> None:
+        driver._write("HEARTBEAT", turn=0, audit=event, **payload)  # noqa: SLF001
+    return audit
+
+
 def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
                        run_dir: Path) -> None:
     """Attach the run-dir ledgers to a model client: durable spend
@@ -327,8 +338,13 @@ async def phase_dispatch(
     runtime = build_runtime(profile, match_id=spec.match_id,
                             audit=lambda payload: _strategic_audit(driver, payload),
                             opening_units_frozen=adapter._simulate is None)
+    # the sinks call audit(event, **payload) — the (tag, **fields) shape the
+    # hotseat closure uses. _strategic_audit takes ONE payload dict; passing
+    # it here meant the first provider POST raised TypeError (Exchange-2
+    # finding F-04). The provider-request audit is a driver HEARTBEAT, not a
+    # strategy audit.
     _wire_client_sinks(getattr(runtime, "client", None), agent,
-                       lambda payload: _strategic_audit(driver, payload),
+                       _provider_request_audit(driver),
                        run_dir)
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
     # Arena-owned services reach the runtime exactly as the coordinator

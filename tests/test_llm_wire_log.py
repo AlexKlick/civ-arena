@@ -176,6 +176,55 @@ def test_wire_client_sinks_skips_non_clients(tmp_path):
     _wire_client_sinks(None, agent, lambda **p: None, tmp_path)  # no error
 
 
+def test_single_seat_dispatch_sink_writes_cost_and_spend_without_typeerror(
+        monkeypatch, tmp_path):
+    """F-04 regression: the single-seat dispatch call site passes the
+    production (event, **payload) audit closure into _wire_client_sinks.
+    The pre-fix lambda (_strategic_audit's one-dict signature) raised
+    TypeError on the FIRST provider POST; nothing else exercised this
+    path, so the full gate stayed green with the bug live."""
+
+    from civ_arena.config import AgentSpec, parse_config
+    from civ_arena.game.civ6 import live_driver as ld
+    from civ_arena.game.civ6.firetuner import FireTunerAdapter
+
+    monkeypatch.setenv("WIRE_LOG_TEST_KEY", SECRET)
+    spec = parse_config({
+        "match": {"match_id": "f04", "seed": 1, "adapter": "firetuner",
+                  "watchdog_mode": "flag_and_continue"},
+        "agents": [{"agent_id": "a0", "player_id": 0, "policy": "turtler"}],
+    })
+    driver = ld.LiveDriver(spec, FireTunerAdapter("127.0.0.1", 1),
+                           tmp_path, "f04-i1")
+    agent = AgentSpec(agent_id="a0", player_id=0, policy="llm", seed=1,
+                      llm=_spec(wire_log=True))
+
+    class _FakeClient:
+        def __init__(self):
+            self.posts_sent = 0
+            self.on_post = None
+            self.on_attempt = None
+
+    client = _FakeClient()
+    # THE production callable from the single-seat call site
+    ld._wire_client_sinks(client, agent, ld._provider_request_audit(driver),
+                          tmp_path)
+    client.posts_sent = 1
+    client.on_post()  # pre-fix: TypeError here
+    client.on_attempt({"ts": "t", "request_kind": "generation", "attempt": 0,
+                       "status_code": 200, "latency_ms": 4, "model": "m",
+                       "payload_hash": "h", "request": {}, "response": None,
+                       "error": None, "input_tokens": 1, "output_tokens": 1})
+    spend = [json.loads(line) for line in
+             (tmp_path / "spend.jsonl").read_text().splitlines()]
+    assert spend == [{"agent_id": "a0", "player_id": 0}]
+    assert (tmp_path / "llm_costs.jsonl").exists()
+    events = [json.loads(line) for line in
+              (tmp_path / "events.jsonl").read_text().splitlines()]
+    provider = [e for e in events if e.get("audit") == "provider_request"]
+    assert len(provider) == 1 and provider[0]["posts_sent"] == 1
+
+
 async def test_wire_log_absent_when_not_opted_in(monkeypatch, tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_reply())
