@@ -17,7 +17,15 @@ freshness or safety proofs. The existing facade performs native legality checks.
 Automatic founding uses positive observed movement or the existing verified,
 untouched opening frozen allowance; it introduces no movement restoration.
 Explicit model input remains on the existing tactical path and is validated
-against the current capital guards before dispatch.
+against the current capital guards before dispatch. The controller also rechecks
+the exact pending founder/action/origin/site and these guards immediately before
+each explicit founder facade call, using the latest projection refreshed after
+any preceding unit action. A newly revealed guard aborts with `capital_unresolved`
+and a `strategy_initial_capital` audit outcome of `not_dispatched`, empty
+`execution`, and the proposed `attempted_action`. This is a withheld proposal, not
+an accepted or rejected native receipt. The ordinary scouting selector can also
+withhold an unavailable target before this callback; the capital audit then
+records `selected_founder_action_not_dispatched` in its progress failure reason.
 
 A rejected relocation, or an accepted relocation with no arrival at the first
 fresh later own-turn observation, requires a founder-specific resolution. A
@@ -101,3 +109,24 @@ complete information about nearby danger, victory or a fresh 100-round result.
 The conservative contact guard can stop a viable but uncertain opening. Multiple
 initial settlers are intentionally ambiguous. This repair establishes a bounded
 first-capital action contract, not general city-loss recovery or global strategy.
+
+
+## Dispatch correction evidence
+
+Independent review of `0b9ef875` confirmed that checking explicit founder guards
+only before a scouting batch allowed another unit's accepted action to reveal
+health loss or a nearby foreign contact before founding/movement. The correction
+checks again in the controller's execute callback; no scouting or native API is
+changed. Original immutable review evidence remains under
+`runs/independent-0b9ef875`. Correction evidence is under
+`runs/capital-dispatch-correction`.
+
+The unchanged six independent cases plus the original 37 capital cases passed
+43/0. Expanded coverage initially passed 53 cases and failed one audit assertion:
+the existing scouting selector itself withheld a missing move target before the
+new dispatch callback. The assertion now distinguishes this existing selector
+refusal from the new dispatch-guard audit. No unsafe request occurred in that
+fixture. The final affected gate passed 278 tests with zero failures, errors, skips or
+deselections in 39.52 seconds (`affected-final.log`); Ruff passed the three changed
+Python files (`ruff-final.log`). Exact source binding is recorded in the
+correction directory. Native execution remains a separate parent-owned check.

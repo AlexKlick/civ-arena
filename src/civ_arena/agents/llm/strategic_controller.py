@@ -296,10 +296,24 @@ class StrategicController:
                 if self._capital.failure_reason:
                     raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
                 reserved.update(self._capital.reserved_roles(curator.state))
+            async def scouting_execute(action: str, args: dict) -> dict:
+                if self._capital is not None:
+                    error = self._capital.dispatch_error(
+                        curator.state, action, args, recovery['units'])
+                    if error:
+                        self._capital.failure_reason = error
+                        self._emit(runtime, 'strategy_initial_capital',
+                                   source='initial_capital_dispatch_guard', version=2,
+                                   outcome='not_dispatched', reason=error, execution=[],
+                                   attempted_action={'action': action, 'args': args},
+                                   progress=self._capital.summary())
+                        raise MatchAborted('capital_unresolved: ' + error)
+                return await curator.execute(action, args)
+
             graph = await run_scouting(
                 curator.state, directive=directive, player_id=runtime.profile.player_id,
                 match_id=self.match_id, agent_id=runtime.profile.agent_id, turn=turn,
-                execute=curator.execute, refresh=refresh, seed=runtime.profile.seed,
+                execute=scouting_execute, refresh=refresh, seed=runtime.profile.seed,
                 frozen_unit_ids=frozen_ids, nonprogress=feedback["suppressed"],
                 recovery=recovery['units'], recovery_policy=self.recovery_policy,
                 reserved_roles=reserved)
