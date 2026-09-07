@@ -93,7 +93,8 @@ def structural_problems(records: list[dict[str, Any]], *,
                         "outcome does not allow one)")
     seqs = [r.get("seq") for r in records]
     if seqs != list(range(len(records))):
-        problems.append("seq is not contiguous from 0 (tampered or torn log)")
+        problems.append(
+            "event sequence not contiguous from 0 (tampered or torn log)")
     for rec in records:
         if rec.get("kind") in SPECTATE_FORBIDDEN_KINDS:
             problems.append(
@@ -114,15 +115,17 @@ def structural_problems(records: list[dict[str, Any]], *,
     if kinds[:len(expected)] != expected or not tail_ok:
         problems.append(
             "HUMAN_TURN_START/SPECTATOR_SNAPSHOT/HUMAN_TURN_END do not "
-            "strictly alternate (snapshots must be present between each "
-            "START and its END)")
+            "strictly alternate (round interleave broken: START, SNAPSHOT, "
+            "END per round — snapshots must be present between each START "
+            "and its END)")
     # per-round turn/participant agreement among the round events
     starts = [r for r in records if r.get("kind") == "HUMAN_TURN_START"]
     snaps = [r for r in records if r.get("kind") == "SPECTATOR_SNAPSHOT"]
     human_ends = [r for r in records if r.get("kind") == "HUMAN_TURN_END"]
     if len(starts) == len(human_ends) and len(snaps) < len(starts):
-        problems.append(f"{len(starts) - len(snaps)} round(s) missing a "
-                        "SPECTATOR_SNAPSHOT")
+        problems.append(
+            f"round event counts: {len(starts) - len(snaps)} round(s) "
+            "missing a SPECTATOR_SNAPSHOT")
     turns = [r.get("turn") for r in starts]
     if turns != sorted(set(turns)) or len(turns) != len(set(turns)):
         problems.append("HUMAN_TURN_START turns are not strictly increasing")
@@ -134,18 +137,16 @@ def structural_problems(records: list[dict[str, Any]], *,
     if len(seats) > 1 or None in seats:
         problems.append("phase_player_id is missing or inconsistent across "
                         "spectate round events")
-    # turn ids inside each round triple must agree
+    # turn ids inside each round's start pair must agree (the phase writes
+    # them together); a START->END turn SPAN is NOT a structural defect —
+    # it is the honest signature of a capture gap (a lost turn boundary
+    # made one interval cover two turns) and is surfaced by the
+    # validator's eligibility layer instead.
     for i in range(min(len(starts), len(snaps))):
         if starts[i].get("turn") != snaps[i].get("turn"):
             problems.append(
                 f"round {i + 1}: HUMAN_TURN_START turn {starts[i].get('turn')} "
                 f"vs SPECTATOR_SNAPSHOT turn {snaps[i].get('turn')}")
-            break
-    for i in range(min(len(snaps), len(human_ends))):
-        if snaps[i].get("turn") != human_ends[i].get("turn"):
-            problems.append(
-                f"round {i + 1}: SPECTATOR_SNAPSHOT turn {snaps[i].get('turn')} "
-                f"vs HUMAN_TURN_END turn {human_ends[i].get('turn')}")
             break
     for s in snaps:
         digest = s.get("digest")

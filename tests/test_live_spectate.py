@@ -285,7 +285,8 @@ async def test_validate_spectate_tamper_matrix(tmp_path) -> None:
     run_dir = await _rerun(tmp_path)
     _rewrite_events(run_dir, lambda ls: ls[:3] + ls[4:])
     result = validate(run_dir, rounds=2, require_live=False)
-    assert result["status"] == "FAIL" and "event sequence" in result["errors"]
+    assert result["status"] == "FAIL"
+    assert any("event sequence" in e for e in result["errors"])
 
     # (e) reorder a START after its SNAPSHOT
     run_dir = await _rerun(tmp_path)

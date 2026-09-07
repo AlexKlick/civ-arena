@@ -22,7 +22,8 @@ def test_spectator_config_parses() -> None:
     spec = load_config(CONFIG)
     assert spec.spectate is not None
     assert spec.spectate.operator == "alexk"
-    assert spec.spectate.observed_players == (0, 1)
+    # updated by 5d5221b to the operator's live 7-major game (was (0, 1))
+    assert spec.spectate.observed_players == (0, 1, 2, 3, 4, 5, 6)
     assert spec.agents == []
 
 

@@ -421,7 +421,8 @@ async def _main_async(argv: list[str] | None = None) -> int:
         print(f"SPECTATE run — structural audit FAILED "
               f"(profile={result['profile']}, "
               f"outcome={result['outcome']}) over "
-              f"{result['live_events']} events:")
+              f"{result['live_events']} events "
+              f"(re-execution not performed, comparison not performed):")
         for problem in result["problems"]:
             print("  ", problem)
         return 4
