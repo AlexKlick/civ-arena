@@ -54,6 +54,10 @@ class LLMSpec:
     max_requests_per_match: int = 2000
     adaptive_context: AdaptiveContextSpec | None = None
     research_building_briefing: bool = False
+    # S3 economic forecast lane: advisory-only forecasts/outcomes above the
+    # unchanged production policy (requires strategic autopilot + adaptive
+    # context, enforced where profiles and configs are validated).
+    economic_forecast: bool = False
     # Spectator-capture lane: opt-in full wire transcript under
     # runs/<id>/llm-wire/<agent_id>.jsonl (headers never recorded; the
     # serialized record is swept through the client's redactor).
@@ -110,6 +114,9 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
     briefing = block.get('research_building_briefing', False)
     if type(briefing) is not bool or briefing and adaptive is None:
         raise ConfigError('research_building_briefing requires boolean opt-in and adaptive_context')
+    economic = block.get('economic_forecast', False)
+    if type(economic) is not bool or economic and adaptive is None:
+        raise ConfigError('economic_forecast requires boolean opt-in and adaptive_context')
     wire_log = block.get('wire_log', False)
     if type(wire_log) is not bool:
         raise ConfigError(f'{where}.llm: wire_log must be an explicit boolean')
@@ -119,7 +126,8 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
         max_result_chars=ints["max_result_chars"],
         request_timeout_s=float(timeout), max_retries=ints["max_retries"],
         max_requests_per_match=ints["max_requests_per_match"], adaptive_context=adaptive,
-        research_building_briefing=briefing, wire_log=wire_log,
+        research_building_briefing=briefing, economic_forecast=economic,
+        wire_log=wire_log,
     )
 
 
@@ -327,6 +335,9 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
         if (agent.llm and agent.llm.research_building_briefing
                 and agent.decision_mode != 'strategic_autopilot'):
             raise ConfigError(f'{where}: research_building_briefing requires strategic_autopilot')
+        if (agent.llm and agent.llm.economic_forecast
+                and agent.decision_mode != 'strategic_autopilot'):
+            raise ConfigError(f'{where}: economic_forecast requires strategic_autopilot')
         if agent.policy not in VALID_POLICIES:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
         if agent.policy == "llm" and agent.llm is None:

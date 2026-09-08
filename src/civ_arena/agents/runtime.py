@@ -71,6 +71,11 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
                 profile.decision_mode != 'strategic_autopilot'
                 or profile.llm.adaptive_context is None):
             raise ValueError('research_building_briefing requires strategic adaptive context')
+        economic = getattr(profile.llm, 'economic_forecast', False)
+        if type(economic) is not bool or economic and (
+                profile.decision_mode != 'strategic_autopilot'
+                or profile.llm.adaptive_context is None):
+            raise ValueError('economic_forecast requires strategic adaptive context')
         runtime = LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
                                         strategy=strategy, on_post=on_post)
         if profile.decision_mode == "strategic_autopilot":
@@ -78,7 +83,8 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
 
             runtime.configure_strategic_controller(StrategicController(
                 match_id=match_id, audit=audit, opening_units_frozen=opening_units_frozen,
-                growth_autopilot=profile.growth_autopilot))
+                growth_autopilot=profile.growth_autopilot,
+                economic_forecast=economic))
         return runtime
     if profile.policy == "expansionist":
         return ScriptedRuntime(profile=profile)
