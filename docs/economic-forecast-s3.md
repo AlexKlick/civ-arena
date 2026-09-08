@@ -23,6 +23,7 @@ reasons why).
 | `1eac3f5` | config/runtime/controller wiring (advisory, default-off) |
 | `6c67e7b` | engine-scenario + mutation-hardening tests |
 | `2f150d9` | Codex review round 1 — all five findings fixed |
+| `7b23b72` | Codex review round 2 — all four findings fixed |
 
 ### Codex R1 (all five findings verified real, all fixed)
 
@@ -44,6 +45,23 @@ reasons why).
 5. **Early completions inflated interval coverage** → verdicts check both
    bounds; completing before the lower bound is `'early'` (a miss), not
    in-window.
+
+### Codex R2 (four findings on the R1 fixes, all verified real, all fixed in `7b23b72`)
+
+1. **`GetTurnsLeft` is a countdown, not a static estimate** — comparing raw
+   turns censored every healthy build. The recheck now compares implied
+   completion dates (`turn + turns` vs the recorded completion); a healthy
+   countdown never censors, real slippage does (`rate_estimate_changed`
+   carries recorded/implied completion turns).
+2. **The recheck was unreachable through the controller** (a fresh curator
+   never catalogs queued cities). `take_turn` now reads each pending city's
+   catalog row via one guarded `curator.read` before observation.
+3. **Defense shortfall recomputed from eligible candidates under-counted
+   satisfied defenders** — now taken from the policy result's own
+   `defenders_owned_queued_reserved` + `defense_goal` (`defense_context`).
+4. **Threat branch with no eligible defender returned alphabetical order**
+   instead of the policy's fall-through — now mirrors `choose_production`
+   exactly: no eligible defender ⇒ normal cascade.
 
 ### Forecast contract (`economic_forecast.py`)
 
