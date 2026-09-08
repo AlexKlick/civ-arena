@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -136,8 +137,11 @@ def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     summary_bytes = summary_path.read_bytes() if summary_path.exists() else None
     summary = json.loads(summary_bytes) if summary_bytes is not None else {}
     costs_path = run_dir / "llm_costs.jsonl"
-    cost_rows = _parse_costs(costs_path.read_bytes()) if costs_path.exists() \
-        else None
+    # Codex r1 finding 2: the ledger is read as bytes ONCE — rows parse
+    # and the manifest hashes the SAME buffer (a re-read could straddle
+    # an append and bind samples to one version, the hash to another)
+    costs_bytes = costs_path.read_bytes() if costs_path.exists() else None
+    cost_rows = _parse_costs(costs_bytes) if costs_bytes is not None else None
     if summary.get("phase") == "spectate":
         samples = _spectator_intervals(events, summary)
     elif not summary_path.exists():
@@ -175,8 +179,8 @@ def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                        hashlib.sha256(summary_bytes).hexdigest()}
                       if summary_bytes is not None else {}),
                    **({"llm_costs_sha256":
-                       hashlib.sha256(costs_path.read_bytes()).hexdigest()}
-                      if cost_rows is not None else {})},
+                       hashlib.sha256(costs_bytes).hexdigest()}
+                      if costs_bytes is not None else {})},
         "sample_counts": {
             cls: sum(1 for s in samples if s["sample_class"] == cls)
             for cls in {s["sample_class"] for s in samples}},
@@ -190,13 +194,21 @@ def write(samples: list[dict[str, Any]], manifest: dict[str, Any],
     """Publish derived outputs without clobbering evidence (R-03): the
     output and its manifest sibling are refused on any source artifact
     of the run the manifest names — direct path, symlink alias, or `..`
-    spelling all compare equal after resolution."""
+    spelling compare equal after resolution; an EXISTING target that
+    hardlinks a source is caught by samefile() (Codex r1 finding 1:
+    resolution cannot see hardlinks — open(..., 'w') would truncate the
+    shared inode)."""
     out_path = Path(out_path)
     manifest_path = out_path.with_suffix(out_path.suffix + ".manifest.json")
     sources = _source_paths(manifest.get("run_dir")) if isinstance(
         manifest, dict) else set()
     for target in (out_path, manifest_path):
-        if _resolve_target(target) in sources:
+        resolved = _resolve_target(target)
+        hit = resolved in sources
+        if not hit and target.exists():
+            hit = any(source.exists() and os.path.samefile(target, source)
+                      for source in sources)
+        if hit:
             raise ValueError(
                 f"refusing to overwrite source evidence: {target} is a "
                 f"consumed artifact of run_dir "
@@ -284,9 +296,29 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             boundaries.get((turn, agent_id), [])
             + boundaries.get((turn, "None"), []),
             key=lambda b: b.get("seq") or 0)
+        # Codex r1 finding 6: a decision_id REUSED by several boundaries
+        # of this (turn, agent) is ambiguous — ledger rows cannot be
+        # attributed to one occurrence, so they join ONLY the operative
+        # (last) sample and every sibling carrying the id is flagged.
+        id_counts: dict[str, int] = {}
+        for b in segment_boundaries:
+            if b.get("decision_id"):
+                id_counts[b["decision_id"]] = \
+                    id_counts.get(b["decision_id"], 0) + 1
+        reused_ids = {d for d, n in id_counts.items() if n > 1}
         windows: list[tuple[dict[str, Any] | None, int | None, int | None]] = []
         for i, b in enumerate(segment_boundaries):
-            w_start = b.get("seq") if isinstance(b.get("seq"), int) else None
+            # Codex r1 finding 3: production emits the boundary AFTER
+            # refresh+decide — the decision's INPUT observations precede
+            # it. The honest per-decision window spans (previous
+            # boundary, next boundary): inputs + this decision's
+            # execution. The first decision's window starts at the turn
+            # (None). Boundary HEARTBEAT rows never appear in the tool
+            # reference arrays, so the boundaries themselves stay out.
+            w_start = (segment_boundaries[i - 1].get("seq")
+                       if i > 0
+                       and isinstance(segment_boundaries[i - 1].get("seq"), int)
+                       else None)
             w_end = (segment_boundaries[i + 1].get("seq")
                      if i + 1 < len(segment_boundaries)
                      and isinstance(segment_boundaries[i + 1].get("seq"), int)
@@ -302,9 +334,8 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 if not _agents(e):
                     return False
                 # only int seqs are windowable; a non-int seq falls out
-                # of every explicit window (the boundary's own row does
-                # too — the window is (start, end) EXCLUSIVE on both
-                # sides)
+                # of every explicit window (the window is (start, end)
+                # EXCLUSIVE on both sides)
                 if not isinstance(e.get("seq"), int):
                     return _s is None and _e is None
                 if _s is not None and not e["seq"] > _s:
@@ -323,8 +354,12 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                         and (e.get("mutations") or e.get("receipts"))]
             decision_id = boundary.get("decision_id") if boundary else None
             decision_ids = [decision_id] if decision_id else []
+            operative = boundary is segment_boundaries[-1] \
+                if segment_boundaries else False
+            shared_id = decision_id in reused_ids
             rows = [r for r in cost_rows
                     if decision_ids
+                    and not (shared_id and not operative)
                     and r.get("decision_id") in decision_ids
                     and (r.get("agent_id") is None
                          or str(r.get("agent_id")) == agent_id)] \
@@ -334,8 +369,16 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 if segment_boundaries else False
             if len(segment_boundaries) > 1:
                 segment_flags.append("boundary_superseded_within_turn")
+            if shared_id:
+                segment_flags.append("decision_id_reused_costs_ambiguous")
+            expected = boundary.get("provider_requests") \
+                if boundary else None
+            # Codex r1 finding 4: the expected-vs-recorded comparison
+            # runs even with ZERO recorded rows — a boundary that
+            # declared requests with an empty ledger is exactly the
+            # sink-failure shape the flag exists for.
             request_costs = None
-            if rows:
+            if rows or (isinstance(expected, int) and expected > 0):
                 tokens_in = [r["input_tokens"] for r in rows
                              if isinstance(r.get("input_tokens"), int)]
                 tokens_out = [r["output_tokens"] for r in rows
@@ -355,8 +398,6 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                     if not isinstance(r.get("input_tokens"), int)
                     or not isinstance(r.get("output_tokens"), int))
                 unknown_latency = len(rows) - len(latencies)
-                expected = boundary.get("provider_requests") \
-                    if boundary else None
                 request_costs = {
                     "attempts": len(rows),
                     "expected_attempts": expected,
@@ -383,6 +424,24 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                       and isinstance(boundary.get("seq"), int)
                       else f"@{decision_id}" if superseded and decision_id
                       else "")
+            # Codex r1 finding 5: identity comes from the BOUNDARY first
+            # (an empty window — two consecutive boundaries — must not
+            # lose a known player), then the first NON-NULL player_id in
+            # the window, then anywhere in the (turn, agent) segment.
+            player_id = (boundary.get("player_id")
+                         if boundary is not None
+                         and isinstance(boundary.get("player_id"), int)
+                         else None)
+            if player_id is None:
+                player_id = next(
+                    (e["player_id"] for e in events
+                     if _window(e)
+                     and isinstance(e.get("player_id"), int)), None)
+            if player_id is None:
+                player_id = next(
+                    (e["player_id"] for e in events
+                     if _agents(e)
+                     and isinstance(e.get("player_id"), int)), None)
             samples.append({
                 "sample_class": "controlled_decision",
                 "schema_version": SCHEMA_CONTROLLED,
@@ -390,9 +449,7 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 "game_instance_id": summary.get("game_instance_id"),
                 "segment_id": base_segment + suffix,
                 "agent_id": agent_id,
-                "player_id": next((e.get("player_id") for e in events
-                                   if _window(e)
-                                   or (w_start is None and _agents(e))), None),
+                "player_id": player_id,
                 "split_group": _split_group(summary),
                 "decision_id": decision_id,
                 "directive_id": boundary.get("directive_id")

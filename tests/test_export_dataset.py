@@ -7,6 +7,7 @@ same run dir exports byte-identical sample bytes twice.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -544,11 +545,14 @@ def test_missing_cost_attempts_flagged_against_expected(tmp_path):
     run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
                          with_boundaries=True)
     # fixture: turn 1 boundary declares provider_requests=1; keep ZERO
-    # ledger rows for d1 so recorded < expected
+    # ledger rows for d1 so recorded < expected. Codex r1 finding 4:
+    # the empty-ledger shape EMITS a zero-attempt request_costs with
+    # the missing flag (never a silent null that hides the sink failure)
     (run_dir / "llm_costs.jsonl").write_text("")
     samples, _ = export(run_dir)
     first = next(s for s in samples if s["segment_id"] == "turn:1")
-    assert first["request_costs"] is None  # no rows at all
+    assert first["request_costs"]["attempts"] == 0
+    assert "costs_attempts_missing" in first["quality_flags"]
     # costs_attempts_missing fires on the row-level comparison instead
     rows = [{"ts": "t", "agent_id": "a0", "player_id": 0,
              "request_kind": "generation", "attempt": 0, "status_code": 200,
@@ -618,3 +622,140 @@ def test_driven_run_without_summary_refuses_controlled_export(tmp_path):
     (run_dir / "summary.json").unlink()
     with pytest.raises(ValueError, match="no summary.json"):
         export(run_dir)
+
+
+# -- Codex r1 (capr1-integration) regressions ----------------------------------
+
+
+def test_write_refuses_hardlinked_source_alias(tmp_path):
+    """Codex r1 finding 1: resolution cannot see hardlinks — a target
+    that hardlinks events.jsonl shares its inode, and open(...,'w')
+    would truncate the source. samefile() must catch it."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    samples, manifest = export(run_dir)
+    original = (run_dir / "events.jsonl").read_bytes()
+    hard = tmp_path / "hard-alias.jsonl"
+    os.link(run_dir / "events.jsonl", hard)
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        write(samples, manifest, hard)
+    assert (run_dir / "events.jsonl").read_bytes() == original
+
+
+def test_first_decision_window_keeps_its_input_observations(tmp_path):
+    """Codex r1 finding 3: production emits the boundary AFTER refresh
+    + decide — the decision's INPUT observations precede it. The first
+    decision's window must start at the turn, not at its boundary, or
+    the observations that produced the decision are exported nowhere."""
+    run_dir = _write_run(tmp_path, spectate=False)  # NO fixture boundary
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i == 3:  # AFTER turn 1's get_units pair, before move_unit
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-late", "directive_id": "dir1",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    # the get_units TOOL_RESULT (seq 2) precedes the boundary (seq 3)
+    # but IS the decision's input — it must ride the sample
+    assert any(ref["seq"] == 2 for ref in first["observation_refs"])
+
+
+def test_zero_recorded_attempts_with_expected_requests_flag_missing(tmp_path):
+    """Codex r1 finding 4: a boundary declaring provider_requests with
+    an EMPTY ledger is the sink-failure shape — the missing-attempt
+    flag must fire even with zero joined rows."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=False,
+                         with_boundaries=True)
+    (run_dir / "llm_costs.jsonl").write_text("")  # exists, but empty
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert first["request_costs"] is not None
+    assert first["request_costs"]["attempts"] == 0
+    assert first["request_costs"]["expected_attempts"] == 1
+    assert "costs_attempts_missing" in first["quality_flags"]
+
+
+def test_empty_decision_window_keeps_boundary_player_identity(tmp_path):
+    """Codex r1 finding 5: two consecutive boundaries make the first
+    window empty — the player identity must still come from the
+    boundary, never degrade to None."""
+    run_dir = _write_run(tmp_path, spectate=False, with_boundaries=True)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i == 1:
+            rebuilt.append({**row, "kind": "HEARTBEAT", "player_id": 0,
+                            "audit": "decision_boundary",
+                            "decision_id": "d-first", "directive_id": "dirA",
+                            "provider_requests": 1, "source": "model"})
+        if i == 2:
+            rebuilt.append({**row, "kind": "HEARTBEAT", "player_id": 0,
+                            "audit": "decision_boundary",
+                            "decision_id": "d-second", "directive_id": "dirB",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    samples, _ = export(run_dir)
+    superseded = next(s for s in samples
+                      if s["segment_id"].startswith("turn:1@d-first"))
+    assert superseded["player_id"] == 0
+
+
+def test_reused_decision_id_joins_costs_once_and_flags_ambiguity(tmp_path):
+    """Codex r1 finding 6: two boundaries sharing one decision_id cannot
+    attribute ledger rows to an occurrence — rows join ONLY the
+    operative sample; every sibling carrying the id is flagged."""
+    run_dir = _write_run(tmp_path, spectate=False)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i in (1, 2):
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-same", "directive_id": "dirX",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    ledger = [
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 5, "model": "m", "payload_hash": "h1",
+         "input_tokens": 9, "output_tokens": 1,
+         "decision_id": "d-same", "logical_request_id": "lr1",
+         "request_set_key": "h1:generation"},
+    ]
+    (run_dir / "llm_costs.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in ledger) + "\n")
+    samples, _ = export(run_dir)
+    same_id = [s for s in samples if s["decision_id"] == "d-same"]
+    assert len(same_id) == 2
+    assert len({s["segment_id"] for s in same_id}) == 2
+    joined = [s for s in same_id
+              if s["request_costs"]
+              and s["request_costs"]["attempts"] == 1]
+    assert len(joined) == 1  # exactly ONE sample carries the ROWS
+    assert joined[0]["segment_id"] == "turn:1"  # the operative one
+    # the superseded sibling emits a zero-attempt cost object with the
+    # missing flag — never the shared rows
+    superseded = next(s for s in same_id
+                      if s["segment_id"] != "turn:1")
+    assert superseded["request_costs"]["attempts"] == 0
+    for s in same_id:
+        assert "decision_id_reused_costs_ambiguous" in s["quality_flags"]

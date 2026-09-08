@@ -193,3 +193,23 @@ def test_fake_mod_default_is_unaffected_by_minors_or_fail_spectator_kwargs():
     assert a.cities == b.cities
     assert a.minors == set() and b.minors == set()
     assert a.fail_spectator is False and b.fail_spectator is False
+
+
+def test_fake_mod_roster_agrees_with_minors_flag():
+    """Codex r1 finding 7 (capr1-integration): ONE classification source
+    — the v0.4.0 Puppeteer.Roster dispatch must honour M4's minors
+    knob, or spectate discovery reports the city-state as an
+    unconfigured major while the SPECW roster calls it a city_state."""
+    from civ_arena.game.civ6 import world_capture
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+    mod = FakeMod(minors=True)
+    rows = mod.respond("print('Puppeteer.Roster()')")
+    minor_pids = {int(row.split("|")[1]) for row in rows
+                  if row.startswith("ROSTER|") and row.endswith("|minor")}
+    specw_rows, _truncated = world_capture.parse_roster(
+        mod.respond(world_capture.roster_read()))
+    specw_minors = {r["player_id"] for r in specw_rows
+                    if r.get("kind") == "city_state"}
+    assert minor_pids == specw_minors == {12}, (
+        f"Puppeteer.Roster says minors {minor_pids}; SPECW says "
+        f"{specw_minors}")

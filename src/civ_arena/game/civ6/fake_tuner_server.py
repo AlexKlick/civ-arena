@@ -1018,9 +1018,15 @@ class FakeMod:
             return [f"AMBIENT_WINDOW|{receipt}|{pid}"]
         if "Puppeteer.Roster" in code:
             # v0.4.0: ALL players with classes — the discovery truth every
-            # other read (OVX) cannot provide (alive-majors-only there)
+            # other read (OVX) cannot provide (alive-majors-only there).
+            # Codex r1 finding 7: ONE classification source — the
+            # spectate knob AND M4's minors flag both feed it, so a
+            # FakeMod(minors=True) roster agrees with its SPECW roster
+            # (discovery must not report a city-state as an
+            # unconfigured major).
             minors = set(self.spectate.get("minor_seats", [])) \
                 if self.spectate else set()
+            minors |= self.minors
             rows = [f"ROSTER|{pid}|"
                     f"{'minor' if pid in minors else 'major'}"
                     for pid in sorted(self.players)]
