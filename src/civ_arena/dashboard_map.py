@@ -107,6 +107,20 @@ def materialize(raw: bytes, *, player: int | None, spectator: bool, turn: int, r
                     selected = decision.get("selected")
                     if selected and "dest" in selected.get("args", {}):
                         minimap.coord(selected["args"]["dest"])
+    # The attached spectator world survives redaction with its coordinates
+    # intact: a redaction that corrupts one refuses the map instead of
+    # relocating omniscient territory.
+    world = display.get("world")
+    if isinstance(world, dict):
+        columns = world.get("owned_tiles_columns")
+        if isinstance(columns, dict):
+            for rows in columns.values():
+                for row in rows:
+                    minimap.coord(f"{row['q']},{row['r']}")
+        fog = world.get("fog_audit")
+        if isinstance(fog, dict):
+            for value in fog.get("disagree_coords", []):
+                minimap.coord(value)
     display["dashboard_source"] = {
         "requested_turn": turn,
         "partial_trailing_record_ignored": partial_tail,

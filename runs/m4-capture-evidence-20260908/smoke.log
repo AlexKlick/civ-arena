@@ -1,0 +1,25 @@
+[PASS] V1 · Python API attaches the world on the spectator route only
+       spectator bundle world receipt {'seq': 3704, 'turn': 34, 'source': 'spectator_world', 'ts': '2026-09-07T18:40:57.567292+00:00'}, owner columns {'0': 6, '1': 5, '12': 12}; player bundle has none; both pages rendered through minimap.render into the evidence dir (909655 / 376461 bytes)
+[PASS] V2 · territory tints and frontier paths render with data-owner
+       one tint + one frontier path per owner ['0', '1', '12'], each data-owner addressed, computed stroke-width 2.6px, fill none, strokes ['rgb(115,189,229)', 'rgb(184,203,101)', 'rgb(230,142,212)'] (engine palette rgb() strings), 62 frontier segments
+[PASS] V3 · the toggle hides and shows ONLY the world layer
+       unchecking "Spectator territory (omniscient capture)" set .layer-world to display:none while .layer-borders stayed inline and 3 tints were removed from paint; re-checking restored them
+[PASS] V4 · roster panel lists the city-state with kind and suzerain
+       3 roster rows; the city-state reads {'id': 'P12', 'civ': 'GENEVA', 'kind': 'city_state', 'suzerain': 'suzerain P0', 'alive': 'alive'}; the panel head prints "Engine roster at the spectator capture (seat 1 · turn 34)."
+[PASS] V5 · the two provenance rows print verbatim
+       both provenance rows print verbatim ("Territory: spectator capture at seat 1 · turn 34", "Observed ownership: seat packets") and the fog counters (engine visible 21 · engine not visible 1 · unavailable 1 · disagreeing 2) sit in the Provenance group
+[PASS] V6 · city-state city badge carries the roster name and star
+       exactly one city-state badge: {'owner': '12', 'label': 'GENEVA', 'capital': 1, 'pop': '3'} at the recorded coordinate 47,16 with a capital star path (majors' cities stay seat badges)
+[PASS] V7 · screenshots at 1440 and 390 with no horizontal overflow
+       territory-1440.png, roster-panel.png and territory-390.png written; at 390px scrollWidth<=innerWidth [390, 390]
+[PASS] V8 · the player route carries NO world layer
+       /map?…&player=0 over the same log: no world in the embedded data, no world layer paths, no toggle, and the roster panel reads "Spectator roster not recorded in this ex…"
+[PASS] V9 · zero page/console errors, same-origin requests only
+       0 page errors and 0 console script errors across 2 request(s), all same-origin ['http://127.0.0.1:32879/map']
+{
+  "passed": 9,
+  "failed": 0,
+  "failures": [],
+  "page_errors": 0,
+  "console_script_errors": 0
+}

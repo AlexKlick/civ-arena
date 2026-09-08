@@ -3,11 +3,15 @@ import hashlib
 import json
 import re
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from civ_arena.agents.llm.terrain_context import compact_entities, compact_terrain
-from civ_arena.minimap import build, canonical, digest, main, render
+from civ_arena.minimap import build, canonical, digest, main, render, validate_world
+
+WORLD_FIXTURE = json.loads(
+    (Path(__file__).parent / 'fixtures' / 'spectator_world_sample.json').read_text())
 
 
 def packet(pid=0, seq=10, turn=1, tile='0,0'):
@@ -43,6 +47,15 @@ def graph(pid=0, seq=5, turn=1):
             'graph': {'decisions': [{'unit_id': f'u{pid}:1', 'origin': '0,0',
                                     'candidates': [{'dest': '0,1', 'probability': .5}],
                                     'selected': {'args': {'dest': '0,1'}}}]}}
+def world_event(seq=5, turn=1, world=None, *, kind='HEARTBEAT', audit='spectator_world'):
+    """A world-carrying record: the hotseat audit or a spectate snapshot row."""
+    event = {'kind': kind, 'seq': seq, 'turn': turn, 'player_id': None,
+             'match_id': 'test-match', 'game_instance_id': 'test-instance',
+             'world': deepcopy(WORLD_FIXTURE if world is None else world)}
+    if audit is not None:
+        event['audit'] = audit
+        event['visibility_scope'] = 'spectator'
+    return event
 
 
 def test_player_export_has_no_other_player_receipts_or_graph():
@@ -311,4 +324,159 @@ def test_rendered_page_hosts_the_research_block_without_dynamic_html():
     html = render(build([bind(p)], [], player=0))
     assert 'id="research"' in html and '<h3>Research</h3>' in html
     assert 'renderResearch' in html and 'Could pick next (recorded options)' in html
+    assert 'textContent' in html and 'innerHTML' not in html and 'fetch(' not in html
+
+
+# -- spectator world consumption (M4) -----------------------------------------
+
+def test_spectator_route_attaches_the_latest_world_at_or_before_the_bundle_turn():
+    p0, p1 = packet(), packet(1, 11)
+    events = [source(p0), source(p1), world_event(12, 1), world_event(13, 2)]
+    result = build([p0, bind(p1)], events, spectator=True)
+    assert result['world']['receipt'] == {'seq': 12, 'turn': 1, 'source': 'spectator_world',
+                                          'ts': None}
+    assert result['world']['after_seat'] == 1
+    assert {owner: len(rows) for owner, rows
+            in result['world']['owned_tiles_columns'].items()} == {'0': 6, '1': 5, '12': 12}
+    assert [row['player_id'] for row in result['world']['roster']] == [0, 1, 12]
+    # The digest is computed over the bundle WITH its world: a different world
+    # is a different retained artifact.
+    other = deepcopy(WORLD_FIXTURE)
+    other['after_seat'] = 0
+    changed = build([p0, bind(p1)], [source(p0), source(p1), world_event(12, 1, other)],
+                    spectator=True)
+    assert changed['digest'] != result['digest']
+
+
+def test_snapshot_carried_worlds_compete_by_sequence_and_scope_is_checked():
+    p0, p1 = packet(), packet(1, 11)
+    snapshot = world_event(13, 1, kind='SPECTATOR_SNAPSHOT', audit=None)
+    snapshot.update(round=1, phase='turn_start')
+    events = [source(p0), source(p1), world_event(12, 1), snapshot]
+    result = build([p0, bind(p1)], events, spectator=True)
+    assert result['world']['receipt']['source'] == 'SPECTATOR_SNAPSHOT'
+    assert result['world']['receipt']['seq'] == 13
+    # An audit-shaped record without spectator scope never carries a world.
+    off_scope = world_event(14, 1)
+    off_scope['visibility_scope'] = 'referee'
+    result = build([p0, bind(p1)], events + [off_scope], spectator=True)
+    assert result['world']['receipt']['seq'] == 13
+
+
+def test_player_routes_attach_no_world_even_when_records_are_present():
+    p0, p1 = packet(), packet(1, 11)
+    events = [source(p0), source(p1), world_event(12, 1)]
+    result = build([p0], events, player=0)
+    assert 'world' not in result
+    assert not [line for line in result['limits'] if 'withheld' in line]
+    html = render(result)
+    assert '"owned_tiles_columns"' not in html and 'id="roster"' in html
+
+
+def test_unusable_world_attaches_nothing_and_warns_exactly_once():
+    p0, p1 = packet(), packet(1, 11)
+    broken = world_event(13, 1, {**deepcopy(WORLD_FIXTURE), 'schema': 2})
+    events = [source(p0), source(p1), world_event(12, 1), broken]
+    result = build([p0, bind(p1)], events, spectator=True)
+    # The latest record is chosen, then dropped: no fallback to an older world.
+    assert 'world' not in result
+    assert [line for line in result['limits'] if 'withheld' in line] == [
+        'Spectator world capture present but unusable; the omniscient territory '
+        'layer is withheld.']
+    html = render(result)
+    embedded = json.loads(re.search(r'<script id="data" type="application/json">(.*?)</script>',
+                                    html, re.DOTALL)[1])
+    assert 'world' not in embedded
+
+
+def test_spectator_world_without_any_record_attaches_nothing_and_stays_silent():
+    p0, p1 = packet(), packet(1, 11)
+    result = build([p0, bind(p1)], [source(p0), source(p1)], spectator=True)
+    assert 'world' not in result
+    assert not [line for line in result['limits'] if 'withheld' in line]
+
+
+@pytest.mark.parametrize('mutate', [
+    lambda w: w.update(schema=2),
+    lambda w: w.update(schema=True),
+    lambda w: w.update(extra_key=1),
+    lambda w: w.update(after_seat=-2),
+    lambda w: w.update(contexts={'roster': 'ingame', 'tiles': 'gamecore', 'palette': 'absent'}),
+    lambda w: w.update(contexts={'roster': 'gamecore', 'tiles': 'gamecore'}),
+    lambda w: w.update(grid={'w': 0, 'h': 60}),
+    lambda w: w['roster'][0].update(is_major='yes'),
+    lambda w: w['roster'][0].update(suzerain=-2),
+    lambda w: w['roster'].append({'player_id': 64, 'unmodelled': True}),
+    lambda w: w['players'][0].update(science='7.2'),
+    lambda w: w['players'][0].update(civics='CODE_OF_LAWS'),
+    lambda w: w['players'][0].update(researched=['']),
+    lambda w: w['cities'][0].pop('max_hp'),
+    lambda w: w['cities'][0].update(max_hp=99),
+    lambda w: w['cities'][0].update(city_id=7),
+    lambda w: w['cities'][0].update(owner=-1),
+    lambda w: w['cities'][0].update(q='1'),
+    lambda w: w['owned_tiles_columns']['12'].append({'q': 1, 'r': 1, 'terrain': 'GRASS'}),
+    lambda w: w['owned_tiles_columns']['12'][0].update(unmodelled=True),
+    lambda w: w['owned_tiles_columns']['12'][0].update(q=10001),
+    lambda w: w['owned_tiles_columns'].update({'x': []}),
+    lambda w: w['fog_audit']['disagree_coords'].append('not a coord'),
+    lambda w: w['fog_audit'].update(requested=-1),
+    lambda w: w['fog_audit'].update(disagree_coords=['1,1'] * 65),
+    lambda w: w['palette'].update({'12': {'primary': -1, 'secondary': 0}}),
+    lambda w: w['palette'].update({'12': {'primary': 0}}),
+    lambda w: w['truncated'].pop('world'),
+    lambda w: w.update(truncated={'tiles': False}),
+    lambda w: w.update(read_ms=-0.5),
+    lambda w: w.update(read_ms='12.5'),
+])
+def test_world_validation_rejects_shape_and_bound_defects(mutate):
+    world = deepcopy(WORLD_FIXTURE)
+    mutate(world)
+    with pytest.raises(ValueError):
+        validate_world(world)
+
+
+def test_world_validation_accepts_optional_keys_absent_and_bounds_the_size():
+    world = deepcopy(WORLD_FIXTURE)
+    for row in world['cities']:
+        row.pop('name')
+        row.pop('production_queue')
+        row.pop('hp', None)
+        row.pop('max_hp', None)
+    for rows in world['owned_tiles_columns'].values():
+        for row in rows:
+            row.pop('terrain')
+            row.pop('river')
+            row.pop('city')
+    world.pop('palette')
+    world['contexts']['palette'] = 'absent'
+    world.pop('game_era')
+    assert validate_world(world)['cities'][0] == {
+        'city_id': 'c0:131073', 'owner': 0, 'q': 1, 'r': 1, 'population': 7,
+        'is_capital': True, 'is_major': True, 'buildings': [], 'districts': []}
+    bloated = deepcopy(WORLD_FIXTURE)
+    bloated['players'][0]['civ_name'] = 'X' * 200
+    with pytest.raises(ValueError):
+        validate_world(bloated)
+    huge = {**deepcopy(WORLD_FIXTURE), 'grid': None,
+            'big': 'x' * (256 * 1024 + 1)}
+    with pytest.raises(ValueError):
+        validate_world(huge)
+
+
+def test_rendered_page_hosts_the_world_layer_contract_strings_and_roster():
+    p0, p1 = packet(), packet(1, 11)
+    result = build([p0, bind(p1)], [source(p0), source(p1), world_event(12, 1)],
+                   spectator=True)
+    html = render(result)
+    embedded = json.loads(re.search(r'<script id="data" type="application/json">(.*?)</script>',
+                                    html, re.DOTALL)[1])
+    assert embedded['world']['owned_tiles_columns'] == result['world']['owned_tiles_columns']
+    assert 'id="roster"' in html and '<h3>Roster</h3>' in html
+    script = re.search(r'<script>(.*?)</script>', html, re.DOTALL)[1]
+    for needle in ('Spectator territory (omniscient capture)',
+                   'Territory: spectator capture at seat ',
+                   'Observed ownership: seat packets',
+                   'territorySegments', 'paletteColor'):
+        assert needle in script, needle
     assert 'textContent' in html and 'innerHTML' not in html and 'fetch(' not in html

@@ -1,12 +1,13 @@
 """Behavioral contracts for the match room's comparison projections."""
 import json
+from copy import deepcopy
 
 import pytest
 
 from civ_arena import dashboard as d
 from civ_arena import dashboard_compare as c
 from test_dashboard import NOW, STAMP, event, identity, start, write_run
-from test_minimap import bind, source
+from test_minimap import WORLD_FIXTURE, bind, source, world_event
 
 RESEARCH_NOTE = ("Research sets come from each seat's own retained request packets. Seats are "
                  'asynchronous, so the two as-of turns can differ. Retained data, not live.')
@@ -512,3 +513,68 @@ def test_seat_turns_always_carry_comparison_keys(tmp_path):
     result = load(tmp_path, [start(), identity(), lease(1, 0)])
     turn = result['turns'][0]
     assert turn['strategy_delta'] is None and turn['economy'] == [] and turn['growth'] is None
+
+
+# -- spectator world timeline series (M4) --------------------------------------
+
+def world_row(turn, seq=900):
+    return world_event(seq, turn)
+
+
+def test_timeline_gains_spectator_science_and_culture_series_tagged_by_source(tmp_path):
+    events = [start(), identity(), lease(1, 0), audit(1, 0), lease(1, 1), audit(1, 1),
+              world_row(1)]
+    result = load(tmp_path, events)
+    series = result['timeline']['series']
+    assert [row['key'] for row in series] == [
+        'elapsed_s', 'requests', 'calls', 'allowed_mutations', 'gold', 'techs', 'units',
+        'cities', 'science', 'culture']
+    assert series[-2] == {'key': 'science', 'label': 'Science per turn', 'source': 'spectator'}
+    assert series[-1] == {'key': 'culture', 'label': 'Culture per turn', 'source': 'spectator'}
+    assert 'source' not in series[0]
+    first, second = (seat_row(result, pid, 1) for pid in (0, 1))
+    assert first['science'] == 7.2 and first['culture'] == 3.1
+    assert first['sources']['science'] == 'spectator' == first['sources']['culture']
+    assert second['science'] == 5.5 and second['culture'] == 2.0
+    # Seat packets stay the provenance of everything they recorded.
+    assert first['sources']['gold'] is None
+
+
+def test_spectator_series_stay_absent_without_attached_values(tmp_path):
+    events = [start(), identity(), lease(1, 0), audit(1, 0), world_row(5)]
+    result = load(tmp_path, events)
+    assert [row['key'] for row in result['timeline']['series']] == [
+        'elapsed_s', 'requests', 'calls', 'allowed_mutations', 'gold', 'techs', 'units', 'cities']
+    assert 'science' not in seat_row(result, 0, 1)
+    # A capture whose players carry no yields adds nothing either.
+    bare = deepcopy(WORLD_FIXTURE)
+    for player in bare['players']:
+        for field in ('science', 'culture', 'gold', 'gold_per_turn', 'faith', 'upkeep'):
+            player.pop(field)
+    write_run(tmp_path, [start(), identity(), lease(1, 0), audit(1, 0),
+                         world_event(900, 1, bare)], name='match-bare')
+    result = d.DashboardStore(tmp_path).load('match-bare', now=NOW)
+    assert len(result['timeline']['series']) == 8
+    assert 'spectator_world_summary' in result
+    assert result['spectator_world_summary']['records'][0]['players'][0]['science'] is None
+
+
+def test_spectator_turn_without_a_capture_keeps_a_gap_never_interpolated(tmp_path):
+    events = [start(), identity(), lease(1, 0), audit(1, 0), lease(2, 0), audit(2, 0),
+              lease(3, 0), audit(3, 0), world_row(2)]
+    result = load(tmp_path, events)
+    # A gap is an absent key, never a carried-forward or zeroed value.
+    assert 'science' not in seat_row(result, 0, 1)
+    assert seat_row(result, 0, 2)['science'] == 7.2
+    assert 'science' not in seat_row(result, 0, 3)
+
+
+def test_latest_capture_per_turn_wins_for_the_timeline(tmp_path):
+    later = world_event(901, 1)
+    later['world'] = deepcopy(WORLD_FIXTURE)
+    later['world']['players'][0]['science'] = 42.0
+    events = [start(), identity(), lease(1, 0), audit(1, 0), world_row(1), later]
+    result = load(tmp_path, events)
+    assert seat_row(result, 0, 1)['science'] == 42.0
+    records = result['spectator_world_summary']['records']
+    assert [row['turn'] for row in records] == [1] and records[0]['seq'] == 5

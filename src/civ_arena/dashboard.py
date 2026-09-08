@@ -580,12 +580,19 @@ def project_events(events, warnings, redactor):
         turn['notes'] = turn['notes'][-MAX_NOTES:]
     if len(result_turns) > MAX_TURNS:
         warnings.append('Turn display limit reached; older turns omitted.')
-    return {'agents': list(agents.values())[:16], 'turns': result_turns[-MAX_TURNS:],
-            'metrics': {'completed_rounds': rounds, 'completed_seat_turns': len(complete_ids),
-                        'requests': sum(requests.values()), 'violations': violations,
-                        'spectator_snapshots': spectator_snapshots, 'human_turns': human_turns},
-            'research': compare['research'], 'timeline': compare['timeline'],
-            'warnings': list(dict.fromkeys(warnings))[:40], '_incomplete': incomplete}
+    # Additive spectator-economy summary; absent when the run recorded no
+    # validated spectator world captures. Computed before the payload so its
+    # warnings land in the same bounded list as every other projection's.
+    world_summary = dashboard_compare.spectator_world_summary(events, warnings, redactor)
+    payload = {'agents': list(agents.values())[:16], 'turns': result_turns[-MAX_TURNS:],
+               'metrics': {'completed_rounds': rounds, 'completed_seat_turns': len(complete_ids),
+                           'requests': sum(requests.values()), 'violations': violations,
+                           'spectator_snapshots': spectator_snapshots, 'human_turns': human_turns},
+               'research': compare['research'], 'timeline': compare['timeline'],
+               'warnings': list(dict.fromkeys(warnings))[:40], '_incomplete': incomplete}
+    if world_summary is not None:
+        payload['spectator_world_summary'] = world_summary
+    return payload
 
 
 def drop_comparison_row(payload):

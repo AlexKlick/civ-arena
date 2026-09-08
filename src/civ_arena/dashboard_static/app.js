@@ -93,6 +93,21 @@
     return [agents[0] || {player_id: 0}, agents[1] || {player_id: 1}];
   }
   function seatTurn(agent) { return selectedTurns().find(turn => String(turn.player_id) === String(agent.player_id)); }
+  // The latest spectator world capture at or before the selected turn (the same
+  // latest-at-or-before-cutoff rule the observed map uses). Null when the run
+  // recorded no validated captures, or none this early.
+  function spectatorCaptureAt(turn) {
+    const records = state.data?.spectator_world_summary?.records;
+    if (!Array.isArray(records)) return null;
+    const cutoff = Number(turn);
+    const bounded = Number.isFinite(cutoff) ? cutoff : Number.POSITIVE_INFINITY;
+    let latest = null;
+    for (const row of records) {
+      if (!row || typeof row !== 'object' || !Number.isFinite(Number(row.turn))) continue;
+      if (Number(row.turn) <= bounded) latest = row;
+    }
+    return latest;
+  }
   function updateConnection(ok, message) {
     $('connectionDot').className = `status-dot ${ok ? 'connected' : 'error'}`;
     $('connectionText').textContent = message;
@@ -160,6 +175,36 @@
         append(timings, append(element('div'), element('span', '', label), element('strong', '', value)));
       });
       append(card, timings);
+      // Spectator economy (M4): the latest omniscient capture at or before the
+      // selected turn. It is operator evidence with its own provenance line —
+      // never presented as the seat's own packet, and "not recorded" stays
+      // "not recorded".
+      const capture = spectatorCaptureAt(state.turn);
+      const economyRow = capture && Array.isArray(capture.players)
+        ? capture.players.find(row => String(row.player_id) === String(agent.player_id)) : null;
+      const economy = element('section', 'seat-spectator');
+      append(economy, append(element('div', 'notes-heading'),
+        element('h3', '', 'Spectator capture · economy'),
+        element('span', '', capture ? `seat ${capture.after_seat} · turn ${capture.turn}` : '')));
+      if (!capture || !economyRow) {
+        append(economy, element('p', 'note-empty', 'Spectator economy: not recorded.'));
+      } else {
+        const yieldValue = value => finite(value)
+          ? (Number.isInteger(value) ? value.toLocaleString() : value.toFixed(1)) : '—';
+        const facts = element('div', 'seat-timings spectator-facts');
+        [['Science', yieldValue(economyRow.science)], ['Culture', yieldValue(economyRow.culture)],
+          ['Faith', yieldValue(economyRow.faith)], ['Gold/turn', yieldValue(economyRow.gold_per_turn)],
+          ['Era', economyRow.era || 'not recorded'],
+          ['Civics', economyRow.civics_count != null ? String(economyRow.civics_count) : 'not recorded']]
+          .forEach(([label, value]) => {
+            append(facts, append(element('div'), element('span', '', label), element('strong', '', value)));
+          });
+        append(economy, facts);
+        if (Array.isArray(economyRow.civics) && economyRow.civics.length) {
+          append(economy, element('p', 'tiny', `Civics: ${economyRow.civics.join(', ')}`));
+        }
+      }
+      append(card, economy);
       const notes = (turn?.notes || []).filter(note => isAccepted(note.status));
       const noteBox = element('section', 'seat-notes');
       append(noteBox, append(element('div', 'notes-heading'), element('h3', '', 'Recorded plans & notes'),

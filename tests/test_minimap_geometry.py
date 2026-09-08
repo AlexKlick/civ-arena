@@ -354,3 +354,72 @@ def test_concatenated_script_passes_node_check(tmp_path):
                           timeout=60)
     assert proc.returncode == 0, proc.stderr
     assert script_source().startswith("'use strict';")
+
+
+# -- spectator world territory (M4) -------------------------------------------
+
+def test_territory_segments_two_owners_interior_and_map_edge():
+    out = run('''
+const world = {owned_tiles_columns: {
+  '0': [{q: 0, r: 0}, {q: 1, r: 0}],
+  '1': [{q: 2, r: 0}],
+}};
+const roster = new Map([[0, {player_id: 0, is_major: true}],
+                        [1, {player_id: 1, is_major: true}]]);
+const groups = territorySegments(world, roster, 1.6);
+const counts = Object.fromEntries([...groups].map(([id, g]) => [id, g.segments.length]));
+const rosterOf = Object.fromEntries([...groups].map(([id, g]) => [id, g.roster.player_id]));
+const g0 = groups.get(0), g1 = groups.get(1);
+// Owner 0: (0,0) keeps 5 of 6 edges (the (1,0) edge is interior); (1,0) keeps 5
+// of 6 (interior with (0,0), frontier against owner 1 at (2,0)).
+console.log(JSON.stringify({counts, rosterOf, grouped: [...groups.keys()],
+  owner0IsFrontierOnly: g0.segments.every(s => Number.isFinite(s[0])),
+  path: segmentPath(g1.segments), pathMoves: segmentPath(g0.segments).split(' M').length}));''')
+    assert out['counts'] == {'0': 10, '1': 6}
+    assert out['rosterOf'] == {'0': 0, '1': 1}
+    assert out['grouped'] == [0, 1]
+    # One path per owner, built from move-to/line-to segments over the inset edge.
+    assert out['path'].startswith('M') and out['pathMoves'] == 10
+
+
+def test_territory_segments_same_owner_blob_draws_only_the_outer_ring():
+    out = run('''
+// A filled hex ring (centre + 6 neighbours, one owner): the six interior edges
+// of the centre tile disappear, only the outer frontier remains.
+const ring = [[0, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1], [1, 0]];
+const world = {owned_tiles_columns: {'3': ring.map(([q, r]) => ({q, r}))}};
+const groups = territorySegments(world, null, 1.6);
+console.log(JSON.stringify({owners: [...groups.keys()],
+  segments: groups.get(3).segments.length, inset: 1.6}));''')
+    assert out['owners'] == [3]
+    # Outer ring of a 7-tile hexagon: 42 tile edges minus both sides of the 12
+    # shared borders (6 centre-ring + 6 ring-ring) = 18 frontier segments.
+    assert out['segments'] == 18
+
+
+def test_territory_segments_empty_or_malformed_worlds_yield_nothing():
+    out = run('''
+const shapes = [
+  {}, null, {owned_tiles_columns: {}},
+  {owned_tiles_columns: {x: [{q: 0, r: 0}]}},
+  {owned_tiles_columns: {'0': 'nope'}},
+  {owned_tiles_columns: {'0': [null, 7, {q: 0}, {q: 0.5, r: 0}, {q: 1, r: 0}]}},
+];
+console.log(JSON.stringify(shapes.map(w => territorySegments(w, null, 1.6).size)));''')
+    assert out == [0, 0, 0, 0, 0, 1]
+
+
+def test_palette_color_decodes_abgr_and_falls_back_to_null():
+    out = run('''
+const cases = [0xFFE5BD73, 0, 0x000000FF, 0xFFFFFFFF, -1, 4294967296, 4294967295.5,
+              '0xFFE5BD73', null, undefined, true, NaN, Infinity];
+console.log(JSON.stringify({
+  decoded: cases.map(paletteColor),
+  strings: [rgbString(paletteColor(0xFFE5BD73)), rgbString(paletteColor(0)),
+            rgbString(null)],
+}));''')
+    # ABGR: red is the low byte, green the second, blue the third; alpha ignored.
+    assert out['decoded'][:4] == [{'r': 115, 'g': 189, 'b': 229}, {'r': 0, 'g': 0, 'b': 0},
+                                  {'r': 255, 'g': 0, 'b': 0}, {'r': 255, 'g': 255, 'b': 255}]
+    assert out['decoded'][4:] == [None] * 9
+    assert out['strings'] == ['rgb(115,189,229)', 'rgb(0,0,0)', None]

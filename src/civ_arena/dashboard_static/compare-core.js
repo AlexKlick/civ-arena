@@ -153,6 +153,17 @@ const Core = (() => {
 
   /* ------------------------------------------------------------------ charts */
 
+  // A series can carry a provenance: 'spectator' marks values that come from
+  // omniscient spectator captures, never from the seats' own packets. The title
+  // is the one place that decision is made, so the chart caption, the table twin
+  // and the tests cannot drift apart.
+  function seriesTitle(entry) {
+    const row = entry !== null && typeof entry === 'object' ? entry : {};
+    const label = row.label != null && String(row.label) !== '' ? String(row.label)
+      : String(row.key != null ? row.key : '');
+    return row.source === 'spectator' ? `${label} · spectator capture` : label;
+  }
+
   function niceMax(value) {
     if (!(value > 0)) return 1;
     const exponent = Math.pow(10, Math.floor(Math.log10(value)));
@@ -277,8 +288,8 @@ const Core = (() => {
   }
 
   return {finite, isAccepted, humanize, short, label, number, fmt, foldSeat, diffOf, statusFor,
-    optionsNote, optionsView, halfState, seatSeries, niceMax, seriesSegments, axisTicks,
-    directiveText, economyLines, growthText, treeDepths, UNRETAINED};
+    optionsNote, optionsView, halfState, seatSeries, seriesTitle, niceMax, seriesSegments,
+    axisTicks, directiveText, economyLines, growthText, treeDepths, UNRETAINED};
 })();
 
 if (typeof window !== 'undefined') window.civArenaCompareCore = Core;

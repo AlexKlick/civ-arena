@@ -151,6 +151,69 @@ normalised recorded weight (clamped to 0–1, three decimals in the text), and t
 map label carries the two-decimal `weightText` form. The mark contract lives in
 [observed-minimap-preview.md](observed-minimap-preview.md).
 
+## Spectator world territory layer (M4)
+
+Spectator-scope exports can now carry one **spectator world** — an omniscient
+engine capture (roster, owned tiles, cities, player economy, engine palette, fog
+audit) produced by the M4 capture lane. Two record kinds carry it on the event
+stream: the hotseat `spectator_world` audit (`visibility_scope: "spectator"`) and
+a `SPECTATOR_SNAPSHOT` whose payload carries a `world` block. The viewer selects
+the **latest record at or before the bundle's as-of turn** (the highest snapshot
+turn across seats), validates it whole against the contract schema — every
+coordinate through the same canonical `coord()` check as observations, plus the
+producer's row bounds (roster ≤ 64, cities ≤ 256, ≤ 4096 owned tile rows,
+≤ 64 disagreeing coordinates, canonical package ≤ 256 KiB) — and attaches it as
+a top-level `world` key. A present-but-unusable world attaches **nothing** (never
+a partial world) and prints one limits line; the selection runs **only on the
+spectator route** — player exports ignore spectator-scope records entirely, so
+the world can never leak into a player view.
+
+On the atlas the world draws as its own layer between the observed tints and the
+observed borders, so omniscient capture sits underneath seat observation:
+
+- **Territory tints and frontiers** come from `owned_tiles_columns` via
+  `territorySegments`: every owned tile is known here, so every edge is either a
+  frontier (adjacent owner differs, or the neighbour is unowned — the territory's
+  map edge) or interior (same owner, no segment). There is no `unknown_beyond`
+  dishonesty mark in this layer because there is no unknown: that rule belongs to
+  the seat-observed view, which keeps it unchanged. World frontiers stroke at 2.6
+  against the observed 2.2 so the two provenances stay visually distinct.
+- **The two provenance rows print verbatim** in the "Territory (spectator
+  capture)" legend group and never blend:
+  `Territory: spectator capture at seat P · turn T` (the capture's recorded
+  `after_seat` and turn) and `Observed ownership: seat packets`. The fog audit
+  counters (`engine_visible`, `engine_not_visible`, `unavailable`, `disagreeing`)
+  print in the Provenance group.
+- **The toggle** — a `Spectator territory (omniscient capture)` checkbox, default
+  checked when a world exists — switches ONLY this layer. Observed borders,
+  tints, the M1 honesty layer and the M3 decision overlay stay on.
+- **Owner colour** uses the engine palette int when it is present AND decodes,
+  else falls back to the M1 owner class. The ints are interpreted as 32-bit
+  ABGR-packed words (red = low byte) in the single `paletteColor` function; if a
+  live probe later confirms a different packing, only that function changes. The
+  ints are data on the wire and only become `rgb()` strings at runtime — no hex
+  literals enter the CSS.
+- **City-state city badges** (cities whose roster row has `is_major == false`)
+  carry the roster name and a star path for `is_capital` — a drawn path, never a
+  font glyph. Majors' cities are deliberately not duplicated here: they already
+  appear as seat badges from the seats' own packets, and duplicating them would
+  blend the two provenances.
+- **The roster panel** (`#roster`, below Research) lists the engine roster —
+  civ, leader, kind, suzerain, alive — with `no suzerain recorded` for -1. Blank
+  stays unsupplied throughout: a missing tile key is never a value, and no % of
+  map explored or map extent is ever synthesised from a world.
+
+In the match room, `/api/run` carries an additive `spectator_world_summary`
+(absent when the run has no validated captures): one bounded record per captured
+turn with each major's yields, era and civics plus the capture's `after_seat`.
+Seat cards show the record at or before the selected turn under a
+"Spectator capture · economy" heading with its own provenance line, or
+**"not recorded"**. The timeline small-multiples gain optional science and
+culture series when captures recorded them; the series list and the table twin
+tag them `source: spectator` (caption suffix "· spectator capture") so spectator
+data never reads as a seat's own packet, and a turn without a capture keeps a
+gap rather than an interpolated value.
+
 ## Verified findings
 
 - Repository proof: **75 focused tests passed, zero failed/skipped**, in 1.22s;
