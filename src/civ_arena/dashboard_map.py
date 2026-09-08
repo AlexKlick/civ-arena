@@ -68,7 +68,13 @@ def materialize(raw: bytes, *, player: int | None, spectator: bool, turn: int, r
                 "projected_state": state,
             }
         )
-    if not packets:
+    # Codex r2 finding 11: spectate-only runs carry no strategy packets
+    # (the player route still requires >= 1 packet — a player bundle
+    # without any observation is not a bundle). The spectator route may
+    # have ZERO packets and still render the territory layer from the
+    # world's own records; the no-packets rejection stays for player
+    # routes.
+    if not packets and not spectator:
         raise ValueError("no retained model observation packets at selected turn")
     bundle = minimap.build(packets, events, player=player, spectator=spectator)
     source_digest = bundle["digest"]
