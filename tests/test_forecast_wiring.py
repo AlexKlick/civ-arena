@@ -246,9 +246,16 @@ async def test_lost_pending_city_resolves_through_the_monitor(forecast_setup):
 
 
 async def test_comparison_defense_totals_come_from_the_policy_result(forecast_setup):
-    """R3 regression: the comparison's defense numbers are the policy result's
-    own totals, transmitted verbatim — never recomputed over candidates."""
+    """R3/R4 regression: the comparison's defense numbers are the policy
+    result's own totals, transmitted verbatim — never recomputed over
+    candidates. The two owned WARRIORs satisfy the defense goal (2 = 2·one
+    city), which makes every defender candidate ineligible: an
+    eligible-candidate recompute would transmit 0, the policy says 2."""
     controller, runtime, model, facade, records = forecast_setup
+    facade.units.extend(
+        {'unit_id': f'u0:{n}', 'owner_id': 0, 'type': 'WARRIOR', 'coord': '0,0',
+         'movement': 2, 'hp': 100, 'max_hp': 100, 'health_valid': True}
+        for n in (2, 3))
     facade.units.append({'unit_id': 'u9:1', 'owner_id': 1, 'type': 'WARRIOR',
                          'coord': '2,0', 'is_barbarian': True})
     await advance(controller, runtime, facade, 1)
@@ -256,11 +263,13 @@ async def test_comparison_defense_totals_come_from_the_policy_result(forecast_se
     economy = next(row for row in records
                    if row['audit'] == 'strategy_economy'
                    and row.get('tool') == 'set_city_production')
+    policy = economy['production_policy']
+    # the fixture must actually create the distinguishing condition
+    assert policy['defenders_owned_queued_reserved'] == 2
+    assert policy['defense_goal'] == 2
     contingency = forecast['comparison']['threat_contingency']
-    assert contingency['defenders_owned_queued_reserved'] == \
-        economy['production_policy']['defenders_owned_queued_reserved']
-    assert contingency['defense_goal'] == \
-        economy['production_policy']['defense_goal']
+    assert contingency['defenders_owned_queued_reserved'] == 2
+    assert contingency['defense_goal'] == 2
     assert contingency['shortfall_basis'] == 'policy_result'
 
 

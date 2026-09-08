@@ -24,6 +24,8 @@ reasons why).
 | `6c67e7b` | engine-scenario + mutation-hardening tests |
 | `2f150d9` | Codex review round 1 — all five findings fixed |
 | `7b23b72` | Codex review round 2 — all four findings fixed |
+| `294f5a8` | Codex review round 3 — two fix-introduced bugs + one coverage gap fixed |
+| (r4) | Codex review round 4 — source GO; two coverage gaps closed, mutation-verified |
 
 ### Codex R1 (all five findings verified real, all fixed)
 
@@ -62,6 +64,45 @@ reasons why).
 4. **Threat branch with no eligible defender returned alphabetical order**
    instead of the policy's fall-through — now mirrors `choose_production`
    exactly: no eligible defender ⇒ normal cascade.
+
+### Codex R3 (two fix-introduced bugs + one coverage gap on the R2 fixes, fixed in `294f5a8`)
+
+1. **Losing a pending city could abort the controller** (P1) — the R2 catalog
+   pre-read read *every* pending city; the native accessor rejects a captured
+   or razed city id (`production observation city unavailable` → MatchAborted)
+   before `observe()`'s `invalidated_city_unobserved` handling could run. The
+   pre-read now filters to the freshly observed owned roster; a lost city
+   resolves through the monitor (wiring regression with a captured second
+   city, red-verified).
+2. **A healthy completed unit could acquire a false rate censor** (P2) — the
+   recheck compared completion dates without checking the build was still
+   queued, so a repeatable item's fresh catalog row (a NEW build's countdown,
+   e.g. another WARRIOR at 2 turns) false-censored the on-time completion it
+   belonged to. The recheck now fires only while the monitored item is still
+   the queue head — the same scope `queue_unchanged` always documented — and
+   missing-city resolution precedes any recheck (regression red-verified).
+3. **The defense-total regression did not distinguish the counting bases**
+   (coverage) — eligible ARCHER with `effective=2` made the old
+   eligible-candidate sum agree with the policy totals. The regression now
+   uses zero-inventory ARCHER + policy-owned defenders (mutation-verified:
+   the old basis flips to ARCHER), and a controller regression pins verbatim
+   transmission of the policy result's own
+   `defenders_owned_queued_reserved`/`defense_goal`.
+
+### Codex R4 (source GO, no fix-introduced defect; two coverage gaps closed)
+
+1. **Controller defense-forwarding test could not detect a recompute** — the
+   fixture had no owned defenders, so policy total and eligible-candidate sum
+   both equaled 0. The regression now carries two owned WARRIORs (goal 2·one
+   city satisfied ⇒ every defender candidate ineligible): mutation replacing
+   the policy totals with an eligible-candidate sum transmits 0 and the test
+   fails `0 == 2`.
+2. **Replacement path had no fresh-catalog regression** — completion was
+   pinned only with an empty queue. Two regressions now cover a replaced
+   build and a monitored item behind another queue head, each with a fresh
+   conflicting catalog row: both must resolve `invalidated_queue_changed`
+   with no rate censor. Mutations weakening the gate to queue-nonempty and
+   to membership both fail these tests.
 
 ### Forecast contract (`economic_forecast.py`)
 

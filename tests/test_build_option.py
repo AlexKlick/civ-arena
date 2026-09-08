@@ -140,6 +140,34 @@ def test_completed_item_is_not_rate_censored_by_its_own_fresh_row():
     assert "rate_estimate_changed" not in events_by_kind(events)
 
 
+def test_replaced_item_with_fresh_row_invalidates_without_rate_censor():
+    """R4 regression: a replaced build resolves as invalidated_queue_changed;
+    the monitored item's fresh row — conflicting estimate included — is a NEW
+    build's countdown and must not fire the rate recheck."""
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())  # MONUMENT, completion turn 13
+    events = monitor.observe(
+        turn=11, cities=[city(queue=["GRANARY"])], units=[unit()],
+        catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                            "cost": 25, "turns": 9}]})  # implied 20 != 13
+    assert events_by_kind(events)["invalidated_queue_changed"]["item_id"] == "MONUMENT"
+    assert "rate_estimate_changed" not in events_by_kind(events)
+    assert monitor._pending == {}
+
+
+def test_item_behind_another_queue_head_is_not_rechecked():
+    """Head equality, not membership: a monitored item sitting second in the
+    queue is no longer the build its fresh catalog row speaks for."""
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    events = monitor.observe(
+        turn=11, cities=[city(queue=["GRANARY", "MONUMENT"])], units=[unit()],
+        catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                            "cost": 25, "turns": 9}]})
+    assert events_by_kind(events)["invalidated_queue_changed"]["item_id"] == "MONUMENT"
+    assert "rate_estimate_changed" not in events_by_kind(events)
+
+
 def test_zero_or_absent_turns_row_never_censors():
     monitor = DevelopmentOptionMonitor(0)
     monitor.register(forecast(turns=3, turn=10))
