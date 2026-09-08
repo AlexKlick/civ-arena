@@ -124,10 +124,12 @@ def civ6_window_geometry() -> tuple[int, int, int, int]:
     AND the gate screenshots. Scan EVERY client, keep the largest
     geometry that parses."""
     out = run(["bash", "-c",
-               "xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*'"]).stdout
+               f"DISPLAY={DISPLAY} xprop -root _NET_CLIENT_LIST "
+               f"| grep -o '0x[0-9a-f]*'"]).stdout
     best: tuple[int, int, int, int] | None = None
     for wid in out.split():
-        info = run(["xwininfo", "-id", wid]).stdout
+        info = run(["bash", "-c",
+                    f"DISPLAY={DISPLAY} xwininfo -id {wid}"]).stdout
         geo: dict[str, int] = {}
         for line in info.splitlines():
             for key in ("Absolute upper-left X", "Absolute upper-left Y",
@@ -422,6 +424,10 @@ async def run_arch1_session(opts) -> int:
     # 5. census the demote, re-flag, gate the flip. Codex r1 P2-9: the
     #    gate requires BOTH the re-flag's own read-back (slot + cfg-human)
     #    and the GameCore census row — either alone can lie.
+    # census-1 needs the tuner reconnect cooldown too (the pivot run
+    # died here: the census ran right after the ingame-2 poll's
+    # connection closed and the single-client refusal returned EMPTY)
+    time.sleep(8)
     r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-1]", r.stdout.strip())
