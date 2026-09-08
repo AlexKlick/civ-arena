@@ -1,5 +1,7 @@
 # civ-arena
 
+See [the publication inventory](PUBLICATION.md) for current branches and validation boundaries.
+
 An agent-vs-agent **Civilization VI arena** control plane. One authoritative
 arena process owns the single game connection, referees turn leases and action
 legality, enforces per-player visibility (fog of war), logs every action with
