@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from civ_arena import dashboard_compare
+
 MAX_LOG_BYTES = 32 * 1024 * 1024
 MAX_SUMMARY_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -31,12 +33,22 @@ MAX_INDEX_BYTES = 64 * 1024 * 1024
 MAX_TURNS = 120
 MAX_CALLS = 128
 MAX_NOTES = 32
+MAX_TECH_TREE_BYTES = 256 * 1024
+MAX_TECH_NODES = 512
+MAX_TECH_EDGES = 2048
+MAX_TECH_ROW = 8
 NOTE_TOOLS = frozenset({'write_diary', 'set_goal', 'record_prediction', 'record_lesson'})
 STATIC_FILES = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js',
+                '/compare-core.js': 'compare-core.js', '/compare.js': 'compare.js',
                 '/style.css': 'style.css', '/styles.css': 'styles.css',
                 '/favicon.svg': 'favicon.svg'}
 SENSITIVE = re.compile(r'api.?key|password|secret|credential|authorization|cookie|'
                        r'access.?token|refresh.?token|auth.?token|private.?key', re.I)
+TECH_ERAS = ('ANCIENT', 'CLASSICAL', 'MEDIEVAL', 'RENAISSANCE',
+             'INDUSTRIAL', 'MODERN', 'ATOMIC', 'INFORMATION')
+TECH_ID = re.compile(r'^[A-Z0-9_]{1,40}$')
+TECH_TREE_KEYS = frozenset({'version', 'scope', 'effective_ruleset', 'group_semantics',
+                            'catalog_digest', 'source', 'eras', 'nodes', 'edges'})
 
 
 class InvalidRun(ValueError):
@@ -116,6 +128,67 @@ def parse_json(raw):
     def reject_constant(value):
         raise ValueError('non-finite JSON number')
     return json.loads(raw, parse_constant=reject_constant)
+
+
+def bounded_text(value, label):
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise ValueError(f'tech tree {label} is not a bounded string')
+    return value
+
+
+def validate_tech_tree(payload):
+    """Accept only a bounded, self-consistent catalog derivative for display.
+
+    The tree is layout evidence from a base source catalog, not this match's
+    effective ruleset; an unverifiable asset is withheld rather than drawn.
+    """
+    if not isinstance(payload, dict) or type(payload.get('version')) is not int \
+            or payload['version'] != 1:
+        raise ValueError('unsupported tech tree version')
+    if set(payload) != TECH_TREE_KEYS:
+        raise ValueError('tech tree carries unmodelled or missing top-level keys')
+    if payload.get('eras') != list(TECH_ERAS):
+        raise ValueError('tech tree eras are not the recorded era order')
+    for key in ('scope', 'effective_ruleset', 'group_semantics', 'catalog_digest'):
+        bounded_text(payload.get(key), key)
+    source = payload.get('source')
+    if not isinstance(source, dict) or set(source) != {'name', 'sha256'}:
+        raise ValueError('tech tree source is not a name and digest pair')
+    for key, value in source.items():
+        bounded_text(value, f'source {key}')
+    nodes = payload.get('nodes')
+    if not isinstance(nodes, list) or len(nodes) > MAX_TECH_NODES:
+        raise ValueError('tech tree nodes are unavailable or exceed the display bound')
+    eras = {}
+    for node in nodes:
+        if not isinstance(node, dict) or set(node) != {'id', 'era', 'row', 'cost'}:
+            raise ValueError('tech tree node does not have the expected fields')
+        if not isinstance(node['id'], str) or not TECH_ID.match(node['id']) or node['id'] in eras:
+            raise ValueError('tech tree node id is unusable or duplicated')
+        if node['era'] not in TECH_ERAS:
+            raise ValueError('tech tree node era is unknown')
+        if type(node['row']) is not int or not -MAX_TECH_ROW <= node['row'] <= MAX_TECH_ROW:
+            raise ValueError('tech tree node row is outside the layout range')
+        if type(node['cost']) is not int or node['cost'] < 0:
+            raise ValueError('tech tree node cost is not a non-negative integer')
+        eras[node['id']] = TECH_ERAS.index(node['era'])
+    edges = payload.get('edges')
+    if not isinstance(edges, list) or len(edges) > MAX_TECH_EDGES:
+        raise ValueError('tech tree edges are unavailable or exceed the display bound')
+    for edge in edges:
+        if not isinstance(edge, list) or len(edge) != 2 or not all(
+                isinstance(item, str) and item in eras for item in edge):
+            raise ValueError('tech tree edge does not name two known technologies')
+        if eras[edge[1]] > eras[edge[0]]:
+            raise ValueError('tech tree edge points backwards through the eras')
+    return payload
+
+
+def tech_tree(assets: Path):
+    raw, limited = read_artifact(assets, 'tech-tree.json', MAX_TECH_TREE_BYTES)
+    if raw is None or limited:
+        raise InvalidRun('tech tree asset unavailable or exceeds the read limit')
+    return validate_tech_tree(parse_json(raw))
 
 
 class DashboardStore:
@@ -352,7 +425,8 @@ def project_events(events, warnings, redactor):
             turns[key] = {'turn': turn, 'player_id': pid, 'agent_id': redactor.text(aid),
                           'started_at': event_time(event), 'ended_at': None, 'status': 'active',
                           'elapsed_s': None, 'requests': 0, 'calls': [], 'notes': [],
-                          'strategy': None, 'scouting_graph': None}
+                          'strategy': None, 'scouting_graph': None,
+                          'strategy_delta': None, 'economy': [], 'growth': None}
         agent(aid, pid)
         return turns[key]
 
@@ -488,6 +562,7 @@ def project_events(events, warnings, redactor):
             offset += 1
             if offset == 2:
                 rounds, expected_turn, offset = rounds + 1, expected_turn + 1, 0
+    compare = dashboard_compare.project(events, agents, turns, warnings, redactor)
     result_turns = list(turns.values())
     for turn in result_turns:
         start, end = timestamp(turn['started_at']), timestamp(turn['ended_at'])
@@ -502,15 +577,37 @@ def project_events(events, warnings, redactor):
     return {'agents': list(agents.values())[:16], 'turns': result_turns[-MAX_TURNS:],
             'metrics': {'completed_rounds': rounds, 'completed_seat_turns': len(complete_ids),
                         'requests': sum(requests.values()), 'violations': violations},
+            'research': compare['research'], 'timeline': compare['timeline'],
             'warnings': list(dict.fromkeys(warnings))[:40], '_incomplete': incomplete}
+
+
+def drop_comparison_row(payload):
+    """Drop the single oldest comparison row, timeline rows first."""
+    seats = payload.get('timeline', {}).get('seats', [])
+    oldest = min((seat['rows'] for seat in seats if seat['rows']),
+                 key=lambda rows: rows[0]['turn'], default=None)
+    if oldest is not None:
+        oldest.pop(0)
+        payload['timeline']['turns'] = dashboard_compare.timeline_turns(seats)
+        return True
+    histories = [seat['history'] for seat in payload.get('research', {}).get('seats', [])
+                 if seat['history']]
+    oldest = min(histories, key=lambda rows: (rows[0]['turn'], rows[0]['seq']), default=None)
+    if oldest is None:
+        return False
+    oldest.pop(0)
+    return True
 
 
 def bound_response(payload):
     while len(json.dumps(payload, allow_nan=False).encode()) > MAX_RESPONSE_BYTES:
-        if not payload['turns']:
+        if payload['turns']:
+            payload['turns'].pop(0)
+            warning = 'Response size limit reached; older turns omitted.'
+        elif drop_comparison_row(payload):
+            warning = 'Response size limit reached; older comparison rows omitted.'
+        else:
             raise ValueError('Response exceeds size limit')
-        payload['turns'].pop(0)
-        warning = 'Response size limit reached; older turns omitted.'
         if warning not in payload['warnings']:
             payload['warnings'].append(warning)
     return payload
@@ -596,6 +693,8 @@ def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=N
                     return
                 if parsed.path == '/api/runs':
                     payload = store.list_runs()
+                elif parsed.path == '/api/tech-tree':
+                    payload = tech_tree(assets)
                 elif parsed.path == '/api/run':
                     query = parse_qs(parsed.query, max_num_fields=4)
                     ids = query.get('id', [])

@@ -141,6 +141,26 @@ def test_roster_survives_redaction_and_stays_seat_scoped(tmp_path, monkeypatch):
     assert '"public_players"' in minimap.render(result)
 
 
+def test_research_options_survive_redaction_without_truncation(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAP_TEST_SECRET", "PRIVATE_TECH")
+    p = packet(seq=1)
+    p["projected_state"]["you"]["researching"] = "PRIVATE_TECH_ALPHA"
+    p["projected_state"]["you"]["researched"] = [f"TECH_{i}" for i in range(50)]
+    p["projected_state"]["research_options"] = [
+        {"tech_id": f"PRIVATE_TECH_{i}", "cost": i} for i in range(50)
+    ]
+    p["projected_state"]["option_sources"] = {"research": "observed"}
+    write(tmp_path, records()[:1] + [source(bind(p))])
+    result = d.DashboardStore(tmp_path).load_map("fixture", player=0, turn=1)
+    research = result["seats"][0]["snapshots"][0]["research"]
+    assert len(research["options"]) == 50 and len(research["researched"]) == 50
+    assert research["options"][7] == {"tech_id": "[redacted]_7", "cost": 7}
+    assert research["researching"] == "[redacted]_ALPHA"
+    assert research["options_source"] == "observed"
+    assert "PRIVATE_TECH" not in minimap.canonical(result)
+    assert '"research"' in minimap.render(result)
+
+
 def test_redaction_that_corrupts_coordinates_fails_instead_of_relocating(tmp_path, monkeypatch):
     monkeypatch.setenv("MAP_TEST_SECRET", "0,0")
     write(tmp_path)

@@ -1,0 +1,793 @@
+{
+ "catalog_digest": "374e0d0ac07db839deb4f86ddf8da955da874757d97609a806a354107fa982ff",
+ "edges": [
+  [
+   "ADVANCED_BALLISTICS",
+   "REPLACEABLE_PARTS"
+  ],
+  [
+   "ADVANCED_BALLISTICS",
+   "STEEL"
+  ],
+  [
+   "ADVANCED_FLIGHT",
+   "RADIO"
+  ],
+  [
+   "APPRENTICESHIP",
+   "CURRENCY"
+  ],
+  [
+   "APPRENTICESHIP",
+   "HORSEBACK_RIDING"
+  ],
+  [
+   "ARCHERY",
+   "ANIMAL_HUSBANDRY"
+  ],
+  [
+   "ASTRONOMY",
+   "EDUCATION"
+  ],
+  [
+   "BALLISTICS",
+   "METAL_CASTING"
+  ],
+  [
+   "BANKING",
+   "EDUCATION"
+  ],
+  [
+   "BANKING",
+   "STIRRUPS"
+  ],
+  [
+   "BRONZE_WORKING",
+   "MINING"
+  ],
+  [
+   "CARTOGRAPHY",
+   "SHIPBUILDING"
+  ],
+  [
+   "CASTLES",
+   "CONSTRUCTION"
+  ],
+  [
+   "CELESTIAL_NAVIGATION",
+   "ASTROLOGY"
+  ],
+  [
+   "CELESTIAL_NAVIGATION",
+   "SAILING"
+  ],
+  [
+   "CHEMISTRY",
+   "SANITATION"
+  ],
+  [
+   "COMBINED_ARMS",
+   "COMBUSTION"
+  ],
+  [
+   "COMBINED_ARMS",
+   "STEEL"
+  ],
+  [
+   "COMBUSTION",
+   "RIFLING"
+  ],
+  [
+   "COMBUSTION",
+   "STEEL"
+  ],
+  [
+   "COMPOSITES",
+   "SYNTHETIC_MATERIALS"
+  ],
+  [
+   "COMPUTERS",
+   "ELECTRICITY"
+  ],
+  [
+   "COMPUTERS",
+   "RADIO"
+  ],
+  [
+   "CONSTRUCTION",
+   "HORSEBACK_RIDING"
+  ],
+  [
+   "CONSTRUCTION",
+   "MASONRY"
+  ],
+  [
+   "CURRENCY",
+   "WRITING"
+  ],
+  [
+   "ECONOMICS",
+   "METAL_CASTING"
+  ],
+  [
+   "ECONOMICS",
+   "SCIENTIFIC_THEORY"
+  ],
+  [
+   "EDUCATION",
+   "APPRENTICESHIP"
+  ],
+  [
+   "EDUCATION",
+   "MATHEMATICS"
+  ],
+  [
+   "ELECTRICITY",
+   "STEAM_POWER"
+  ],
+  [
+   "ENGINEERING",
+   "THE_WHEEL"
+  ],
+  [
+   "FLIGHT",
+   "INDUSTRIALIZATION"
+  ],
+  [
+   "FLIGHT",
+   "SCIENTIFIC_THEORY"
+  ],
+  [
+   "FUTURE_TECH",
+   "NANOTECHNOLOGY"
+  ],
+  [
+   "FUTURE_TECH",
+   "NUCLEAR_FUSION"
+  ],
+  [
+   "FUTURE_TECH",
+   "ROBOTICS"
+  ],
+  [
+   "FUTURE_TECH",
+   "SATELLITES"
+  ],
+  [
+   "GUIDANCE_SYSTEMS",
+   "ADVANCED_BALLISTICS"
+  ],
+  [
+   "GUIDANCE_SYSTEMS",
+   "ROCKETRY"
+  ],
+  [
+   "GUNPOWDER",
+   "APPRENTICESHIP"
+  ],
+  [
+   "GUNPOWDER",
+   "MILITARY_ENGINEERING"
+  ],
+  [
+   "GUNPOWDER",
+   "STIRRUPS"
+  ],
+  [
+   "HORSEBACK_RIDING",
+   "ARCHERY"
+  ],
+  [
+   "INDUSTRIALIZATION",
+   "MASS_PRODUCTION"
+  ],
+  [
+   "INDUSTRIALIZATION",
+   "SQUARE_RIGGING"
+  ],
+  [
+   "IRON_WORKING",
+   "BRONZE_WORKING"
+  ],
+  [
+   "IRRIGATION",
+   "POTTERY"
+  ],
+  [
+   "LASERS",
+   "NUCLEAR_FISSION"
+  ],
+  [
+   "MACHINERY",
+   "ENGINEERING"
+  ],
+  [
+   "MACHINERY",
+   "IRON_WORKING"
+  ],
+  [
+   "MASONRY",
+   "MINING"
+  ],
+  [
+   "MASS_PRODUCTION",
+   "EDUCATION"
+  ],
+  [
+   "MASS_PRODUCTION",
+   "SHIPBUILDING"
+  ],
+  [
+   "MATHEMATICS",
+   "CURRENCY"
+  ],
+  [
+   "METAL_CASTING",
+   "GUNPOWDER"
+  ],
+  [
+   "MILITARY_ENGINEERING",
+   "CONSTRUCTION"
+  ],
+  [
+   "MILITARY_SCIENCE",
+   "PRINTING"
+  ],
+  [
+   "MILITARY_SCIENCE",
+   "SIEGE_TACTICS"
+  ],
+  [
+   "MILITARY_TACTICS",
+   "MATHEMATICS"
+  ],
+  [
+   "NANOTECHNOLOGY",
+   "COMPOSITES"
+  ],
+  [
+   "NUCLEAR_FISSION",
+   "ADVANCED_BALLISTICS"
+  ],
+  [
+   "NUCLEAR_FISSION",
+   "COMBINED_ARMS"
+  ],
+  [
+   "NUCLEAR_FUSION",
+   "LASERS"
+  ],
+  [
+   "PLASTICS",
+   "COMBUSTION"
+  ],
+  [
+   "PRINTING",
+   "MACHINERY"
+  ],
+  [
+   "RADIO",
+   "FLIGHT"
+  ],
+  [
+   "RADIO",
+   "STEAM_POWER"
+  ],
+  [
+   "REPLACEABLE_PARTS",
+   "ECONOMICS"
+  ],
+  [
+   "RIFLING",
+   "BALLISTICS"
+  ],
+  [
+   "RIFLING",
+   "MILITARY_SCIENCE"
+  ],
+  [
+   "ROBOTICS",
+   "COMPUTERS"
+  ],
+  [
+   "ROCKETRY",
+   "CHEMISTRY"
+  ],
+  [
+   "ROCKETRY",
+   "RADIO"
+  ],
+  [
+   "SANITATION",
+   "SCIENTIFIC_THEORY"
+  ],
+  [
+   "SATELLITES",
+   "ADVANCED_FLIGHT"
+  ],
+  [
+   "SATELLITES",
+   "ROCKETRY"
+  ],
+  [
+   "SCIENTIFIC_THEORY",
+   "ASTRONOMY"
+  ],
+  [
+   "SCIENTIFIC_THEORY",
+   "BANKING"
+  ],
+  [
+   "SHIPBUILDING",
+   "SAILING"
+  ],
+  [
+   "SIEGE_TACTICS",
+   "CASTLES"
+  ],
+  [
+   "SQUARE_RIGGING",
+   "CARTOGRAPHY"
+  ],
+  [
+   "STEALTH_TECHNOLOGY",
+   "SYNTHETIC_MATERIALS"
+  ],
+  [
+   "STEAM_POWER",
+   "INDUSTRIALIZATION"
+  ],
+  [
+   "STEEL",
+   "RIFLING"
+  ],
+  [
+   "STIRRUPS",
+   "HORSEBACK_RIDING"
+  ],
+  [
+   "SYNTHETIC_MATERIALS",
+   "PLASTICS"
+  ],
+  [
+   "TELECOMMUNICATIONS",
+   "COMPUTERS"
+  ],
+  [
+   "THE_WHEEL",
+   "MINING"
+  ],
+  [
+   "WRITING",
+   "POTTERY"
+  ]
+ ],
+ "effective_ruleset": "unverified",
+ "eras": [
+  "ANCIENT",
+  "CLASSICAL",
+  "MEDIEVAL",
+  "RENAISSANCE",
+  "INDUSTRIAL",
+  "MODERN",
+  "ATOMIC",
+  "INFORMATION"
+ ],
+ "group_semantics": "unverified",
+ "nodes": [
+  {
+   "cost": 50,
+   "era": "ANCIENT",
+   "id": "SAILING",
+   "row": -3
+  },
+  {
+   "cost": 50,
+   "era": "ANCIENT",
+   "id": "ASTROLOGY",
+   "row": -2
+  },
+  {
+   "cost": 50,
+   "era": "ANCIENT",
+   "id": "IRRIGATION",
+   "row": -1
+  },
+  {
+   "cost": 25,
+   "era": "ANCIENT",
+   "id": "POTTERY",
+   "row": 0
+  },
+  {
+   "cost": 50,
+   "era": "ANCIENT",
+   "id": "WRITING",
+   "row": 0
+  },
+  {
+   "cost": 25,
+   "era": "ANCIENT",
+   "id": "ANIMAL_HUSBANDRY",
+   "row": 1
+  },
+  {
+   "cost": 50,
+   "era": "ANCIENT",
+   "id": "ARCHERY",
+   "row": 1
+  },
+  {
+   "cost": 80,
+   "era": "ANCIENT",
+   "id": "MASONRY",
+   "row": 2
+  },
+  {
+   "cost": 80,
+   "era": "ANCIENT",
+   "id": "BRONZE_WORKING",
+   "row": 3
+  },
+  {
+   "cost": 25,
+   "era": "ANCIENT",
+   "id": "MINING",
+   "row": 3
+  },
+  {
+   "cost": 80,
+   "era": "ANCIENT",
+   "id": "THE_WHEEL",
+   "row": 4
+  },
+  {
+   "cost": 200,
+   "era": "CLASSICAL",
+   "id": "SHIPBUILDING",
+   "row": -3
+  },
+  {
+   "cost": 120,
+   "era": "CLASSICAL",
+   "id": "CELESTIAL_NAVIGATION",
+   "row": -2
+  },
+  {
+   "cost": 200,
+   "era": "CLASSICAL",
+   "id": "MATHEMATICS",
+   "row": -1
+  },
+  {
+   "cost": 120,
+   "era": "CLASSICAL",
+   "id": "CURRENCY",
+   "row": 0
+  },
+  {
+   "cost": 120,
+   "era": "CLASSICAL",
+   "id": "HORSEBACK_RIDING",
+   "row": 1
+  },
+  {
+   "cost": 200,
+   "era": "CLASSICAL",
+   "id": "CONSTRUCTION",
+   "row": 2
+  },
+  {
+   "cost": 120,
+   "era": "CLASSICAL",
+   "id": "IRON_WORKING",
+   "row": 3
+  },
+  {
+   "cost": 200,
+   "era": "CLASSICAL",
+   "id": "ENGINEERING",
+   "row": 4
+  },
+  {
+   "cost": 300,
+   "era": "MEDIEVAL",
+   "id": "MILITARY_TACTICS",
+   "row": -2
+  },
+  {
+   "cost": 390,
+   "era": "MEDIEVAL",
+   "id": "EDUCATION",
+   "row": -1
+  },
+  {
+   "cost": 300,
+   "era": "MEDIEVAL",
+   "id": "APPRENTICESHIP",
+   "row": 0
+  },
+  {
+   "cost": 390,
+   "era": "MEDIEVAL",
+   "id": "STIRRUPS",
+   "row": 1
+  },
+  {
+   "cost": 390,
+   "era": "MEDIEVAL",
+   "id": "MILITARY_ENGINEERING",
+   "row": 2
+  },
+  {
+   "cost": 390,
+   "era": "MEDIEVAL",
+   "id": "CASTLES",
+   "row": 3
+  },
+  {
+   "cost": 300,
+   "era": "MEDIEVAL",
+   "id": "MACHINERY",
+   "row": 4
+  },
+  {
+   "cost": 540,
+   "era": "RENAISSANCE",
+   "id": "CARTOGRAPHY",
+   "row": -3
+  },
+  {
+   "cost": 660,
+   "era": "RENAISSANCE",
+   "id": "SQUARE_RIGGING",
+   "row": -3
+  },
+  {
+   "cost": 540,
+   "era": "RENAISSANCE",
+   "id": "MASS_PRODUCTION",
+   "row": -2
+  },
+  {
+   "cost": 660,
+   "era": "RENAISSANCE",
+   "id": "ASTRONOMY",
+   "row": -1
+  },
+  {
+   "cost": 540,
+   "era": "RENAISSANCE",
+   "id": "BANKING",
+   "row": 0
+  },
+  {
+   "cost": 540,
+   "era": "RENAISSANCE",
+   "id": "GUNPOWDER",
+   "row": 1
+  },
+  {
+   "cost": 660,
+   "era": "RENAISSANCE",
+   "id": "METAL_CASTING",
+   "row": 1
+  },
+  {
+   "cost": 660,
+   "era": "RENAISSANCE",
+   "id": "SIEGE_TACTICS",
+   "row": 3
+  },
+  {
+   "cost": 540,
+   "era": "RENAISSANCE",
+   "id": "PRINTING",
+   "row": 4
+  },
+  {
+   "cost": 970,
+   "era": "INDUSTRIAL",
+   "id": "STEAM_POWER",
+   "row": -3
+  },
+  {
+   "cost": 845,
+   "era": "INDUSTRIAL",
+   "id": "INDUSTRIALIZATION",
+   "row": -2
+  },
+  {
+   "cost": 970,
+   "era": "INDUSTRIAL",
+   "id": "SANITATION",
+   "row": -1
+  },
+  {
+   "cost": 845,
+   "era": "INDUSTRIAL",
+   "id": "SCIENTIFIC_THEORY",
+   "row": -1
+  },
+  {
+   "cost": 970,
+   "era": "INDUSTRIAL",
+   "id": "ECONOMICS",
+   "row": 0
+  },
+  {
+   "cost": 845,
+   "era": "INDUSTRIAL",
+   "id": "BALLISTICS",
+   "row": 1
+  },
+  {
+   "cost": 845,
+   "era": "INDUSTRIAL",
+   "id": "MILITARY_SCIENCE",
+   "row": 3
+  },
+  {
+   "cost": 970,
+   "era": "INDUSTRIAL",
+   "id": "RIFLING",
+   "row": 3
+  },
+  {
+   "cost": 1250,
+   "era": "MODERN",
+   "id": "ELECTRICITY",
+   "row": -3
+  },
+  {
+   "cost": 1140,
+   "era": "MODERN",
+   "id": "FLIGHT",
+   "row": -2
+  },
+  {
+   "cost": 1250,
+   "era": "MODERN",
+   "id": "RADIO",
+   "row": -2
+  },
+  {
+   "cost": 1250,
+   "era": "MODERN",
+   "id": "CHEMISTRY",
+   "row": -1
+  },
+  {
+   "cost": 1140,
+   "era": "MODERN",
+   "id": "REPLACEABLE_PARTS",
+   "row": 0
+  },
+  {
+   "cost": 1140,
+   "era": "MODERN",
+   "id": "STEEL",
+   "row": 1
+  },
+  {
+   "cost": 1250,
+   "era": "MODERN",
+   "id": "COMBUSTION",
+   "row": 2
+  },
+  {
+   "cost": 1580,
+   "era": "ATOMIC",
+   "id": "COMPUTERS",
+   "row": -3
+  },
+  {
+   "cost": 1410,
+   "era": "ATOMIC",
+   "id": "ADVANCED_FLIGHT",
+   "row": -2
+  },
+  {
+   "cost": 1410,
+   "era": "ATOMIC",
+   "id": "ROCKETRY",
+   "row": -1
+  },
+  {
+   "cost": 1410,
+   "era": "ATOMIC",
+   "id": "ADVANCED_BALLISTICS",
+   "row": 0
+  },
+  {
+   "cost": 1410,
+   "era": "ATOMIC",
+   "id": "COMBINED_ARMS",
+   "row": 1
+  },
+  {
+   "cost": 1580,
+   "era": "ATOMIC",
+   "id": "NUCLEAR_FISSION",
+   "row": 1
+  },
+  {
+   "cost": 1410,
+   "era": "ATOMIC",
+   "id": "PLASTICS",
+   "row": 2
+  },
+  {
+   "cost": 1580,
+   "era": "ATOMIC",
+   "id": "SYNTHETIC_MATERIALS",
+   "row": 2
+  },
+  {
+   "cost": 1850,
+   "era": "INFORMATION",
+   "id": "TELECOMMUNICATIONS",
+   "row": -3
+  },
+  {
+   "cost": 2155,
+   "era": "INFORMATION",
+   "id": "ROBOTICS",
+   "row": -2
+  },
+  {
+   "cost": 1850,
+   "era": "INFORMATION",
+   "id": "SATELLITES",
+   "row": -1
+  },
+  {
+   "cost": 2500,
+   "era": "INFORMATION",
+   "id": "FUTURE_TECH",
+   "row": 0
+  },
+  {
+   "cost": 1850,
+   "era": "INFORMATION",
+   "id": "GUIDANCE_SYSTEMS",
+   "row": 0
+  },
+  {
+   "cost": 1850,
+   "era": "INFORMATION",
+   "id": "LASERS",
+   "row": 1
+  },
+  {
+   "cost": 2155,
+   "era": "INFORMATION",
+   "id": "NUCLEAR_FUSION",
+   "row": 1
+  },
+  {
+   "cost": 1850,
+   "era": "INFORMATION",
+   "id": "COMPOSITES",
+   "row": 2
+  },
+  {
+   "cost": 2155,
+   "era": "INFORMATION",
+   "id": "NANOTECHNOLOGY",
+   "row": 2
+  },
+  {
+   "cost": 1850,
+   "era": "INFORMATION",
+   "id": "STEALTH_TECHNOLOGY",
+   "row": 3
+  }
+ ],
+ "scope": "base_source_catalog",
+ "source": {
+  "name": "base-source-catalog.json",
+  "sha256": "f6e0dffa6e0b8c2f53d2b1b7b5f5d9c377c3f352dcab39f11cb22ee9f6223ebd"
+ },
+ "version": 1
+}

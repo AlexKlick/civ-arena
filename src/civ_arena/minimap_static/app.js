@@ -247,8 +247,43 @@ function draw() {
   $('selection').replaceChildren(); $('graph').replaceChildren();
   $('graph-note').textContent='Select an owned unit for recorded candidate choices, or a city for its observed production queue.';
   renderLegend(union);
+  renderResearch(union);
   showProductionJournal();
   fit();
+}
+// Research is packet-scoped, not selection-scoped: it states what that seat's own
+// packet recorded, never a tree, a plan or a completion forecast.
+function renderResearch(union) {
+  const root = $('research'); root.replaceChildren();
+  if (union) text('p', 'One block per seat. Each seat states its own packet; seats are asynchronous, so the as-of turns can differ.', root);
+  snapshots.forEach(s => {
+    const block = text('div', '', root, 'research-seat');
+    text('h4', `P${s.receipt.player_id} · packet turn ${s.turn} (seq ${s.seq})`, block);
+    const r = s.research;
+    if (!r) {
+      text('p', 'Research context not supplied in this packet.', block);
+      return;
+    }
+    text('p', `Researching: ${r.researching || 'none recorded'}`, block);
+    // An absent researched list is unknown, never a count of zero.
+    if (r.researched === null) {
+      text('p', 'Researched: not supplied in this packet', block);
+    } else {
+      text('p', `Researched: ${r.researched.length}`, block);
+      const list = document.createElement('details'); block.append(list);
+      text('summary', 'List', list);
+      const items = document.createElement('ul'); list.append(items);
+      r.researched.forEach(name => text('li', name, items));
+    }
+    const options = r.options || [];
+    if (r.options_source === 'observed') {
+      text('p', 'Could pick next (recorded options):', block);
+      if (!options.length) text('p', 'No options recorded in this packet.', block);
+      options.forEach(o => text('span', `${o.tech_id} · ${o.cost}`, block, 'chip'));
+    } else {
+      text('p', `Options not requested in this packet (${r.options_source || 'source not recorded'})`, block);
+    }
+  });
 }
 // The key is drawn by the same functions as the map, so it cannot drift from it.
 function renderLegend(union) {

@@ -117,6 +117,20 @@ not part of the viewer work. Real retained runs contain tile owners outside the
 two-major roster (players 2, 3 and 6 in `minimax100-20260907T183425Z`); they
 draw non-major borders and are never labelled as civilizations.
 
+## Research block (M2)
+
+Each snapshot also carries the packet's own `research` context — researching,
+researched, the recorded options and the `option_sources.research` token, or
+`null` when the packet supplied none of them. The atlas aside prints one block
+per displayed seat; option chips appear only when that packet recorded the
+options as `observed`, otherwise the block states that they were not requested.
+Like `public_players`, research rows survive display redaction row for row: the
+generic list/depth cap is not applied, so a 50-entry option list stays 50
+entries with its strings redacted and its costs intact. This is retained packet
+context, not live research state, and the two seats' blocks can be as-of
+different turns. The block-level contract is in
+[observed-minimap-preview.md](observed-minimap-preview.md).
+
 ## Verified findings
 
 - Repository proof: **75 focused tests passed, zero failed/skipped**, in 1.22s;

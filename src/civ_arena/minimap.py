@@ -76,6 +76,55 @@ def public_roster(state):
     return roster
 
 
+def research_summary(state):
+    """Closed copy of the packet's own research context; None when unsupplied.
+
+    Options are only the ones the packet recorded as observed; an empty or
+    absent list is never a claim that nothing else could be picked. An absent
+    researched list stays null for the same reason: unsupplied is not empty.
+    """
+    you = state.get('you')
+    you = you if isinstance(you, dict) else {}
+    supplied = 'research_options' in state
+    if not supplied and 'researched' not in you and 'researching' not in you:
+        return None
+    researching = you.get('researching')
+    if researching is not None and not isinstance(researching, str):
+        raise ValueError('invalid research context')
+    if not (isinstance(researching, str) and 1 <= len(researching) <= 64):
+        researching = None
+    researched = None
+    if 'researched' in you:
+        researched = you['researched']
+        if not isinstance(researched, list) or len(researched) > 128:
+            raise ValueError('invalid research context')
+        for name in researched:
+            if not isinstance(name, str) or not 1 <= len(name) <= 64:
+                raise ValueError('invalid research context')
+    options = None
+    if supplied:
+        rows = state['research_options']
+        if not isinstance(rows, list) or len(rows) > 128:
+            raise ValueError('invalid research context')
+        options = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError('invalid research context')
+            tech_id, cost = row.get('tech_id'), row.get('cost')
+            if not isinstance(tech_id, str) or not 1 <= len(tech_id) <= 64:
+                raise ValueError('invalid research context')
+            if type(cost) is not int or not 0 <= cost <= 10**9:
+                raise ValueError('invalid research context')
+            options.append({'tech_id': tech_id, 'cost': cost})
+    sources = state.get('option_sources')
+    origin = sources.get('research') if isinstance(sources, dict) else None
+    if not isinstance(origin, str) or len(origin) > 64:
+        origin = None
+    return {'researching': researching,
+            'researched': None if researched is None else list(researched),
+            'options': options, 'options_source': origin}
+
+
 def build(packets: list[dict], events: list[dict], *, player: int | None = None,
           spectator: bool = False) -> dict:
     """Materialize receipt history, never infer live visibility or actor persistence.
@@ -210,7 +259,8 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
                     'terrain': [deepcopy(seat['terrain'][k]) for k in sorted(seat['terrain'])],
                     'packet_terrain_count': len(tiles),
                     'packet_terrain_omitted': state.get('terrain_omitted'), 'graph': graph,
-                    'public_players': public_roster(state)}
+                    'public_players': public_roster(state),
+                    'research': research_summary(state)}
         seat['snapshots'].append(snapshot)
     from civ_arena.productive_map import project
     for pid, seat in seats.items():
@@ -231,7 +281,10 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
                          'Production receipts prove historical queue/placement admission, '
                          'not completion.',
                          'Owner identity: seats and roster majors are named; other owner IDs '
-                         'are non-major or unclassified, never inferred.'],
+                         'are non-major or unclassified, never inferred.',
+                         'Research: researching, researched and recorded options come from the '
+                         "packet's own context; options are shown only when the packet says "
+                         'they were observed.'],
               'event_binding': {'status': 'matched_context_hash' if events else 'unverified',
                                 'run_ids': [list(item) for item in sorted(run_ids)]},
               'axis': 'Increasing r is engine-grid north; screen north is a viewer convention.',

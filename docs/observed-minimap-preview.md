@@ -67,6 +67,29 @@ or declared dead. Foreign actors remain foreign observations; only explicit
 `is_barbarian=true` receives the barbarian marker. Health points and coarse
 health buckets are labeled separately. There is no war-state inference.
 
+## Research block (M2)
+
+Each snapshot carries the packet's own research context as `research`: the
+`researching` string, the `researched` list in packet order, the recorded
+`research_options` (present only when the packet supplied that key) and the
+`option_sources.research` token. It is `null` when the packet carried none of
+them; a malformed field fails the bundle with `invalid research context` rather
+than being repaired, and lists are bounded (128 researched entries, 128 options,
+64 characters per name). Bundle version stays 1 because the field is additive,
+but every bundle digest changes.
+
+The aside shows one block per displayed seat — one for a seat perspective, one
+per seat in the spectator union — headed `P<n> · packet turn T (seq S)`. Each
+block states "Researching: <name>" or "Researching: none recorded", the
+researched count with a collapsed list, and then either the recorded options as
+`<tech_id> · <cost>` chips (only when that packet recorded
+`option_sources.research == "observed"`) or the sentence "Options not requested
+in this packet (<source>)". A packet with no research context says "Research
+context not supplied in this packet." Blank is unsupplied, never zero techs.
+The block is not a tech tree, a plan or a completion forecast; no share of a
+tree, no next pick and no research rate is inferred. Seats are asynchronous, so
+two blocks can be as-of different turns.
+
 ## Perspective and custody contract
 
 `--player N` embeds only that player's projected observations and eligible

@@ -466,6 +466,38 @@ summary {
     grid-template-columns:1fr;
   }
 }
+/* Research block: packet-scoped facts, chips only for recorded observed options. */
+.research {
+  font-size:12px;
+}
+.research h4 {
+  font-size:9px;
+  letter-spacing:1.5px;
+  color:var(--eyebrow);
+  margin:14px 0 4px;
+  font-weight:700;
+}
+.research p {
+  font-size:11px;
+  margin:3px 0;
+}
+.research ul {
+  margin:4px 0;
+  padding-left:18px;
+  color:var(--muted3);
+}
+.research details {
+  margin-top:4px;
+}
+.research .chip {
+  display:inline-block;
+  border:1px solid var(--line2);
+  border-radius:12px;
+  padding:2px 8px;
+  margin:4px 4px 0 0;
+  font-size:10px;
+  color:var(--ink2);
+}
 .production-marker {
   fill:var(--district_fill);
   stroke:var(--district);

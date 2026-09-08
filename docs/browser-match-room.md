@@ -32,6 +32,123 @@ read/display sizes; truncation is labeled. Credentials in recognized sensitive
 fields and current secret environment values are redacted. Raw wire logs and
 provider configuration are not part of the API.
 
+## Comparison data (M2)
+
+`/api/run` carries two comparison blocks beside `turns`.
+
+`research` holds one entry per configured seat: the seat's `latest` request
+packet (turn, sequence, researching, researched set, gold, research options and
+the recorded `options_source`), a delta-only `history` of packets whose
+researched set changed, and a `diff` of shared and seat-only technologies taken
+from each seat's own latest packet. Seats act asynchronously, so the two `as_of`
+turns usually differ; that is displayed, not smoothed. A packet whose recorded
+character count, digest, projection marker or projected seat does not match is
+never displayed: it raises a warning and sets `research.incomplete`, which does
+not mark the journal itself incomplete.
+
+A packet that supplied no researched list is counted in `packets` but is not a
+research observation: it never removes a technology, resets a count or replaces
+`latest`. When the history hits its row limit the dropped rows are folded into
+one synthetic first row marked `baseline: true`, carrying the last dropped
+packet's turn and the set it left behind — so a truncated history never reads as
+a fresh discovery. Every other row carries `baseline: false`. Absent threat
+lists in `growth` stay `null` rather than becoming zero.
+
+`timeline` holds per-seat rows for each recorded seat turn. Every value carries
+a `sources` tag naming where it came from — `audit` (driver completed-seat-turn
+row), `events` (recorded counters), `tool` (an accepted `get_overview`,
+`get_units` or `get_cities` result) or `packet` (the seat's own request packet).
+A missing value stays `null` with a `null` source; nothing is interpolated or
+carried forward. `series` names the eight comparable per-turn measures. Provider
+requests are recorded POST attempts, not decisions. Each turn additionally
+carries `strategy_delta` (which directive fields changed against the seat's
+previous recorded turn, with tactical overrides reported only as a count),
+`economy` (recorded `set_research` / `set_city_production` attempts with their
+status, rejection and candidate reason) and `growth` (the recorded assessment
+allowlist). All lists are explicitly bounded and dropping items raises a
+warning.
+
+`GET /api/tech-tree` returns the committed technology-layout asset derived from
+the base source catalog by `scripts/derive_tech_tree.py` (68 nodes, 90 edges,
+per-era `[11, 8, 7, 9, 8, 7, 8, 10]`). Regenerate with that script and verify in
+place with `--check`. The asset is validated on every request — version, era
+order, node fields, bounded ids and no backward-era edge — and an unverifiable
+asset is withheld as a 404 instead of drawn. The file itself is not a static
+route: `/tech-tree.json` is 404. The tree describes base source layout with
+unverified prerequisite group semantics; it is not the effective ruleset of the
+displayed match.
+
+## Comparison panels (M2)
+
+Three panels sit between the seat cards and the turn journal, all fed by the
+same retained `/api/run` payload the rest of the page uses. A match recorded
+before these keys existed keeps working: each panel prints "Comparison data not
+recorded for this match" and nothing else changes.
+
+**Who knows what** compares the two seats' research. Each seat's set is folded
+from its own retained request packets up to the selected turn, so the as-of line
+names each seat's packet turn and sequence separately — the seats are
+asynchronous and the two as-of turns routinely differ. The three columns are the
+shared set and each seat's exclusive set, with the count in the column head.
+Technologies that are not in the base source catalog are kept and grouped under
+"Outside base catalog" rather than dropped. The "Researching" row is the
+selected packet's own field; "Could pick next" prints the recorded options only
+when the packet actually observed them, and otherwise names the source token it
+was given; a packet that observed the options but recorded none says exactly
+that. No option list is inferred. If the selected turn is older than the seat's
+retained history — that is, before its `baseline` row — that seat's column
+prints "Research history before turn N was not retained", its tree halves are
+dimmed instead of filled, its era counts read `?/N`, and nothing is called
+shared. The other seat is unaffected.
+
+The tree below it is laid out from `/api/tech-tree`, which is derived from the
+base source catalog: eras are columns, same-era prerequisite depth makes
+sub-columns, and the catalog's `UITreeRow` sets the vertical position. Each node
+carries two halves, left seat and right seat: a filled half means the seat had
+that technology at the selected turn, an outlined half means the seat was
+researching it. The era header counts both seats. Selecting a node (click or
+Enter) fills the fact list with era, recorded cost, prerequisites, and each
+seat's status. The tree is requested once per match, never per poll. If the
+catalog asset cannot be served the tree is hidden and the panel says so; the
+research sets above stay. The legend states what the connective is worth:
+prerequisite → tech, left to right, connective unverified, base source catalog,
+not the effective ruleset of this match.
+
+**Pacing and progress** is eight small multiples over the same turn axis: seat
+turn time, provider requests (recorded POST attempts, not decisions), tool
+calls, allowed mutations, gold, techs researched, own units and own cities. The
+x position is the turn number itself, not the row index, so a turn nobody
+recorded stays an empty stretch; a segment joins two points only when they are
+consecutive recorded turns for that seat. A gap in a line is an unsupplied value
+and is never bridged — the line breaks, and a lone reading is drawn as a dot. Red
+triangles under the axis are watchdog violations, with the recorded kind and
+detail in their tooltip. The selected turn is a hairline on every chart; hover
+or keyboard focus moves a crosshair and reads both seats' values for the nearest
+turn into a live region, and clicking picks that turn for the whole page. Every
+value is also in the "Table view" twin, so nothing is reachable only by hover.
+
+**Decision strip** sits in the turn journal head: per seat, one pill for the
+strategy directive, one for the recorded economy calls (accepted ✓, rejected ✕
+with the rejection text, ◌ when no status was recorded), and one for the growth
+assessment. The directive pill names the recorded source rather than assuming a
+model wrote it: the first recorded directive, a model update with its reasons
+and changed fields, an unchanged or changed autopilot turn, any other recorded
+source token, or "source not recorded". "Not recorded" means the audit was
+absent, not that nothing happened. Selecting a pill scrolls to the full strategy
+panel, which states that listed values are seeded selection weights, not
+probabilities of success; the journal legend reads "Recorded order, not
+causality".
+
+The pure half of these panels (folding, the diff, chart scales and segments,
+decision sentences, tree depth) lives in `dashboard_static/compare-core.js` and
+is served at `/compare-core.js`. It touches no page and makes no request, so
+`tests/test_compare_core.py` evaluates it under Node exactly as the browser
+runs it.
+
+Colours carry seats only: seat 0 gold, seat 1 teal, in both the tree halves and
+the chart lines; labels stay on text colours so no reading depends on hue.
+Charts draw no animation and honour `prefers-reduced-motion`.
+
 ## Stop and preserve
 
 Stopping this server does not stop the game. Use Ctrl-C on a foreground server,

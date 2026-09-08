@@ -219,3 +219,88 @@ def test_null_ownership_unknown_native_and_false_barbarian_stay_distinct():
     assert row['actors'][0]['observation']['is_barbarian'] is False
     del tile['owner_id']
     assert build([bind(p)], [], player=0)['digest'] != a['digest']
+
+
+def test_bundle_carries_research_context_per_snapshot_or_none():
+    p0, p1 = packet(), packet(1, 11)
+    p0['projected_state']['you'].update({'researching': 'POTTERY',
+                                         'researched': ['MINING', 'ARCHERY']})
+    p0['projected_state']['research_options'] = [{'tech_id': 'WRITING', 'cost': 50,
+                                                  'extra': 'dropped'},
+                                                 {'tech_id': 'SAILING', 'cost': 0}]
+    p0['projected_state']['option_sources'] = {'research': 'observed', 'production': {}}
+    p1['projected_state']['you']['researched'] = []
+    p1['projected_state']['research_options'] = []
+    p1['projected_state']['option_sources'] = {'research': 'not_requested_active_choice'}
+    result = build([bind(p0), bind(p1)], [], spectator=True)
+    first, second = (seat['snapshots'][0]['research'] for seat in result['seats'])
+    assert first == {'researching': 'POTTERY', 'researched': ['MINING', 'ARCHERY'],
+                     'options': [{'tech_id': 'WRITING', 'cost': 50},
+                                 {'tech_id': 'SAILING', 'cost': 0}],
+                     'options_source': 'observed'}
+    assert second == {'researching': None, 'researched': [], 'options': [],
+                      'options_source': 'not_requested_active_choice'}
+    assert build([bind(p0)], [], player=0)['seats'][0]['snapshots'][0]['research'] == first
+    assert build([packet()], [], player=0)['seats'][0]['snapshots'][0]['research'] is None
+    assert any('only when the packet says' in line for line in result['limits'])
+
+
+def test_an_absent_researched_list_is_unknown_rather_than_an_empty_set():
+    p = packet()
+    p['projected_state']['you']['researching'] = 'POTTERY'
+    row = build([bind(p)], [], player=0)['seats'][0]['snapshots'][0]['research']
+    assert row == {'researching': 'POTTERY', 'researched': None, 'options': None,
+                   'options_source': None}
+    p['projected_state']['you']['researched'] = ['MINING']
+    supplied = build([bind(p)], [], player=0)
+    assert supplied['seats'][0]['snapshots'][0]['research']['researched'] == ['MINING']
+    assert 'Researched: not supplied in this packet' in render(supplied)
+
+
+def test_unbounded_or_unsupplied_research_strings_read_as_not_recorded():
+    p = packet()
+    p['projected_state']['you']['researching'] = 'T' * 65
+    p['projected_state']['option_sources'] = {'research': 7}
+    assert build([bind(p)], [], player=0)['seats'][0]['snapshots'][0]['research'] == \
+        {'researching': None, 'researched': None, 'options': None, 'options_source': None}
+    p['projected_state']['you']['researching'] = ''
+    p['projected_state']['option_sources'] = {'research': 'S' * 65}
+    row = build([bind(p)], [], player=0)['seats'][0]['snapshots'][0]['research']
+    assert row['researching'] is None and row['options_source'] is None
+
+
+@pytest.mark.parametrize('field,value', [
+    ('researching', 5),
+    ('researching', ['POTTERY']),
+    ('researched', 'POTTERY'),
+    ('researched', ['T'] * 129),
+    ('researched', ['']),
+    ('researched', ['T' * 65]),
+    ('options', 'WRITING'),
+    ('options', ['WRITING']),
+    ('options', [{'tech_id': 'WRITING'}]),
+    ('options', [{'tech_id': 'WRITING', 'cost': '50'}]),
+    ('options', [{'tech_id': 'WRITING', 'cost': True}]),
+    ('options', [{'tech_id': 'WRITING', 'cost': -1}]),
+    ('options', [{'tech_id': 'W' * 65, 'cost': 50}]),
+    ('options', [{'tech_id': 'W', 'cost': 1}] * 129),
+])
+def test_research_context_refuses_malformed_fields(field, value):
+    p = packet()
+    if field == 'options':
+        p['projected_state']['research_options'] = value
+    else:
+        p['projected_state']['you'][field] = value
+    with pytest.raises(ValueError, match='invalid research context'):
+        build([bind(p)], [], player=0)
+
+
+def test_rendered_page_hosts_the_research_block_without_dynamic_html():
+    p = packet()
+    p['projected_state']['you']['researched'] = ['POTTERY']
+    p['projected_state']['research_options'] = [{'tech_id': 'WRITING', 'cost': 50}]
+    p['projected_state']['option_sources'] = {'research': 'observed'}
+    html = render(build([bind(p)], [], player=0))
+    assert 'id="research"' in html and '<h3>Research</h3>' in html
+    assert 'renderResearch' in html and 'Could pick next (recorded options)' in html
+    assert 'textContent' in html and 'innerHTML' not in html and 'fetch(' not in html

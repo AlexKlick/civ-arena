@@ -52,6 +52,27 @@
     if (content != null) node.textContent = content;
     return node;
   }
+  function runRenderers() {
+    const registered = window.civArena ? window.civArena.renderers : [];
+    registered.forEach(renderer => {
+      try { renderer(); } catch (error) { console.error('Comparison renderer failed', error); }
+    });
+  }
+  function announceTurn() {
+    document.dispatchEvent(new CustomEvent('civarena:turn', {detail: {turn: state.turn, runId: state.runId}}));
+  }
+  function selectTurn(turn) {
+    state.turn = turn == null || turn === '' ? null : String(turn);
+    state.follow = false;
+    $('followLive').checked = false;
+    $('turnSelect').value = state.turn == null ? '' : state.turn;
+    state.selectedCall = null;
+    renderCards(); renderGraph(); renderStrategy(); renderMap();
+    $('graphTurn').textContent = state.turn == null ? '' : ` / ${state.turn}`;
+    runRenderers(); announceTurn();
+  }
+  window.civArena = {state, renderers: [], helpers: {element, append, svg, badge, humanize, count,
+    duration, text, isAccepted, timestamp, localTime, finite, agentList, selectTurn}};
   function callKey(turn, call) { return `${turn.turn}:${turn.player_id}:${call.seq}`; }
   function selectedTurns() {
     return (state.data?.turns || []).filter(turn => String(turn.turn) === String(state.turn));
@@ -311,6 +332,7 @@
   function render() {
     renderMetrics(); renderTurnSelect(); renderCards(); renderGraph(); renderStrategy(); renderMap();
     $('emptyState').hidden = Boolean(state.data);
+    runRenderers(); announceTurn();
   }
   async function request(path) {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
@@ -363,11 +385,7 @@
     state.selectedCall = null; state.data = null; state.lastCards = ''; state.lastGraph = '';
     render(); refresh();
   });
-  $('turnSelect').addEventListener('change', event => {
-    state.turn = event.target.value; state.follow = false; $('followLive').checked = false;
-    state.selectedCall = null; renderCards(); renderGraph(); renderStrategy(); renderMap();
-    $('graphTurn').textContent = ` / ${state.turn}`;
-  });
+  $('turnSelect').addEventListener('change', event => selectTurn(event.target.value));
   $('mapPerspective').addEventListener('change', () => renderMap());
   $('refreshMap').addEventListener('click', () => renderMap(true));
   $('followLive').addEventListener('change', event => { state.follow = event.target.checked; render(); });

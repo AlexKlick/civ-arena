@@ -1,7 +1,9 @@
 import datetime as dt
 import http.client
 import json
+import re
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,8 @@ from civ_arena import dashboard as d
 
 STAMP = '2026-09-05T01:00:00+00:00'
 NOW = dt.datetime.fromisoformat(STAMP).timestamp()
+ASSETS = Path(d.__file__).with_name('dashboard_static')
+ERA_COUNTS = [11, 8, 7, 9, 8, 7, 8, 10]
 
 
 def event(kind, **fields):
@@ -168,6 +172,7 @@ def test_real_http_is_loopback_read_only_and_serves_only_explicit_assets(tmp_pat
     run = write_run(root, [start()])
     before = (run / 'events.jsonl').read_bytes()
     (assets / 'index.html').write_text('<html>dashboard</html>')
+    (assets / 'compare-core.js').write_text("'use strict';\n")
     (assets / 'private.txt').write_text('must-not-serve')
     server = d.create_server(root, port=0, static_root=assets)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -175,6 +180,7 @@ def test_real_http_is_loopback_read_only_and_serves_only_explicit_assets(tmp_pat
     try:
         connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
         for method, path, status in [('GET', '/', 200), ('HEAD', '/', 200),
+                                     ('GET', '/compare-core.js', 200),
                                      ('GET', '/api/runs', 200),
                                      ('GET', '/api/run?id=match-one', 200),
                                      ('GET', '/api/run?id=../outside', 404),
@@ -204,6 +210,111 @@ def test_real_http_is_loopback_read_only_and_serves_only_explicit_assets(tmp_pat
     assert sorted(p.name for p in run.iterdir()) == ['events.jsonl']
     with pytest.raises(ValueError, match='loopback'):
         d.create_server(root, host='0.0.0.0', port=0)
+
+
+def get(root, paths, static_root=None):
+    """Serve one real HTTP request per path and return (status, body) pairs."""
+    server = d.create_server(root, port=0, static_root=static_root)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    results = []
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        for path in paths:
+            connection.request('GET', path)
+            response = connection.getresponse()
+            results.append((response.status, response.read()))
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    return results
+
+
+def test_tech_tree_route_serves_the_validated_catalog_asset_and_not_the_file(tmp_path):
+    write_run(tmp_path, [start()])
+    (route, body), (asset, _) = get(tmp_path, ['/api/tech-tree', '/tech-tree.json'])
+    assert (route, asset) == (200, 404)
+    tree = json.loads(body)
+    assert tree['version'] == 1 and tree['scope'] == 'base_source_catalog'
+    assert tree['effective_ruleset'] == 'unverified'
+    assert tree['group_semantics'] == 'unverified'
+    assert tree['source']['name'] == 'base-source-catalog.json'
+    assert len(tree['nodes']) == 68 and len(tree['edges']) == 90
+    assert [sum(1 for node in tree['nodes'] if node['era'] == era)
+            for era in tree['eras']] == ERA_COUNTS
+    order = [(tree['eras'].index(node['era']), node['row'], node['id']) for node in tree['nodes']]
+    assert order == sorted(order)
+    assert tree['edges'] == sorted(tree['edges'])
+
+
+@pytest.mark.parametrize('defect', ['unknown_edge', 'backward_edge', 'version', 'bool_version',
+                                    'extra_field', 'extra_top_key', 'oversize', 'symlink'])
+def test_unverifiable_tech_tree_assets_are_withheld(tmp_path, defect):
+    assets, root = tmp_path / 'assets', tmp_path / 'runs'
+    assets.mkdir()
+    root.mkdir()
+    write_run(root, [start()])
+    tree = json.loads((ASSETS / 'tech-tree.json').read_text())
+    if defect == 'unknown_edge':
+        tree['edges'].append([tree['nodes'][0]['id'], 'NOT_A_TECHNOLOGY'])
+    elif defect == 'backward_edge':
+        tree['edges'].append([tree['nodes'][0]['id'], tree['nodes'][-1]['id']])
+    elif defect == 'version':
+        tree['version'] = 2
+    elif defect == 'bool_version':
+        # True == 1 in Python; a flag is not a version number.
+        tree['version'] = True
+    elif defect == 'extra_field':
+        tree['nodes'][0]['note'] = 'unmodelled'
+    elif defect == 'extra_top_key':
+        tree['note'] = 'unmodelled'
+    body = json.dumps(tree) + (' ' * (d.MAX_TECH_TREE_BYTES + 1) if defect == 'oversize' else '')
+    if defect == 'symlink':
+        (tmp_path / 'outside.json').write_text(body)
+        (assets / 'tech-tree.json').symlink_to(tmp_path / 'outside.json')
+    else:
+        (assets / 'tech-tree.json').write_text(body)
+    status, payload = get(root, ['/api/tech-tree'], static_root=assets)[0]
+    assert (status, payload) == (404, b'{"error":"resource unavailable"}')
+
+
+def test_the_comparison_core_module_reaches_neither_the_page_nor_the_network():
+    code = (ASSETS / 'compare-core.js').read_text()
+    for forbidden in ('document', 'fetch(', 'XMLHttpRequest', 'window.civArena.'):
+        assert forbidden not in code, forbidden
+    assert 'window.civArenaCompareCore = Core' in code
+
+
+def test_static_scripts_only_reach_same_origin_api_paths():
+    scripts = sorted(ASSETS.glob('*.js'))
+    assert len(scripts) >= 3
+    inspected = []
+    for script in scripts:
+        code = script.read_text()
+        for forbidden in ('innerHTML', 'eval(', 'document.write'):
+            assert forbidden not in code, (script.name, forbidden)
+        targets = []
+        for match in re.finditer(r'fetch\(\s*([\'"`][^\'"`\n]*|[A-Za-z_$][\w$]*)', code):
+            head = match[1]
+            if head[0] in '\'"`':
+                targets.append(head[1:])
+                continue
+            # A variable target is only allowed from a wrapper whose every call
+            # site passes a literal API path.
+            wrapper = re.search(rf'function\s+([A-Za-z_$][\w$]*)\(\s*{head}\s*\)', code)
+            assert wrapper, (script.name, head)
+            for call in re.finditer(rf'(?<!function ){wrapper[1]}\(\s*(.)', code):
+                assert call[1] in '\'"`', (script.name, wrapper[1])
+            targets += re.findall(rf'(?<!function ){wrapper[1]}\(\s*[\'"`]([^\'"`\n]*)', code)
+        # A script that requests anything must yield inspectable targets; the
+        # pure core module requests nothing at all.
+        assert targets or 'fetch(' not in code, script.name
+        inspected += targets
+        for target in targets:
+            assert target.startswith('/api/'), (script.name, target)
+    assert inspected
 
 
 def test_run_index_reuses_unchanged_parse_and_invalidates_on_append(tmp_path, monkeypatch):
