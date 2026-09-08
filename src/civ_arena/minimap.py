@@ -172,6 +172,24 @@ def _world_text(value, name, limit=128):
     return value
 
 
+def _world_optional_text(value, name, limit=128):
+    if value is None:
+        return None
+    return _world_text(value, name, limit)
+
+
+def _world_optional_flag(value, name):
+    if value is None:
+        return None
+    return _world_flag(value, name)
+
+
+def _world_optional_int(value, name, minimum=0, maximum=10 ** 9):
+    if value is None:
+        return None
+    return _world_int(value, name, minimum, maximum)
+
+
 def _world_flag(value, name):
     if type(value) is not bool:
         raise ValueError(f'invalid world {name}')
@@ -197,9 +215,14 @@ def validate_world(doc):
         raise ValueError('invalid world document')
     if len(canonical(doc).encode()) > MAX_WORLD_BYTES:
         raise ValueError('world exceeds size bound')
+    # Amendment 3 item 2 + 9: world doc carries optional top-level
+    # extras the viewer MUST tolerate — `digest_consistent` (spectate
+    # carrier's bracket flag), `palette_confirmed` (M4 producer always
+    # emits it). `owned_tiles_columns` may be absent when the byte cap
+    # dropped the territory block.
     if set(doc) - {'schema', 'after_seat', 'contexts', 'game_era', 'grid', 'roster', 'players',
-                   'cities', 'owned_tiles_columns', 'fog_audit', 'palette', 'truncated',
-                   'read_ms'}:
+                   'cities', 'owned_tiles_columns', 'fog_audit', 'palette', 'palette_confirmed',
+                   'truncated', 'read_ms', 'digest_consistent'}:
         raise ValueError('invalid world top-level keys')
     if doc.get('schema') != 1 or type(doc.get('schema')) is not int:
         raise ValueError('invalid world schema')
@@ -220,24 +243,33 @@ def validate_world(doc):
     if not isinstance(roster, list) or len(roster) > WORLD_ROSTER_MAX:
         raise ValueError('invalid world roster')
     for row in roster:
+        # Amendment 3 item 2: roster fields are OPTIONAL — absent =
+        # unsupplied. The producer keeps '?' unread off the wire
+        # (Amendment 1: GetCivilizationLevelType missing), so level
+        # never appears; is_major/is_barbarian/alive/civ_name/leader/
+        # suzerain may all be absent when unread on a live probe.
         _world_keys(row, WORLD_ROSTER_ROW, 'roster row')
         _world_int(row.get('player_id'), 'roster player')
-        _world_text(row.get('civ_name'), 'roster civ_name')
-        _world_text(row.get('leader'), 'roster leader')
-        _world_text(row.get('level'), 'roster level', 64)
-        _world_text(row.get('kind'), 'roster kind', 64)
-        _world_flag(row.get('is_major'), 'roster is_major')
-        _world_flag(row.get('is_barbarian'), 'roster is_barbarian')
-        _world_flag(row.get('alive'), 'roster alive')
-        _world_int(row.get('suzerain'), 'roster suzerain', -1)
+        _world_optional_text(row.get('civ_name'), 'roster civ_name')
+        _world_optional_text(row.get('leader'), 'roster leader')
+        _world_optional_text(row.get('level'), 'roster level', 64)
+        _world_optional_text(row.get('kind'), 'roster kind', 64)
+        _world_optional_flag(row.get('is_major'), 'roster is_major')
+        _world_optional_flag(row.get('is_barbarian'), 'roster is_barbarian')
+        _world_optional_flag(row.get('alive'), 'roster alive')
+        _world_optional_int(row.get('suzerain'), 'roster suzerain', -1)
     players = doc.get('players')
     if not isinstance(players, list) or len(players) > WORLD_PLAYERS_MAX:
         raise ValueError('invalid world players')
     for row in players:
         _world_keys(row, WORLD_PLAYER_ROW, 'player row')
         _world_int(row.get('player_id'), 'player id')
-        for field in ('civ_name', 'era', 'researching'):
-            _world_text(row.get(field), f'player {field}')
+        # Amendment 3 item 2: civ_name / era / researching are optional;
+        # the producer omits researching when unread/none-active and
+        # omits era when the GameInfo.Eras lookup failed.
+        _world_optional_text(row.get('civ_name'), 'player civ_name')
+        _world_optional_text(row.get('era'), 'player era', 64)
+        _world_optional_text(row.get('researching'), 'player researching', 64)
         for field in WORLD_PLAYER_NUMERIC:
             if field in row:
                 _world_number(row[field], f'player {field}')
@@ -287,31 +319,37 @@ def validate_world(doc):
             for item in items:
                 _world_text(item, f'city {field} entry')
     columns = doc.get('owned_tiles_columns')
-    if not isinstance(columns, dict):
+    if columns is None:
+        # Amendment 3 item 2: the byte cap may drop the territory block
+        # first — territory layer degrades gracefully with the recorded
+        # `truncated.world: true` already on the doc.
+        seen, total = set(), 0
+    elif isinstance(columns, dict):
+        seen, total = set(), 0
+        for owner, rows in columns.items():
+            if not WORLD_OWNER_KEY.fullmatch(owner) or not isinstance(rows, list):
+                raise ValueError('invalid world owned tile column')
+            for row in rows:
+                _world_keys(row, WORLD_TILE_ROW, 'owned tile row')
+                q, r = row.get('q'), row.get('r')
+                _world_int(q, 'tile q', -10000, 10000)
+                _world_int(r, 'tile r', -10000, 10000)
+                key = coord(f'{q},{r}')
+                if key in seen:
+                    raise ValueError('duplicate owned tile coordinate')
+                seen.add(key)
+                for field in ('terrain', 'feature', 'resource', 'improvement', 'district'):
+                    if field in row:
+                        _world_text(row[field], f'tile {field}', 64)
+                if 'river' in row:
+                    _world_flag(row['river'], 'tile river')
+                if 'city' in row:
+                    _world_int(row['city'], 'tile city', -1)
+                total += 1
+        if total > WORLD_TILES_MAX:
+            raise ValueError('invalid world owned tile count')
+    else:
         raise ValueError('invalid world owned tiles')
-    seen, total = set(), 0
-    for owner, rows in columns.items():
-        if not WORLD_OWNER_KEY.fullmatch(owner) or not isinstance(rows, list):
-            raise ValueError('invalid world owned tile column')
-        for row in rows:
-            _world_keys(row, WORLD_TILE_ROW, 'owned tile row')
-            q, r = row.get('q'), row.get('r')
-            _world_int(q, 'tile q', -10000, 10000)
-            _world_int(r, 'tile r', -10000, 10000)
-            key = coord(f'{q},{r}')
-            if key in seen:
-                raise ValueError('duplicate owned tile coordinate')
-            seen.add(key)
-            for field in ('terrain', 'feature', 'resource', 'improvement', 'district'):
-                if field in row:
-                    _world_text(row[field], f'tile {field}', 64)
-            if 'river' in row:
-                _world_flag(row['river'], 'tile river')
-            if 'city' in row:
-                _world_int(row['city'], 'tile city', -1)
-            total += 1
-    if total > WORLD_TILES_MAX:
-        raise ValueError('invalid world owned tile count')
     fog = doc.get('fog_audit')
     if not isinstance(fog, dict) or set(fog) != {'requested', 'engine_visible',
                                                  'engine_not_visible', 'unavailable',
@@ -324,6 +362,14 @@ def validate_world(doc):
         raise ValueError('invalid world disagree coords')
     for value in disagree:
         coord(value)
+    if 'palette_confirmed' in doc:
+        # Amendment 3 item 9: when present, must be bool — the viewer
+        # uses engine palette ints ONLY when this is true; absence or
+        # false means the M1 owner-class fallback applies.
+        _world_flag(doc['palette_confirmed'], 'palette_confirmed')
+    if 'digest_consistent' in doc:
+        # Amendment 3 item 2: the spectate carrier's bracket flag.
+        _world_flag(doc['digest_consistent'], 'digest_consistent')
     if 'palette' in doc:
         palette = doc['palette']
         if not isinstance(palette, dict):
@@ -335,13 +381,17 @@ def validate_world(doc):
             _world_int(colour['primary'], 'palette primary', 0, 2 ** 32 - 1)
             _world_int(colour['secondary'], 'palette secondary', 0, 2 ** 32 - 1)
     truncated = doc.get('truncated')
-    if not isinstance(truncated, dict) or not set(truncated) <= {'tiles', 'world', 'roster'} \
+    truncated_keys = {'tiles', 'world', 'roster', 'cities'}
+    if not isinstance(truncated, dict) \
+            or not set(truncated) <= truncated_keys \
             or not {'tiles', 'world'} <= set(truncated):
         raise ValueError('invalid world truncation record')
     _world_flag(truncated.get('tiles'), 'truncated tiles')
     _world_flag(truncated.get('world'), 'truncated world')
     if 'roster' in truncated:
         _world_int(truncated['roster'], 'truncated roster')
+    if 'cities' in truncated:
+        _world_int(truncated['cities'], 'truncated cities')
     _world_number(doc.get('read_ms'), 'read_ms', 0, 10 ** 6)
     return deepcopy(doc)
 
@@ -379,11 +429,25 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
         raise ValueError('choose exactly one player or explicit spectator mode')
     if player is not None:
         integer(player, 'player')
-    if not 1 <= len(packets) <= 256 or len(events) > 100000:
+    # Amendment 3 item 5: spectate-only runs carry no strategy packets
+    # (the player route still requires >= 1 packet — a player bundle
+    # without any observation is not a bundle). The spectator route
+    # may have ZERO packets and still render the territory layer
+    # from spectator_world / SPECTATOR_SNAPSHOT.world records.
+    if len(packets) > 256 or len(events) > 100000:
         raise ValueError('input record limit')
+    # Amendment 3 item 1: spectator-scope records are inert for player
+    # routes. The packet walk already drops them implicitly (spectator
+    # audits carry player_id=None), but the event walk below feeds
+    # graph_events / own_events / productive_cutoff and accepts whatever
+    # player_id a hostile spectator audit carries. Strip them here,
+    # BEFORE any player-id matching, so a spectator audit can never
+    # influence a player bundle even if it impersonates a player_id.
+    player_events = [e for e in events
+                     if e.get('visibility_scope') != 'spectator']
     event_index = {}
     run_ids = set()
-    for event in events:
+    for event in player_events:
         seq = integer(event['seq'], 'event sequence')
         if seq in event_index:
             raise ValueError('duplicate event sequence')
@@ -421,10 +485,10 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
                     raise ValueError('packet is not bound to supplied event stream')
             ordered.append((seq, turn, pid, packet))
     ordered.sort(key=lambda item: item[:3])
-    if not ordered:
+    if not ordered and not spectator:
         raise ValueError('no packets for selected player')
     graph_events = []
-    for e in events:
+    for e in player_events:
         if e.get('kind') != 'HEARTBEAT' or e.get('audit') != 'strategy_graph':
             continue
         if e.get('player_id') not in {item[2] for item in ordered}:
@@ -507,7 +571,7 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
     from civ_arena.productive_map import project
     for pid, seat in seats.items():
         seat['productive_actions'] = project(events, pid)
-        own_events = [e for e in events if type(e.get('player_id')) is int
+        own_events = [e for e in player_events if type(e.get('player_id')) is int
                       and e['player_id'] == pid and type(e.get('turn')) is int
                       and e['turn'] >= 1]
         latest = max(own_events, key=lambda e: e['seq']) if own_events else seat['snapshots'][-1]
@@ -539,7 +603,21 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
     world = None
     world_warning = False
     if spectator:
-        candidates = world_records(events, max(turn for _, turn, _, _ in ordered))
+        # Amendment 3 item 5: when packets are present, the packet
+        # cutoff stays authoritative — loosening would admit worlds
+        # past the bundle turn. When packets are empty (pure spectate
+        # run), the cutoff comes from the latest world record itself.
+        packet_cutoff = max((turn for _, turn, _, _ in ordered), default=0)
+        if packet_cutoff == 0:
+            latest_world_turn = max(
+                (event.get('turn', 0)
+                 for event in world_records(events, 10 ** 9)
+                 if isinstance(event.get('turn'), int)),
+                default=0)
+            cutoff = latest_world_turn
+        else:
+            cutoff = packet_cutoff
+        candidates = world_records(events, cutoff)
         if candidates:
             latest = max(candidates, key=lambda event: event['seq'])
             try:

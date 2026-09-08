@@ -373,6 +373,27 @@ def test_player_routes_attach_no_world_even_when_records_are_present():
     assert '"owned_tiles_columns"' not in html and 'id="roster"' in html
 
 
+def test_player_routes_ignore_hostile_spectator_audit_with_populated_player_id():
+    """Amendment 3 item 1: a spectator-scope audit that impersonates a
+    seat (carries player_id=<int>) must NEVER influence a player bundle
+    — no graph_event match, no own_event match, no productive_cutoff
+    rewinding. The blankest case: a player bundle built from one
+    honest packet must be byte-identical whether or not a hostile
+    spectator audit is interleaved."""
+    p0, p1 = packet(), packet(1, 11)
+    honest = build([p0, bind(p1)],
+                   [source(p0), source(p1)], spectator=True)
+    # A spectator-scope audit impersonating player 0 — would otherwise
+    # slip into graph_events and own_events via player_id=0 matching.
+    hostile = world_event(99, 1)
+    hostile['player_id'] = 0   # the impersonation
+    hostile['agent_id'] = 'a0'
+    hostile['audit'] = 'strategy_graph'  # also impersonates a graph audit
+    poisoned = build([p0, bind(p1)],
+                     [source(p0), source(p1), hostile], spectator=True)
+    assert honest['digest'] == poisoned['digest']
+
+
 def test_unusable_world_attaches_nothing_and_warns_exactly_once():
     p0, p1 = packet(), packet(1, 11)
     broken = world_event(13, 1, {**deepcopy(WORLD_FIXTURE), 'schema': 2})

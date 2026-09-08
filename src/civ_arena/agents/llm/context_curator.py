@@ -84,6 +84,20 @@ class ContextCurator:
                                           'researched', 'researching')),
                 **selected(overview_you, self.OWN_ECONOMY_KEYS)}
 
+    def _gate_overview(self, value: dict) -> dict:
+        """Amendment 3 item 3: at cache time, strip the economy keys
+        from the cached overview row when the opt-in is OFF. Returns
+        a new dict — the raw read is never mutated. Operates on both
+        the 'you' subdict (the only subdict the model sees) and the
+        public.players roster (other players never carry the economy
+        keys — the gate is defensive there)."""
+        gated = dict(value)
+        if isinstance(gated.get('you'), dict):
+            gated['you'] = selected(gated['you'],
+                                    ('player_id', 'civ_name', 'gold',
+                                     'researched', 'researching'))
+        return gated
+
     async def read(self, name: str, **args) -> Any:
         result = await getattr(self.facade, name)(**args)
         if isinstance(result, dict) and (result.get('status') == 'rejected' or 'error' in result):
@@ -113,6 +127,15 @@ class ContextCurator:
                 raise MatchAborted(f'context {name} has invalid shape')
             if isinstance(value, list) and any(not isinstance(row, dict) for row in value):
                 raise MatchAborted(f'context {name} has invalid entity rows')
+            # Amendment 3 item 3: when the economy opt-in is OFF, the
+            # cached overview row must already be byte-identical to the
+            # legacy 5-key default. Strip the economy keys at CACHE TIME
+            # (not just at you() projection) so any direct read of
+            # state['get_overview'] — TOOL_RESULT docs, strategy payload
+            # builders, the raw tool response — sees the gated shape.
+            if name == 'get_overview' and not self.own_economy_context \
+                    and isinstance(value, dict):
+                value = self._gate_overview(value)
             self.state[name] = value
             self.dirty.discard(name)
         cities = self.own('get_cities')

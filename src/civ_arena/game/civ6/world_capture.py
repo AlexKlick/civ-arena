@@ -224,11 +224,20 @@ print("---END---")
 
 def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
     """PLAYERROW|pid|civ|leader|major|barbarian|alive|level|kind|suzerain
-    -> roster docs. Exact framing: SPECW|1|roster header, 9-field rows,
-    optional ROSTER_TRUNCATED|n sentinel-side; anything else raises."""
+    -> roster docs. Exact framing (Amendment 3 item 8): SPECW|1|roster
+    header, zero/one ROSTER_TRUNCATED sentinel, 9-field rows in
+    stream order. Duplicate pids, duplicate ROSTER_TRUNCATED, or any
+    non-PLAYERROW marker raise. The wire keeps level '?' — the parsed
+    doc emits no level key (Amendment 3 item 2).
+
+    Note: the ROSTER_TRUNCATED count is consumed at package() time
+    (it carries into ``truncated.roster``) — the parser only validates
+    the framing, it does not surface the count.
+    """
     rows: list[dict[str, Any]] = []
+    pids: set[int] = set()
     header_seen = False
-    truncated = 0
+    truncated_seen = False
     for line in response_parser._split_lines(lines):  # noqa: SLF001
         line = line.strip()
         if not line or line == "---END---":
@@ -240,8 +249,12 @@ def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
             continue
         prefix, _, rest = line.partition("|")
         if prefix == "ROSTER_TRUNCATED":
-            truncated = response_parser._coerce_strict(rest)  # noqa: SLF001
-            if type(truncated) is not int or truncated < 0:
+            if truncated_seen:
+                raise ValueError(
+                    f"duplicate ROSTER_TRUNCATED in roster read: {line!r}")
+            truncated_seen = True
+            value = response_parser._coerce_strict(rest)  # noqa: SLF001
+            if type(value) is not int or value < 0:
                 raise ValueError(f"malformed ROSTER_TRUNCATED: {line!r}")
             continue
         if prefix != "PLAYERROW":
@@ -258,8 +271,14 @@ def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
             raise ValueError(f"PLAYERROW level must stay unread ('?'): {line!r}")
         if kind not in ("major", "city_state", "barbarian"):
             raise ValueError(f"unknown derived kind: {line!r}")
+        pid_value = response_parser._coerce_strict(pid)  # noqa: SLF001
+        if type(pid_value) is not int or pid_value < 0:
+            raise ValueError(f"non-canonical roster pid: {line!r}")
+        if pid_value in pids:
+            raise ValueError(f"duplicate roster pid {pid_value}: {line!r}")
+        pids.add(pid_value)
         doc: dict[str, Any] = {
-            "player_id": response_parser._coerce_strict(pid),  # noqa: SLF001
+            "player_id": pid_value,
             "civ_name": civ,
             "leader": leader,
             "kind": kind,
@@ -283,13 +302,21 @@ def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
 
 
 def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
-    """SPECW|1|tiles framing -> {grid, rows, truncated, ended}. TILES_END
-    count must EQUAL the printed OWNEDROW count (mismatch = torn read)."""
+    """SPECW|1|tiles framing -> {grid, rows, truncated, ended}.
+
+    Framing state machine (Amendment 3 item 8): one GRID, zero/one
+    TILES_TRUNCATED, one terminal TILES_END. Anything else — duplicate
+    GRID, duplicate TILES_END, duplicate TILES_TRUNCATED, OWNEDROW after
+    TILES_END, foreign markers between OWNEDROWs, OWNEDROW before GRID —
+    raises. The TILES_END count must equal the printed OWNEDROW count."""
     header_seen = False
     grid: tuple[int, int] | None = None
+    grid_seen = False
+    truncated: int | None = None
+    truncated_seen = False
     rows: list[dict[str, Any]] = []
-    truncated = 0
     ended: int | None = None
+    ended_seen = False
     for line in response_parser._split_lines(lines):  # noqa: SLF001
         line = line.strip()
         if not line or line == "---END---":
@@ -299,8 +326,14 @@ def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
                 raise ValueError(f"tiles read lacks its header: {line!r}")
             header_seen = True
             continue
+        if ended_seen:
+            raise ValueError(
+                f"rows or markers after TILES_END in tiles read: {line!r}")
         prefix, _, rest = line.partition("|")
-        if prefix == "GRID" and grid is None:
+        if prefix == "GRID":
+            if grid_seen:
+                raise ValueError(f"duplicate GRID row in tiles read: {line!r}")
+            grid_seen = True
             parts = rest.split("|")
             if len(parts) != 3:
                 raise ValueError(f"malformed GRID row: {line!r}")
@@ -310,17 +343,27 @@ def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
             grid = (w, h)
             continue
         if prefix == "TILES_TRUNCATED":
-            truncated = response_parser._coerce_strict(rest)  # noqa: SLF001
-            if type(truncated) is not int or truncated < 0:
+            if truncated_seen:
+                raise ValueError(
+                    f"duplicate TILES_TRUNCATED in tiles read: {line!r}")
+            truncated_seen = True
+            value = response_parser._coerce_strict(rest)  # noqa: SLF001
+            if type(value) is not int or value < 0:
                 raise ValueError(f"malformed TILES_TRUNCATED: {line!r}")
+            truncated = value
             continue
         if prefix == "TILES_END":
-            ended = response_parser._coerce_strict(rest)  # noqa: SLF001
-            if type(ended) is not int or ended < 0:
+            ended_seen = True
+            value = response_parser._coerce_strict(rest)  # noqa: SLF001
+            if type(value) is not int or value < 0:
                 raise ValueError(f"malformed TILES_END: {line!r}")
+            ended = value
             continue
         if prefix != "OWNEDROW":
             raise ValueError(f"non-tile row in world tiles read: {line!r}")
+        if not grid_seen:
+            raise ValueError(
+                f"OWNEDROW before GRID in tiles read: {line!r}")
         parts = rest.split("|")
         if len(parts) != 10:
             raise ValueError(f"malformed OWNEDROW (want 10 fields): {line!r}")
@@ -353,7 +396,7 @@ def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
         raise ValueError(
             f"TILES_END count {ended} != printed rows {len(rows)}")
     return {"grid": {"w": grid[0], "h": grid[1]}, "rows": rows,
-            "truncated": truncated}
+            "truncated": truncated or 0}
 
 
 def parse_palette(lines: list[str]) -> dict[int, dict[str, int]]:
@@ -364,7 +407,9 @@ def parse_palette(lines: list[str]) -> dict[int, dict[str, int]]:
     [0, 2**32-1] form the viewer validates (Amendment 2 addendum: v < 0
     -> v + 2**32, and anything outside [-2**31, 2**32-1] is rejected
     BEFORE normalizing — a signed value shipped raw would drop the whole
-    world at viewer validation over a packing formality)."""
+    world at viewer validation over a packing formality). Amendment 3
+    item 8: framing is exact — one header, COLORROWs only; duplicate
+    pids or non-COLORROW markers raise."""
     header_seen = False
     out: dict[int, dict[str, int]] = {}
 
@@ -394,6 +439,8 @@ def parse_palette(lines: list[str]) -> dict[int, dict[str, int]]:
             raise ValueError(f"non-canonical COLORROW: {line!r}")
         if pid < 0:
             raise ValueError(f"negative palette player id: {line!r}")
+        if pid in out:
+            raise ValueError(f"duplicate palette pid {pid}: {line!r}")
         out[pid] = {"primary": _unsigned(primary),
                     "secondary": _unsigned(secondary)}
     if not header_seen:
@@ -408,18 +455,35 @@ def _bounded_json(doc: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Mirror spectate_capture._capped's shape (read-only dependency —
     that file's behavior is untouched): bound the doc to
     MAX_SNAPSHOT_BYTES, dropping the largest blocks first, and RECORD the
-    truncation (never silent). Grid/roster/digests/counts always survive."""
-    if len(json.dumps(doc, sort_keys=True).encode()) <= MAX_SNAPSHOT_BYTES:
+    truncation (never silent). Grid/roster/digests/counts always survive.
+
+    Amendment 3 item 7 (drop order + postcondition): world →
+    palette → cities → players. If the doc still exceeds the cap after
+    players is dropped, RAISE — the capture is unsalvageable and the
+    caller records ``spectator_world_failed`` rather than ship an
+    unbounded doc. The caller already wraps the whole capture in an
+    inner asyncio.timeout, so the raise becomes a recorded failure."""
+    size = len(json.dumps(doc, sort_keys=True).encode())
+    if size <= MAX_SNAPSHOT_BYTES:
         return doc, False
     doc = dict(doc)
-    doc.pop("owned_tiles_columns", None)
-    if len(json.dumps(doc, sort_keys=True).encode()) > MAX_SNAPSHOT_BYTES:
-        doc.pop("cities", None)
-        doc["cities"] = []
-    if len(json.dumps(doc, sort_keys=True).encode()) > MAX_SNAPSHOT_BYTES:
-        doc.pop("players", None)
-        doc["players"] = []
     truncated = dict(doc.get("truncated", {}))
+    if "owned_tiles_columns" in doc:
+        doc.pop("owned_tiles_columns", None)
+        size = len(json.dumps(doc, sort_keys=True).encode())
+    if size > MAX_SNAPSHOT_BYTES and "palette" in doc:
+        doc.pop("palette", None)
+        size = len(json.dumps(doc, sort_keys=True).encode())
+    if size > MAX_SNAPSHOT_BYTES and doc.get("cities"):
+        doc["cities"] = []
+        size = len(json.dumps(doc, sort_keys=True).encode())
+    if size > MAX_SNAPSHOT_BYTES and doc.get("players"):
+        doc["players"] = []
+        size = len(json.dumps(doc, sort_keys=True).encode())
+    if size > MAX_SNAPSHOT_BYTES:
+        raise ValueError(
+            f"world doc exceeds {MAX_SNAPSHOT_BYTES} bytes after drop order "
+            f"(remaining {size} bytes)")
     truncated["world"] = True
     doc["truncated"] = truncated
     return doc, True
@@ -493,6 +557,12 @@ def package(*, roster: list[dict[str, Any]], players: list[dict[str, Any]],
         "fog_audit": {"requested": 0, "engine_visible": 0,
                       "engine_not_visible": 0, "unavailable": 0,
                       "disagree_coords": []},
+        # Amendment 3 item 9: the world doc carries
+        # `palette_confirmed: false` — the viewer trusts the engine
+        # palette ints ONLY when this flips to true (separate follow-up
+        # commit after live_capture_check verifies the packing against a
+        # known leader colour). M4 lands with it false.
+        "palette_confirmed": False,
         "truncated": truncated,
         "read_ms": round(read_ms, 3),
     }

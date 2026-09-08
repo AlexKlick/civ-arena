@@ -1008,6 +1008,15 @@ async def phase_dispatch_hotseat(
                     seat = seats[seat_pid]
                     agent = seat["agent"]
                     lease = driver.referee.grant_lease(agent.player_id, agent.agent_id, turn)
+                    # Amendment 3 item 4: the spectator capture runs
+                    # OUTSIDE the agent_turn timeout — a slow capture must
+                    # NEVER eat the agent-turn budget. The capture's own
+                    # asyncio.timeout(limits.spectator) keeps its exception
+                    # handling. The tuple is set inside the block on a
+                    # completed seat; pre-declared here so an exception or
+                    # CancelledError exiting the block doesn't NameError
+                    # the post-block capture call.
+                    _pending_capture: tuple[int, int] | None = None
                     async with asyncio.timeout(limits.agent_turn):
                         await adapter.activate_human_seat(agent.player_id, turn)
                         await adapter.read_raw(lua_translator.unpause_local())
@@ -1043,11 +1052,23 @@ async def phase_dispatch_hotseat(
                             row["digest_changed"] and not (allowed or housekept))
                         ledger.append(row, lease)
                         audit("completed_seat_turn", row=row)
-                        await _spectator_capture(turn, agent.player_id)
+                        # Amendment 3 item 4: the spectator capture runs
+                        # OUTSIDE the agent_turn timeout scope — a slow
+                        # capture must NEVER eat the agent-turn budget. The
+                        # inner asyncio.timeout(limits.spectator) keeps its
+                        # own exception handling.
+                        _pending_capture = (turn, agent.player_id)
                         print(f"hotseat turn {turn} p{seat_pid}: "
                               f"{len(ledger.rows)} completed", flush=True)
                         if row["unexpected"] or row["violations"]:
                             raise RuntimeError("watchdog or unexplained digest anomaly")
+                    # After the agent_turn scope exits (success OR
+                    # CancelledError raised by the watchdog), run the
+                    # spectator capture with its OWN deadline. If the
+                    # block raised before reaching the audit, the
+                    # capture is skipped — nothing to capture yet.
+                    if _pending_capture is not None:
+                        await _spectator_capture(*_pending_capture)
                 stage = "finishing"
                 await popups.quiesce()
                 audit("play_complete", elapsed_s=time.monotonic() - play_started)

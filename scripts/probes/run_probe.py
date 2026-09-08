@@ -44,7 +44,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError  # noqa: E402

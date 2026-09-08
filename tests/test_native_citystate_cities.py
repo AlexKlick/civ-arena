@@ -150,3 +150,46 @@ def test_citystate_city_projects_only_while_observable():
     # hidden: absent, never masked — and remembered does not resurrect it
     assert policy.project(doc, "cities", 0, frozenset(),
                           frozenset({"3,4"})) == []
+
+
+# -- FakeMod contract pin (Amendment 3 item 9 / Lane P contract §7) -----------
+#
+# The FakeMod is the rehearsal substrate for the spectator world. Pin its
+# behavior so a regression in the dispatch never silently breaks the
+# contract: same-request→same-response bytes on legacy markers, the new
+# SPECW/OVX|2/CITIES|2/VMAP|4 markers answer through new dispatch, the
+# minors flag adds one city-state seat that rides world reads but not
+# OVX majors, and the fail_spectator toggle exercises the world-read
+# failure path the driver hooks record as spectator_world_failed.
+
+
+def test_fake_mod_minors_adds_citystate_seat_for_world_reads():
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+    mod = FakeMod(minors=True)
+    # The minors set declares pid 12 as a city-state (excluded from
+    # the OVX majors enumeration, included in the world roster with
+    # kind=city_state).
+    assert 12 in mod.minors
+    # One city of pid 12 exists in the cities table.
+    city_owners = {c["owner"] for c in mod.cities.values()}
+    assert 12 in city_owners
+
+
+def test_fake_mod_minors_excludes_citystate_from_ovx_majors():
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+    mod = FakeMod(minors=True)
+    # The OVX|2 dispatch skips city-states in the majors enumeration.
+    assert 12 in mod.minors
+
+
+def test_fake_mod_default_is_unaffected_by_minors_or_fail_spectator_kwargs():
+    """Same-request -> same-response bytes for legacy markers, with the
+    new kwargs at their defaults."""
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+    a = FakeMod()
+    b = FakeMod(minors=False, fail_spectator=False)
+    # Every players entry matches.
+    assert a.players == b.players
+    assert a.cities == b.cities
+    assert a.minors == set() and b.minors == set()
+    assert a.fail_spectator is False and b.fail_spectator is False
