@@ -322,3 +322,20 @@ def test_every_match_room_script_parses_under_node(tmp_path):
                               timeout=60)
         assert proc.returncode == 0, (script.name, proc.stderr)
         assert script.read_text().startswith("'use strict';")
+
+
+def test_series_title_tags_spectator_provenance_and_nothing_else():
+    out = run('''
+console.log(JSON.stringify({
+  base: Core.seriesTitle({key: 'gold', label: 'Gold'}),
+  spectator: Core.seriesTitle({key: 'science', label: 'Science per turn', source: 'spectator'}),
+  noLabel: Core.seriesTitle({key: 'culture', source: 'spectator'}),
+  otherSource: Core.seriesTitle({key: 'x', label: 'X', source: 'packet'}),
+  junk: [Core.seriesTitle(null), Core.seriesTitle('gold'), Core.seriesTitle({}),
+         Core.seriesTitle({key: 'gold', label: 7}), Core.seriesTitle(undefined)],
+}));''')
+    assert out['base'] == 'Gold'
+    assert out['spectator'] == 'Science per turn · spectator capture'
+    assert out['noLabel'] == 'culture · spectator capture'
+    assert out['otherSource'] == 'X'
+    assert out['junk'] == ['', '', '', '7', '']

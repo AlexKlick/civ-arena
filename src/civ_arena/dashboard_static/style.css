@@ -196,3 +196,12 @@ marker.seat1 path { fill: color-mix(in srgb, var(--teal) 55%, transparent); }
 .glyph-key b { color: var(--muted); font-weight: 600; margin: 0 2px 0 6px; }
 .run-hint { margin: -8px 0 16px; }
 tspan.status-bad { fill: var(--red); }
+
+/* M4 spectator economy on the seat cards: omniscient capture with its own
+   provenance line, visually secondary to the seat's own recorded turn. */
+.seat-spectator { border-top: 1px solid var(--line); padding: 13px 21px 15px; }
+.seat-spectator .spectator-facts { padding: 0; grid-template-columns: repeat(3, 1fr); }
+.seat-spectator .spectator-facts strong { font-size: 13px; }
+.seat-spectator .tiny { margin: 9px 0 0; }
+@media(max-width:1040px) { .seat-spectator { padding: 12px 16px 14px; } }
+@media(max-width:780px) { .seat-spectator .spectator-facts { grid-template-columns: 1fr 1fr; } }

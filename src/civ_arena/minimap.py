@@ -5,6 +5,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -13,6 +14,33 @@ from civ_arena.agents.llm.terrain_context import entity_rows, terrain_rows
 
 MAX_BYTES = 32 * 1024 * 1024
 KINDS = ('own_units', 'own_cities', 'visible_foreign_units', 'visible_foreign_cities')
+
+# Spectator world package bounds (M4 shared contract §3). The producer caps the
+# canonical package at 256 KiB and these row counts; the viewer re-checks them so
+# a hostile or corrupt log row can never reach the page as a "world".
+MAX_WORLD_BYTES = 256 * 1024
+WORLD_ROSTER_MAX = 64
+WORLD_PLAYERS_MAX = 64
+WORLD_CITIES_MAX = 256
+WORLD_TILES_MAX = 4096
+WORLD_DISAGREE_MAX = 64
+WORLD_LIST_MAX = 128
+WORLD_CITY_LIST_MAX = 64
+WORLD_OWNER_KEY = re.compile(r'[0-9]{1,10}')
+WORLD_ROSTER_ROW = frozenset({'player_id', 'civ_name', 'leader', 'is_major', 'is_barbarian',
+                              'alive', 'level', 'kind', 'suzerain'})
+WORLD_PLAYER_ROW = frozenset({'player_id', 'civ_name', 'gold', 'gold_per_turn', 'science',
+                              'culture', 'faith', 'upkeep', 'era', 'researching', 'researched',
+                              'civics'})
+WORLD_PLAYER_NUMERIC = ('gold', 'gold_per_turn', 'science', 'culture', 'faith', 'upkeep')
+WORLD_CITY_ROW = frozenset({'city_id', 'owner', 'q', 'r', 'name', 'population', 'is_capital',
+                            'is_major', 'hp', 'max_hp', 'production_queue', 'buildings',
+                            'districts'})
+WORLD_TILE_ROW = frozenset({'q', 'r', 'terrain', 'feature', 'resource', 'improvement',
+                            'district', 'river', 'city'})
+WORLD_WORLD_KEY = 'spectator_world'
+WORLD_DROPPED = ('Spectator world capture present but unusable; the omniscient territory '
+                 'layer is withheld.')
 
 
 def canonical(value):
@@ -123,6 +151,220 @@ def research_summary(state):
     return {'researching': researching,
             'researched': None if researched is None else list(researched),
             'options': options, 'options_source': origin}
+
+
+def _world_int(value, name, minimum=0, maximum=10 ** 9):
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f'invalid world {name}')
+    return value
+
+
+def _world_number(value, name, minimum=-10 ** 9, maximum=10 ** 9):
+    if type(value) not in (int, float) or not minimum <= value <= maximum \
+            or not math.isfinite(value):
+        raise ValueError(f'invalid world {name}')
+    return value
+
+
+def _world_text(value, name, limit=128):
+    if not isinstance(value, str) or len(value) > limit:
+        raise ValueError(f'invalid world {name}')
+    return value
+
+
+def _world_flag(value, name):
+    if type(value) is not bool:
+        raise ValueError(f'invalid world {name}')
+    return value
+
+
+def _world_keys(row, allowed, name):
+    if not isinstance(row, dict) or not set(row) <= allowed:
+        raise ValueError(f'invalid world {name}')
+    return row
+
+
+def validate_world(doc):
+    """Closed copy of a spectator world package (M4 contract §3, schema v1).
+
+    Blank stays unsupplied: an optional key may be absent but never silently
+    re-typed, every coordinate must pass :func:`coord`, and the producer's row
+    bounds are re-checked so a corrupt or hostile log row can never reach the
+    page dressed as an omniscient world. Anything unusable raises; the caller
+    attaches nothing rather than a partial world.
+    """
+    if not isinstance(doc, dict):
+        raise ValueError('invalid world document')
+    if len(canonical(doc).encode()) > MAX_WORLD_BYTES:
+        raise ValueError('world exceeds size bound')
+    if set(doc) - {'schema', 'after_seat', 'contexts', 'game_era', 'grid', 'roster', 'players',
+                   'cities', 'owned_tiles_columns', 'fog_audit', 'palette', 'truncated',
+                   'read_ms'}:
+        raise ValueError('invalid world top-level keys')
+    if doc.get('schema') != 1 or type(doc.get('schema')) is not int:
+        raise ValueError('invalid world schema')
+    _world_int(doc.get('after_seat'), 'after_seat', -1)
+    contexts = doc.get('contexts')
+    if not isinstance(contexts, dict) or set(contexts) != {'roster', 'tiles', 'palette'} \
+            or contexts['roster'] != 'gamecore' or contexts['tiles'] != 'gamecore' \
+            or contexts['palette'] not in ('ingame', 'absent'):
+        raise ValueError('invalid world contexts')
+    if 'game_era' in doc:
+        _world_text(doc['game_era'], 'game_era', 64)
+    grid = doc.get('grid')
+    if not isinstance(grid, dict) or set(grid) != {'w', 'h'}:
+        raise ValueError('invalid world grid')
+    _world_int(grid.get('w'), 'grid w', 1, 10 ** 6)
+    _world_int(grid.get('h'), 'grid h', 1, 10 ** 6)
+    roster = doc.get('roster')
+    if not isinstance(roster, list) or len(roster) > WORLD_ROSTER_MAX:
+        raise ValueError('invalid world roster')
+    for row in roster:
+        _world_keys(row, WORLD_ROSTER_ROW, 'roster row')
+        _world_int(row.get('player_id'), 'roster player')
+        _world_text(row.get('civ_name'), 'roster civ_name')
+        _world_text(row.get('leader'), 'roster leader')
+        _world_text(row.get('level'), 'roster level', 64)
+        _world_text(row.get('kind'), 'roster kind', 64)
+        _world_flag(row.get('is_major'), 'roster is_major')
+        _world_flag(row.get('is_barbarian'), 'roster is_barbarian')
+        _world_flag(row.get('alive'), 'roster alive')
+        _world_int(row.get('suzerain'), 'roster suzerain', -1)
+    players = doc.get('players')
+    if not isinstance(players, list) or len(players) > WORLD_PLAYERS_MAX:
+        raise ValueError('invalid world players')
+    for row in players:
+        _world_keys(row, WORLD_PLAYER_ROW, 'player row')
+        _world_int(row.get('player_id'), 'player id')
+        for field in ('civ_name', 'era', 'researching'):
+            _world_text(row.get(field), f'player {field}')
+        for field in WORLD_PLAYER_NUMERIC:
+            if field in row:
+                _world_number(row[field], f'player {field}')
+        for field in ('researched', 'civics'):
+            names = row.get(field)
+            if names is None:
+                continue
+            if not isinstance(names, list) or len(names) > WORLD_LIST_MAX:
+                raise ValueError(f'invalid world player {field}')
+            for name in names:
+                _world_text(name, f'player {field} entry', 64)
+                if not name:
+                    raise ValueError(f'invalid world player {field} entry')
+    cities = doc.get('cities')
+    if not isinstance(cities, list) or len(cities) > WORLD_CITIES_MAX:
+        raise ValueError('invalid world cities')
+    for row in cities:
+        _world_keys(row, WORLD_CITY_ROW, 'city row')
+        city_id = row.get('city_id')
+        if not isinstance(city_id, str) or not 1 <= len(city_id) <= 128:
+            raise ValueError('invalid world city_id')
+        _world_int(row.get('owner'), 'city owner')
+        for field in ('q', 'r'):
+            _world_int(row.get(field), f'city {field}', -10000, 10000)
+        if 'name' in row:
+            _world_text(row['name'], 'city name')
+        population = row.get('population')
+        if population is not None:
+            _world_int(population, 'city population')
+        for field in ('is_capital', 'is_major'):
+            if field in row:
+                _world_flag(row[field], f'city {field}')
+        if ('hp' in row) != ('max_hp' in row):
+            raise ValueError('invalid world city hp pair')
+        if 'hp' in row:
+            hp, max_hp = row['hp'], row['max_hp']
+            _world_int(hp, 'city hp', 0, 10 ** 6)
+            _world_int(max_hp, 'city max_hp', 0, 10 ** 6)
+            if hp > max_hp:
+                raise ValueError('invalid world city hp pair')
+        for field in ('production_queue', 'buildings', 'districts'):
+            items = row.get(field)
+            if items is None:
+                continue
+            if not isinstance(items, list) or len(items) > WORLD_CITY_LIST_MAX:
+                raise ValueError(f'invalid world city {field}')
+            for item in items:
+                _world_text(item, f'city {field} entry')
+    columns = doc.get('owned_tiles_columns')
+    if not isinstance(columns, dict):
+        raise ValueError('invalid world owned tiles')
+    seen, total = set(), 0
+    for owner, rows in columns.items():
+        if not WORLD_OWNER_KEY.fullmatch(owner) or not isinstance(rows, list):
+            raise ValueError('invalid world owned tile column')
+        for row in rows:
+            _world_keys(row, WORLD_TILE_ROW, 'owned tile row')
+            q, r = row.get('q'), row.get('r')
+            _world_int(q, 'tile q', -10000, 10000)
+            _world_int(r, 'tile r', -10000, 10000)
+            key = coord(f'{q},{r}')
+            if key in seen:
+                raise ValueError('duplicate owned tile coordinate')
+            seen.add(key)
+            for field in ('terrain', 'feature', 'resource', 'improvement', 'district'):
+                if field in row:
+                    _world_text(row[field], f'tile {field}', 64)
+            if 'river' in row:
+                _world_flag(row['river'], 'tile river')
+            if 'city' in row:
+                _world_int(row['city'], 'tile city', -1)
+            total += 1
+    if total > WORLD_TILES_MAX:
+        raise ValueError('invalid world owned tile count')
+    fog = doc.get('fog_audit')
+    if not isinstance(fog, dict) or set(fog) != {'requested', 'engine_visible',
+                                                 'engine_not_visible', 'unavailable',
+                                                 'disagree_coords'}:
+        raise ValueError('invalid world fog audit')
+    for field in ('requested', 'engine_visible', 'engine_not_visible', 'unavailable'):
+        _world_int(fog.get(field), f'fog {field}')
+    disagree = fog['disagree_coords']
+    if not isinstance(disagree, list) or len(disagree) > WORLD_DISAGREE_MAX:
+        raise ValueError('invalid world disagree coords')
+    for value in disagree:
+        coord(value)
+    if 'palette' in doc:
+        palette = doc['palette']
+        if not isinstance(palette, dict):
+            raise ValueError('invalid world palette')
+        for owner, colour in palette.items():
+            if not WORLD_OWNER_KEY.fullmatch(owner) or not isinstance(colour, dict) \
+                    or set(colour) != {'primary', 'secondary'}:
+                raise ValueError('invalid world palette row')
+            _world_int(colour['primary'], 'palette primary', 0, 2 ** 32 - 1)
+            _world_int(colour['secondary'], 'palette secondary', 0, 2 ** 32 - 1)
+    truncated = doc.get('truncated')
+    if not isinstance(truncated, dict) or not set(truncated) <= {'tiles', 'world', 'roster'} \
+            or not {'tiles', 'world'} <= set(truncated):
+        raise ValueError('invalid world truncation record')
+    _world_flag(truncated.get('tiles'), 'truncated tiles')
+    _world_flag(truncated.get('world'), 'truncated world')
+    if 'roster' in truncated:
+        _world_int(truncated['roster'], 'truncated roster')
+    _world_number(doc.get('read_ms'), 'read_ms', 0, 10 ** 6)
+    return deepcopy(doc)
+
+
+def world_records(events, cutoff_turn):
+    """World-carrying records at/before the bundle's turn cutoff, in stream order.
+
+    A record is either the hotseat `spectator_world` audit (spectator scope) or a
+    `SPECTATOR_SNAPSHOT` whose payload carries a `world` block. Anything else is
+    inert here, exactly as it is everywhere else in this viewer.
+    """
+    found = []
+    for event in events:
+        if event.get('audit') == WORLD_WORLD_KEY:
+            if event.get('visibility_scope') != 'spectator' or 'world' not in event:
+                continue
+        elif event.get('kind') != 'SPECTATOR_SNAPSHOT' or 'world' not in event:
+            continue
+        turn = event.get('turn')
+        if type(turn) is not int or not 0 <= turn <= cutoff_turn:
+            continue
+        found.append(event)
+    return found
 
 
 def build(packets: list[dict], events: list[dict], *, player: int | None = None,
@@ -290,6 +532,29 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
               'axis': 'Increasing r is engine-grid north; screen north is a viewer convention.',
               'seats': [{k: v for k, v in seat.items() if k != 'terrain'}
                         for _, seat in sorted(seats.items())]}
+    # The spectator world is selected only on the spectator route: the latest
+    # world-carrying record at/before the bundle's as-of turn, validated whole.
+    # A present-but-unusable world attaches nothing (never a partial world) and
+    # says so once; player routes never look at spectator-scope records.
+    world = None
+    world_warning = False
+    if spectator:
+        candidates = world_records(events, max(turn for _, turn, _, _ in ordered))
+        if candidates:
+            latest = max(candidates, key=lambda event: event['seq'])
+            try:
+                doc = validate_world(latest['world'])
+            except (ValueError, TypeError, RecursionError):
+                world_warning = True
+            else:
+                world = {**doc, 'receipt': {
+                    'seq': latest['seq'], 'turn': latest['turn'],
+                    'source': WORLD_WORLD_KEY if latest.get('audit') == WORLD_WORLD_KEY
+                    else 'SPECTATOR_SNAPSHOT', 'ts': latest.get('ts')}}
+    if world is not None:
+        result['world'] = world
+    if world_warning:
+        result['limits'].append(WORLD_DROPPED)
     result['digest'] = digest(result)
     if len(canonical(result).encode()) > MAX_BYTES:
         raise ValueError('output exceeds 32 MiB')

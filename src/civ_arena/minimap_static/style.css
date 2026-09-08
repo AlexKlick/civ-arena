@@ -213,6 +213,69 @@ text.city-pop,#world text.city-pop {
 .tint {
   pointer-events:none;
 }
+/* Spectator territory layer (M4): omniscient capture between the observed
+   tints and the observed borders. The frontier is slightly heavier than the
+   observed 2.2 so the two provenances stay visually distinct, and the layer
+   toggles as a whole (never per owner) from the legend checkbox. Colours are
+   runtime rgb() strings from engine palette ints — data, not CSS literals. */
+.border.world {
+  stroke-width:2.6;
+}
+.tint.world {
+  pointer-events:none;
+}
+.layer-world.off {
+  display:none;
+}
+.world-capital {
+  fill:var(--ink3);
+  stroke:var(--halo_dark);
+  stroke-width:.8;
+}
+.world-city text.label {
+  font-size:7px;
+}
+.legend-check {
+  margin:0;
+}
+.roster {
+  font-size:12px;
+}
+.roster p {
+  font-size:11px;
+  margin:3px 0 8px;
+}
+.roster-row {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:baseline;
+  gap:6px;
+  padding:5px 8px;
+  margin:3px 0;
+  background:var(--panel3);
+  border-left:2px solid var(--card_line);
+  border-radius:3px;
+  font-size:11px;
+}
+.roster-row strong {
+  font-size:11px;
+  color:var(--ink2);
+}
+.roster-row.dead {
+  opacity:.55;
+}
+.roster-id {
+  color:var(--dim);
+  font-size:10px;
+  letter-spacing:.5px;
+}
+.roster-leader,.roster-kind,.roster-suzerain,.roster-alive {
+  color:var(--muted);
+  font-size:10px;
+}
+.roster-alive {
+  margin-left:auto;
+}
 /* Recorded decision overlay: the candidate polygon is the hit target, so it is the
    only part of the group that takes pointer events. Outline width carries the
    recorded selection weight; hatch carries exclusion; one solid edge carries the

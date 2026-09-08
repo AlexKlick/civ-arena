@@ -1,0 +1,201 @@
+{
+  "scope": "Ephemeral loopback dashboard server over a COPY of minimax100-20260907T183425Z plus a derived world-carrying event log (schema fixture translated into the observed area); headless /usr/bin/google-chrome; the original run directory was read only; no tuner, match, provider or live engine touched.",
+  "commit": "234c7c8",
+  "head_at_start": "234c7c8",
+  "head_at_end": "234c7c8",
+  "derived_run": "minimax100-20260907T183425Z-m4world",
+  "copied_run": "minimax100-20260907T183425Z",
+  "world": {
+    "fixture": "/home/alexk/civ-arena-m4-viewer-20260908/tests/fixtures/spectator_world_sample.json",
+    "offset": [
+      41,
+      12
+    ],
+    "turn": 34,
+    "older_snapshot_turn": 30,
+    "records_injected": 2,
+    "insert_at_seq": 3703,
+    "source_events": 4234
+  },
+  "checks": [
+    {
+      "group": "V1",
+      "check": "Python API attaches the world on the spectator route only",
+      "result": "pass",
+      "detail": "spectator bundle world receipt {'seq': 3704, 'turn': 34, 'source': 'spectator_world', 'ts': '2026-09-07T18:40:57.567292+00:00'}, owner columns {'0': 6, '1': 5, '12': 12}; player bundle has none; both pages rendered through minimap.render into the evidence dir (909655 / 376461 bytes)",
+      "seconds": 0.22
+    },
+    {
+      "group": "V2",
+      "check": "territory tints and frontier paths render with data-owner",
+      "result": "pass",
+      "detail": "one tint + one frontier path per owner ['0', '1', '12'], each data-owner addressed, computed stroke-width 2.6px, fill none, strokes ['rgb(115,189,229)', 'rgb(184,203,101)', 'rgb(230,142,212)'] (engine palette rgb() strings), 62 frontier segments",
+      "seconds": 0.05
+    },
+    {
+      "group": "V3",
+      "check": "the toggle hides and shows ONLY the world layer",
+      "result": "pass",
+      "detail": "unchecking \"Spectator territory (omniscient capture)\" set .layer-world to display:none while .layer-borders stayed inline and 3 tints were removed from paint; re-checking restored them",
+      "seconds": 0.06
+    },
+    {
+      "group": "V4",
+      "check": "roster panel lists the city-state with kind and suzerain",
+      "result": "pass",
+      "detail": "3 roster rows; the city-state reads {'id': 'P12', 'civ': 'GENEVA', 'kind': 'city_state', 'suzerain': 'suzerain P0', 'alive': 'alive'}; the panel head prints \"Engine roster at the spectator capture (seat 1 \u00b7 turn 34).\"",
+      "seconds": 0.0
+    },
+    {
+      "group": "V5",
+      "check": "the two provenance rows print verbatim",
+      "result": "pass",
+      "detail": "both provenance rows print verbatim (\"Territory: spectator capture at seat 1 \u00b7 turn 34\", \"Observed ownership: seat packets\") and the fog counters (engine visible 21 \u00b7 engine not visible 1 \u00b7 unavailable 1 \u00b7 disagreeing 2) sit in the Provenance group",
+      "seconds": 0.0
+    },
+    {
+      "group": "V6",
+      "check": "city-state city badge carries the roster name and star",
+      "result": "pass",
+      "detail": "exactly one city-state badge: {'owner': '12', 'label': 'GENEVA', 'capital': 1, 'pop': '3'} at the recorded coordinate 47,16 with a capital star path (majors' cities stay seat badges)",
+      "seconds": 0.03
+    },
+    {
+      "group": "V7",
+      "check": "screenshots at 1440 and 390 with no horizontal overflow",
+      "result": "pass",
+      "detail": "territory-1440.png, roster-panel.png and territory-390.png written; at 390px scrollWidth<=innerWidth [390, 390]",
+      "seconds": 1.79
+    },
+    {
+      "group": "V8",
+      "check": "the player route carries NO world layer",
+      "result": "pass",
+      "detail": "/map?\u2026&player=0 over the same log: no world in the embedded data, no world layer paths, no toggle, and the roster panel reads \"Spectator roster not recorded in this ex\u2026\"",
+      "seconds": 0.16
+    },
+    {
+      "group": "V9",
+      "check": "zero page/console errors, same-origin requests only",
+      "result": "pass",
+      "detail": "0 page errors and 0 console script errors across 2 request(s), all same-origin ['http://127.0.0.1:32879/map']",
+      "seconds": 0.0
+    }
+  ],
+  "totals": {
+    "checks": 9,
+    "passed": 9,
+    "failed": 0,
+    "page_errors": 0,
+    "console_script_errors": 0,
+    "resource_notices": 0,
+    "requests": 2
+  },
+  "errors": [],
+  "resource_notices": [],
+  "screenshots": {
+    "territory-1440": "/home/alexk/civ-arena-m4-viewer-20260908/runs/m4-capture-evidence-20260908/territory-1440.png",
+    "roster-panel": "/home/alexk/civ-arena-m4-viewer-20260908/runs/m4-capture-evidence-20260908/roster-panel.png",
+    "territory-390": "/home/alexk/civ-arena-m4-viewer-20260908/runs/m4-capture-evidence-20260908/territory-390.png"
+  },
+  "facts": {
+    "origin": "http://127.0.0.1:32879/",
+    "python_api": {
+      "receipt": {
+        "seq": 3704,
+        "turn": 34,
+        "source": "spectator_world",
+        "ts": "2026-09-07T18:40:57.567292+00:00"
+      },
+      "owners": {
+        "0": 6,
+        "1": 5,
+        "12": 12
+      },
+      "spectator_html_bytes": 909655,
+      "player_html_bytes": 376461
+    },
+    "territory": {
+      "owners": [
+        "0",
+        "1",
+        "12"
+      ],
+      "strokes": [
+        "rgb(115,189,229)",
+        "rgb(184,203,101)",
+        "rgb(230,142,212)"
+      ],
+      "segments": {
+        "0": 20,
+        "1": 16,
+        "12": 26
+      }
+    },
+    "toggle": {
+      "tints_before": 3,
+      "hidden_state": "none",
+      "observed_layer_display": "inline"
+    },
+    "roster": [
+      {
+        "id": "P0",
+        "civ": "EGYPT",
+        "kind": "major",
+        "suzerain": "no suzerain recorded",
+        "alive": "alive"
+      },
+      {
+        "id": "P1",
+        "civ": "SUMERIA",
+        "kind": "major",
+        "suzerain": "no suzerain recorded",
+        "alive": "alive"
+      },
+      {
+        "id": "P12",
+        "civ": "GENEVA",
+        "kind": "city_state",
+        "suzerain": "suzerain P0",
+        "alive": "alive"
+      }
+    ],
+    "legend_snippets": {
+      "territory_row": true,
+      "observed_row": true,
+      "fog": true
+    },
+    "world_city": {
+      "dom": {
+        "owner": "12",
+        "label": "GENEVA",
+        "capital": 1,
+        "pop": "3"
+      },
+      "city": {
+        "buildings": [],
+        "city_id": "c12:131075",
+        "districts": [],
+        "is_capital": true,
+        "is_major": false,
+        "name": "GENEVA",
+        "owner": 12,
+        "population": 3,
+        "production_queue": [],
+        "q": 47,
+        "r": 16
+      }
+    },
+    "overflow_390": [
+      390,
+      390
+    ],
+    "player_route": {
+      "world": true,
+      "roster": "Spectator roster not recorded in this export."
+    },
+    "requests": [
+      "http://127.0.0.1:32879/map"
+    ]
+  }
+}
