@@ -570,7 +570,12 @@ def build(packets: list[dict], events: list[dict], *, player: int | None = None,
         seat['snapshots'].append(snapshot)
     from civ_arena.productive_map import project
     for pid, seat in seats.items():
-        seat['productive_actions'] = project(events, pid)
+        # Codex r2 finding 1: pass player_events (the spectator-scope
+        # filtered walk) so a hostile spectator audit impersonating a
+        # seat's TOOL_CALL can never reach a player bundle's
+        # productive_actions list. The graph/cutoff walks already use
+        # player_events — this closes the last remaining leak path.
+        seat['productive_actions'] = project(player_events, pid)
         own_events = [e for e in player_events if type(e.get('player_id')) is int
                       and e['player_id'] == pid and type(e.get('turn')) is int
                       and e['turn'] >= 1]

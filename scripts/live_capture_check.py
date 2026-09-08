@@ -88,8 +88,10 @@ async def main(host: str, port: int) -> None:
                   " cities enumerate only on a driver-attached game")
         for key, missing in _fallbacks(extended,
                 expected=frozenset(("name", "population", "is_capital", "is_major",
-                                    "hp", "max_hp", "food", "thr", "surplus",
-                                    "grow", "prodturns", "buildings", "districts",
+                                    "hp", "max_hp", "food_bucket",
+                                    "food_threshold", "food_surplus",
+                                    "turns_to_growth", "turns_to_production",
+                                    "buildings", "districts",
                                     "production_queue"))).items():
             if missing:
                 print(f"    {key}: unread(absent) on {missing}/{len(extended)}")

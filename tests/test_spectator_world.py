@@ -43,7 +43,8 @@ def _texlua(tmp_path, source: str) -> list[str]:
 
 
 def test_roster_read_enumerates_all_player_kinds(tmp_path):
-    rows = wc.parse_roster(_texlua(tmp_path, ROSTER_STUB + wc.roster_read()))
+    rows, _truncated = wc.parse_roster(
+        _texlua(tmp_path, ROSTER_STUB + wc.roster_read()))
     by_pid = {r["player_id"]: r for r in rows}
     assert set(by_pid) == {0, 12, 63}
     assert by_pid[0]["kind"] == "major" and by_pid[0]["is_major"] is True
@@ -127,10 +128,11 @@ end
 PlayerManager={{GetAlive=function() return {{{players}}} end}}
 """
     lines = _texlua(tmp_path, stub + wc.roster_read())
-    rows = wc.parse_roster(lines)
+    rows, truncated = wc.parse_roster(lines)
     assert len(rows) == wc.MAX_ROSTER
     assert any(r.startswith("ROSTER_TRUNCATED|1") for r in lines)
     doc = wc.package(roster=rows + [dict(rows[0], player_id=999)],
+                     roster_truncated=truncated,
                      players=[], cities=[], tiles={"grid": {"w": 1, "h": 1},
                                                    "rows": [], "truncated": 0},
                      palette=None, after_seat=-1, game_era=None, read_ms=0.0)
@@ -210,8 +212,8 @@ def test_package_amendment_two_key_sets_and_city_join():
     tiles = {"grid": {"w": 40, "h": 40}, "rows": [
         {"q": 0, "r": 0, "owner": 0, "terrain": "TERRAIN_GRASS",
          "feature": "FEATURE_FOREST", "river": True}], "truncated": 0}
-    doc = wc.package(roster=roster, players=players, cities=cities,
-                     tiles=tiles, palette=None, after_seat=1,
+    doc = wc.package(roster=roster, roster_truncated=0, players=players,
+                     cities=cities, tiles=tiles, palette=None, after_seat=1,
                      game_era="ERA_ANCIENT", read_ms=1.25)
     # Amendment 2 closed key sets — exact
     assert set(doc["players"][0]) == {
@@ -231,8 +233,8 @@ def test_package_amendment_two_key_sets_and_city_join():
     assert doc["schema"] == 1 and doc["read_ms"] == 1.25
     assert doc["truncated"]["world"] is False
     assert "palette" not in doc
-    palette_doc = wc.package(roster=roster, players=[], cities=[],
-                             tiles=tiles, palette={0: {"primary": 5,
+    palette_doc = wc.package(roster=roster, roster_truncated=0, players=[],
+                             cities=[], tiles=tiles, palette={0: {"primary": 5,
                                                        "secondary": 6}},
                              after_seat=-1, game_era=None, read_ms=0.0)
     assert palette_doc["contexts"]["palette"] == "ingame"
@@ -245,8 +247,9 @@ def test_package_cap_records_truncation_never_silent(monkeypatch):
     tiles = {"grid": {"w": 1, "h": 1},
              "rows": [dict(big, q=i) for i in range(4000)], "truncated": 0}
     monkeypatch.setattr(wc, "MAX_SNAPSHOT_BYTES", 2048)
-    doc = wc.package(roster=[], players=[], cities=[], tiles=tiles,
-                     palette=None, after_seat=-1, game_era=None, read_ms=0.0)
+    doc = wc.package(roster=[], roster_truncated=0, players=[], cities=[],
+                     tiles=tiles, palette=None, after_seat=-1, game_era=None,
+                     read_ms=0.0)
     assert doc["truncated"]["world"] is True
     assert not doc.get("owned_tiles_columns"), "the biggest block dropped"
     assert doc["roster"] == [] and doc["grid"] == {"w": 1, "h": 1}
@@ -493,3 +496,61 @@ class _NoopRedactor:
 
     def sensitive(self, key):
         return False
+
+
+# -- Codex r2 follow-up pins ---------------------------------------------------
+#
+# Three regression tests for the fix-pass-2 corrections that the original
+# test set didn't pin: ROSTER_TRUNCATED count carry-through, tile framing
+# order, and world-doc absence discipline for `researching`/`civics`.
+
+
+def test_roster_truncated_count_carries_into_doc():
+    """Codex r2 finding 5: a real engine emits 64 printed rows AND
+    ROSTER_TRUNCATED|N — the count must surface in truncated.roster
+    even when the wire stays within the bound. Previously the
+    truncation was dropped entirely between parse and package."""
+    rows = ["SPECW|1|roster",
+            "PLAYERROW|0|C|L|true|false|true|?|major|-1",
+            "PLAYERROW|1|C|L|true|false|true|?|major|-1",
+            "ROSTER_TRUNCATED|5",
+            "---END---"]
+    parsed, truncated = wc.parse_roster(rows)
+    assert truncated == 5
+    doc = wc.package(roster=parsed, roster_truncated=truncated, players=[],
+                     cities=[], tiles={"grid": {"w": 1, "h": 1}, "rows": [],
+                                       "truncated": 0},
+                     palette=None, after_seat=-1, game_era=None, read_ms=0.0)
+    assert doc["truncated"]["roster"] == 5
+
+
+def test_tile_framing_rejects_truncated_before_grid_and_ownedrow_after_truncated():
+    """Codex r2 finding 6: framing order is GRID -> OWNEDROW* ->
+    optional TILES_TRUNCATED -> TILES_END. TILES_TRUNCATED before
+    GRID, and OWNEDROW after TILES_TRUNCATED, raise."""
+    with pytest.raises(ValueError, match="TILES_TRUNCATED before GRID"):
+        wc.parse_owned_tiles(["SPECW|1|tiles",
+                              "TILES_TRUNCATED|1",
+                              "GRID|1|1|1",
+                              "OWNEDROW|0|0|0|T|-|-|-|-|-|0",
+                              "TILES_END|1", "---END---"])
+    with pytest.raises(ValueError, match="OWNEDROW after TILES_TRUNCATED"):
+        wc.parse_owned_tiles(["SPECW|1|tiles",
+                              "GRID|1|1|1",
+                              "OWNEDROW|0|0|0|T|-|-|-|-|-|0",
+                              "TILES_TRUNCATED|1",
+                              "OWNEDROW|0|1|0|T|-|-|-|-|-|0",
+                              "TILES_END|2", "---END---"])
+
+
+def test_world_doc_omits_null_researching_and_null_civics():
+    """Codex r2 finding 4: world doc never carries `researching: None`
+    or `civics: None` — absent = unsupplied."""
+    rows = [{"player_id": 0, "civ_name": "C", "gold": 100, "researched": [],
+             "researching": None, "science": 10, "culture": 8, "faith": 5,
+             "gold_per_turn": 2, "upkeep": 1, "era": "0", "civics": None}]
+    doc = wc.package(roster=[], roster_truncated=0, players=rows, cities=[],
+                     tiles={"grid": {"w": 1, "h": 1}, "rows": [], "truncated": 0},
+                     palette=None, after_seat=0, game_era=None, read_ms=0.0)
+    assert "researching" not in doc["players"][0]
+    assert "civics" not in doc["players"][0]

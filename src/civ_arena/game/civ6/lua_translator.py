@@ -300,15 +300,17 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
         name = string.gsub(name, "|", "-")
         name = string.gsub(name, "%c", " ")
         local queue = "?"
-        -- Amendment 3 item 6: the ENTIRE minor build-queue read is
-        -- pcall-wrapped; majors keep the fail-loud contract — a missing
-        -- queue/hash on a major still raises so the test suite catches
-        -- it, not a silently-unread row.
-        local bq = nil
-        local bq_ok = false
+        -- Amendment 3 item 6 (Codex r2 finding 3): the ENTIRE minor
+        -- build-queue read is pcall-wrapped; majors keep the fail-loud
+        -- contract. The hash is cached in `bq_h` so neither path
+        -- re-calls GetCurrentProductionTypeHash outside pcall, and
+        -- `resolved` flows to `queue` consistently so a Scout (or any
+        -- resolved unit) actually reaches the wire instead of "?" —
+        -- the previous rewrite was a no-op for nonzero hashes.
+        local bq_h = nil
         if major == "true" then
             -- majors: no swallow. Original fail-loud contract.
-            bq = city:GetBuildQueue()
+            local bq = city:GetBuildQueue()
             if bq == nil or bq.GetCurrentProductionTypeHash == nil then
                 error("city production queue unavailable")
             end
@@ -316,7 +318,7 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
             if type(h) ~= "number" then
                 error("city production hash unavailable")
             end
-            bq_ok = true
+            bq_h = h
         else
             -- minors: every accessor below is pcall-wrapped. A nil
             -- accessor or a non-numeric hash leaves queue = "?".
@@ -325,14 +327,13 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
                 if q ~= nil and q.GetCurrentProductionTypeHash ~= nil then
                     local h = q:GetCurrentProductionTypeHash()
                     if type(h) == "number" then
-                        bq = q
-                        bq_ok = true
+                        bq_h = h
                     end
                 end
             end)
         end
-        if bq_ok then
-            local h = bq:GetCurrentProductionTypeHash()
+        if bq_h ~= nil then
+            local h = bq_h
             if h == 0 then
                 queue = "-"
             else
@@ -351,24 +352,30 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
                     or string.match(resolved, '^BUILDING_PROJECT_') then
                     error('legacy queue collides with reserved productive namespace')
                 end
-                if queue == "-" and GameInfo.Districts ~= nil then
+                -- Districts/Projects fallback: fire only when Units AND
+                -- Buildings both failed to resolve. The previous
+                -- rewrite wrote to `queue` (still "-") instead of
+                -- `resolved`, so the lookup never fired AND the
+                -- resolved value never reached the wire.
+                if resolved == "-" and GameInfo.Districts ~= nil then
                     for row in GameInfo.Districts() do
-                        if row.Hash == h then queue = row.DistrictType break end
+                        if row.Hash == h then resolved = row.DistrictType break end
                     end
                 end
-                if queue == "-" and GameInfo.Projects ~= nil then
+                if resolved == "-" and GameInfo.Projects ~= nil then
                     for row in GameInfo.Projects() do
-                        if row.Hash == h then queue = row.ProjectType break end
+                        if row.Hash == h then resolved = row.ProjectType break end
                     end
                 end
-                if queue == "-" then
-                    queue = "UNKNOWN_PRODUCTION_" .. tostring(h)
+                if resolved == "-" then
+                    resolved = "UNKNOWN_PRODUCTION_" .. tostring(h)
                 end
-                if string.sub(queue, 1, 5) == "UNIT_" then
-                    queue = string.sub(queue, 6)
-                elseif string.sub(queue, 1, 9) == "BUILDING_" then
-                    queue = string.sub(queue, 10)
+                if string.sub(resolved, 1, 5) == "UNIT_" then
+                    resolved = string.sub(resolved, 6)
+                elseif string.sub(resolved, 1, 9) == "BUILDING_" then
+                    resolved = string.sub(resolved, 10)
                 end
+                queue = resolved
             end
         end
         local pop = 1
