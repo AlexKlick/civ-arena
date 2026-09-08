@@ -1140,3 +1140,78 @@ The retained continuation command is
 `runs/restart-evidence-20260905T002948Z/resume-command.json`; do not replay it
 against the now-advanced map. Stop-and-preserve instructions for the observer
 are in the browser runbook, and no automatic save recovery was attempted.
+
+## 2026-09-08 — M4 step 0: read-only spectator accessor probe authored
+
+The spectator-capture M4 step 0 probe is authored and offline-proven (no
+game touched, no live run yet): `scripts/probes/spectator_accessors.lua`
+plus the runner `scripts/probes/run_probe.py` and the texlua harness
+`tests/test_probe_lua.py`. Against a real parked game it answers which
+spectator-relevant accessors exist in which Lua context and what shape
+they return: PlayersVisibility (`IsVisible`/`IsRevealed` on a known plot),
+plot accessors on a city centre and one neighbour, `Map.GetPlotCount` /
+`GetGridSize` / `GetPlotByIndex(0)`, player yields/treasury/era/culture/
+techs/configuration/influence for player 0 AND the first non-major, city
+accessors including `GetBuildQueue():GetCurrentProductionTypeHash()` for a
+MAJOR's city and a MINOR's city (the minor queue may be nil), and the
+InGame UI color accessors (`UI.GetPlayerColors` — the ABGR packing
+question). Every accessor call is pcall-wrapped; a missing global or
+method emits a `missing` row, never an error; every successful call also
+emits a `.raw` row carrying every returned value, so multi-return and
+packing questions are answerable offline from the log.
+
+Read-only by construction: the payload issues no Request*, Set*, Broadcast
+or UI action in either context. The runner refuses to dial when any
+ESTABLISHED connection already touches the tuner port (single-client rule,
+§5), streams rows to stdout and `runs/spectator-capture-probe-<ts>/`,
+emits a final `PROBE_WALL|<ms>` row, and exits nonzero on transport
+error, a missing `PROBE_END`, or a declared-vs-received row-count
+mismatch. The Lua uses no escape sequences and no pattern-walk builtins
+(the tuner lexer rejects them); table samples are placeholders so repeated
+runs are byte-identical.
+
+How to run against the parked game (one context per invocation, never both
+at once — the tuner serves a single client):
+
+```bash
+PYTHONPATH=src:tests /home/alexk/documents/civ-arena/.venv/bin/python \
+  scripts/probes/run_probe.py --context gamecore
+PYTHONPATH=src:tests /home/alexk/documents/civ-arena/.venv/bin/python \
+  scripts/probes/run_probe.py --context ingame
+```
+
+`--context gamecore` rides `execute_read` (GameCore_Tuner — the transport
+every state read uses, as in `scripts/live_seat_check.py`);
+`--context ingame` rides `execute_write` (the InGame VM — the transport
+the repo's own InGame READS use, e.g. `cities_read`; a transport choice,
+not a mutation). `--port` (default 4318), `--lua`, `--out`, `--timeout`
+are overridable.
+
+Offline evidence: texlua harness `tests/test_probe_lua.py` — 7 passed
+(completion sentinel + honest count, 4-field rows, no escape sequences in
+source or rows, missing-globals-as-missing, bounded player enumeration,
+determinism across two runs, shape pins incl. the nil minor queue); the
+probe also runs clean against a bare texlua VM with no globals at all
+(149 `missing` rows, zero errors, zero row-shape violations); ruff clean
+on the runner and harness. Live results are blocked until the coordinator
+points the runner at a parked game (first run: babysit for PROBE_END and
+compare the two contexts' missing-vs-present tables).
+
+Post-run fix (same day): the first live probe run found NO city through the
+`Game.GetPlayers()` route (every city/plot row missing), so the probe now
+mirrors `cities_read()`'s live-proven enumeration exactly —
+`PlayerManager.GetAliveMajors()` / `GetAlive()` then `p:GetCities():Members()`
+— with per-route `city.enum.*` diagnostic rows and a `city.anchor.route`
+row naming the winning route; plots anchor on `city:GetPlot()` (fallback
+`Map.GetPlot(x, y)`) with the neighbour via `Map.GetNeighborPlot(x, y, 2)`
+(fallback `+1` offset); PlayersVisibility probes moved onto the city-centre
+plot and its neighbour (no corner-plot fallback); second-pass yield
+candidates added (treasury GetGoldYield/GetScienceYield/GetFaithYield/
+GetTotalMaintenance/GetMaintenance, player:GetReligion():GetFaithYield)
+after the first-pass getters came back missing on GameCore. Live-confirmed
+so far from the first run: PlayersVisibility[0]:IsVisible/IsRevealed exist
+on GameCore (booleans), Map.GetPlotCount 2280 / GetGridSize 60,38,
+treasury GetGoldBalance works (GetGold/GetScience/GetCulture/GetFaith/
+GetGoldFromDiplomacy missing on GameCore), GetCultureYield works,
+GetCulturalProgress/GetCostNextCivic InGame-only (returned 0),
+UI.GetPlayerColors InGame-only returning two ints (ABGR).
