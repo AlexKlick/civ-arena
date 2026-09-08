@@ -131,7 +131,7 @@ def test_fake_overlapping_windows_diff_own_baselines() -> None:
     mod.respond("Puppeteer.BeginAmbientWindow(1)")
     mod.respond("Puppeteer.BeginAmbientWindow(2)")
     # player 1's unit marches while every window is open
-    for u in sorted(mod.units.values()):
+    for _, u in sorted(mod.units.items()):
         if u["owner"] == 1:
             u["x"] += 3
             break
