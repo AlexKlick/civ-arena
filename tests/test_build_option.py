@@ -45,7 +45,8 @@ def test_completion_records_outcome_and_clears_pending():
     events = monitor.observe(turn=13, cities=[city(queue=[])], units=[unit()])
     outcome = events_by_kind(events)["completed"]
     assert outcome["verdict"] == "in_estimated_window"
-    assert monitor.advisory(turn=13, cities=[city(queue=[])], production={},
+    assert monitor.advisory(turn=13, cities=[city(queue=[])], units=[unit()],
+                            production={},
                             preferences=[])["recent_outcomes"] == [outcome]
     assert monitor.observe(turn=14, cities=[city(queue=[])], units=[unit()]) == []
 
@@ -90,6 +91,35 @@ def test_censor_event_fires_once_per_pending_build():
     assert monitor._pending["c0:1"]["censored_turn"] == 11
 
 
+def test_rate_estimate_change_censors_when_fresh_catalog_available():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast(turns=3))
+    stale = monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])], units=[unit()])
+    assert stale == []  # no fresh catalog row: recheck unavailable, nothing guessed
+    changed = monitor.observe(turn=12, cities=[city(queue=["MONUMENT"])], units=[unit()],
+                              catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                                                  "cost": 25, "turns": 6}]})
+    assert [event["event"] for event in changed] == ["rate_estimate_changed"]
+    assert changed[0]["previous_engine_turns"] == 3
+    assert changed[0]["engine_turns"] == 6
+    repeat = monitor.observe(turn=13, cities=[city(queue=["MONUMENT"])], units=[unit()],
+                             catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                                                 "cost": 25, "turns": 6}]})
+    assert repeat == []
+    completed = monitor.observe(turn=14, cities=[city(queue=[])], units=[unit()])
+    assert completed[0]["censored"] == "rate_estimate_changed"
+
+
+def test_unchanged_rate_estimate_does_not_censor():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast(turns=3))
+    events = monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])], units=[unit()],
+                             catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                                                 "cost": 25, "turns": 3}]})
+    assert events == []
+    assert monitor._pending["c0:1"]["censored"] is None
+
+
 def test_threat_outside_radius_does_not_censor():
     monitor = DevelopmentOptionMonitor(0)
     monitor.register(forecast())
@@ -103,8 +133,8 @@ def test_queue_change_invalidates_option():
     monitor.register(forecast())
     events = monitor.observe(turn=12, cities=[city(queue=["WARRIOR"])], units=[unit()])
     assert events_by_kind(events)["invalidated_queue_changed"]["item_id"] == "MONUMENT"
-    assert monitor.advisory(turn=12, cities=[city(queue=["WARRIOR"])], production={},
-                            preferences=[])["pending"] == []
+    assert monitor.advisory(turn=12, cities=[city(queue=["WARRIOR"])], units=[unit()],
+                            production={}, preferences=[])["pending"] == []
 
 
 def test_overdue_reported_once_while_still_pending():
@@ -121,8 +151,8 @@ def test_different_reissue_supersedes_pending_plan():
     monitor = DevelopmentOptionMonitor(0)
     monitor.register(forecast())
     monitor.register(forecast(item="GRANARY", turn=11))
-    outcomes = monitor.advisory(turn=11, cities=[city()], production={},
-                                preferences=[])["recent_outcomes"]
+    outcomes = monitor.advisory(turn=11, cities=[city()], units=[unit()],
+                                production={}, preferences=[])["recent_outcomes"]
     assert outcomes[0]["event"] == "invalidated_superseded"
     assert monitor._pending["c0:1"]["forecast"]["item_id"] == "GRANARY"
 
@@ -150,8 +180,8 @@ def test_advisory_shape_bounded_and_non_executive():
     cities = [city(f"c0:{i}") for i in range(1, 5)]
     production = {f"c0:{i}": [{"item_id": "MONUMENT", "kind": "building",
                                "cost": 25, "turns": 3}] for i in range(1, 5)}
-    block = monitor.advisory(turn=12, cities=cities, production=production,
-                             preferences=["MONUMENT"])
+    block = monitor.advisory(turn=12, cities=cities, units=[unit()],
+                             production=production, preferences=["MONUMENT"])
     assert block["authority"] == "advisory_only_executor_unchanged"
     assert block["basis"]
     assert len(block["city_plans"]) == MAX_ADVISORY_CITIES
@@ -159,5 +189,25 @@ def test_advisory_shape_bounded_and_non_executive():
     assert block["pending"][0]["item_id"] == "MONUMENT"
     assert "execute" not in str(block) and "tool_call" not in str(block)
     queued = city("c0:9", queue=["WALLS"])
-    assert monitor.advisory(turn=12, cities=[*cities, queued], production=production,
+    assert monitor.advisory(turn=12, cities=[*cities, queued], units=[unit()],
+                            production=production,
                             preferences=[])["city_plans"].keys() == {"c0:1", "c0:2"}
+
+
+def test_advisory_carries_confirmed_threats_without_flipping_recommendation():
+    monitor = DevelopmentOptionMonitor(0)
+    raider = unit("u9:1", owner=1, kind="WARRIOR", coord="2,0", barbarian=True)
+    block = monitor.advisory(
+        turn=12, cities=[city()], units=[unit(), raider],
+        production={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                              "cost": 25, "turns": 3}]},
+        preferences=["MONUMENT"])
+    plan = block["city_plans"]["c0:1"]
+    # Threat is visible to the model; the shortfall is unknown, so the
+    # recommendation stands and the contingency names the preempt condition.
+    assert plan["observed_threat_unit_ids"] == ["u9:1"]
+    assert plan["selection"]["recommended"] == "MONUMENT"
+    assert plan["threat_contingency"]["preempt_condition"] == \
+        "defenders_owned_queued_reserved < defense_goal"
+    assert plan["threat_contingency"]["shortfall_basis"] == \
+        "unknown_inventory_not_evaluated"

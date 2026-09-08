@@ -287,6 +287,17 @@ class StrategicController:
                 self._capital.observe(curator.state, turn)
                 if self._capital.failure_reason:
                     raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
+            if self._forecast is not None:
+                # Resolve pending options BEFORE this turn's decision and any
+                # economy action: the model must see current completion and
+                # censor state, and an interrupt must be visible before the
+                # next primitive effect.
+                for event in self._forecast.observe(turn=turn,
+                                                    cities=curator.own('get_cities'),
+                                                    units=curator.state['get_units'],
+                                                    catalogs=curator.production):
+                    self._emit(runtime, 'strategy_forecast_outcome', source='autopilot',
+                               **event)
             facts = self._facts(curator)
             reasons = self._reasons(facts, turn, tactical_requested)
             reasons.extend(recovery['review_reasons'])
@@ -563,6 +574,7 @@ class StrategicController:
             # executor below are unchanged by this block.
             metadata['economic_forecast'] = self._forecast.advisory(
                 turn=runtime._turn, cities=curator.own('get_cities'),
+                units=curator.state['get_units'],
                 production=curator.production,
                 preferences=(self.directive or {}).get('production_preferences', []))
         schema = {'name': 'submit_directive',
@@ -705,13 +717,6 @@ class StrategicController:
                         available[0] if available else None)
 
         await curator.refresh()
-        if self._forecast is not None:
-            # Resolve pending options BEFORE any economy action this turn so an
-            # interrupt is visible before the next primitive effect.
-            for event in self._forecast.observe(turn=runtime._turn,
-                                                cities=curator.own('get_cities'),
-                                                units=curator.state['get_units']):
-                self._emit(runtime, 'strategy_forecast_outcome', source='autopilot', **event)
         if not curator.state['get_overview'].get('you', {}).get('researching'):
             tech = pick(curator.state.get('get_available_research', []), 'tech_id',
                         directive['research_preferences'])
@@ -807,7 +812,7 @@ class StrategicController:
                 comparison = compare_alternatives(
                     turn=runtime._turn, city_id=cid, candidates=policy['candidates'],
                     catalog=catalog, preferences=directive['production_preferences'],
-                    threats=threats)
+                    threats=threats, defense_goal=policy.get('defense_goal'))
                 self._emit(runtime, 'strategy_forecast', source='autopilot', city_id=cid,
                            forecast=forecast, comparison=comparison)
             args = production_args(policy, curator.production.get(cid, []), curator.state,

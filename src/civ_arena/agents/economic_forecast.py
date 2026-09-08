@@ -40,7 +40,7 @@ def _cost_or_none(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
-def _turns_or_none(value: object) -> int | None:
+def turns_or_none(value: object) -> int | None:
     """Only a genuine positive int is a completion basis; missing stays missing."""
     return value if type(value) is int and value >= 1 else None
 
@@ -57,7 +57,7 @@ def build_forecast(*, turn: int, city_id: str, item_id: str, row: Mapping,
     if not isinstance(row, Mapping):
         raise ValueError('forecast requires the observed catalog row')
     unsupported = list(UNSUPPORTED_ALWAYS)
-    turns = _turns_or_none(row.get('turns'))
+    turns = turns_or_none(row.get('turns'))
     if turns is None:
         unsupported.append('engine_turns_estimate')
     ranges: list[dict] = []
@@ -76,7 +76,9 @@ def build_forecast(*, turn: int, city_id: str, item_id: str, row: Mapping,
                      'confirmed_threat_unit_ids': list(threats)},
         'assumptions': (
             {'id': 'engine_rate_basis', 'source': 'catalog engine turns estimate',
-             'invalidation': 'a later catalog observation reports a different turns estimate'},
+             'invalidation': 'a later available catalog row reports a different turns '
+                             'estimate (queued cities are not catalog-refreshed by '
+                             'default; the recheck fires only when a fresh row exists)'},
             {'id': 'queue_unchanged',
              'source': 'set_city_production acceptance is the only observed queue writer',
              'invalidation': 'the observed queue no longer starts with this item'},
@@ -117,16 +119,43 @@ def classify_outcome(*, forecast: Mapping, observed_turn: int,
     if queue_items:
         return {**base, 'outcome': 'invalidated_queue_changed',
                 'detail': 'queue head changed before observed completion'}
-    verdict = ('completion_unsupported' if completion is None else
-               'in_estimated_window' if observed_turn <= completion else 'late')
+    if completion is None:
+        verdict = 'completion_unsupported'
+    else:
+        window = next(entry for entry in forecast['ranges']
+                      if entry['metric'] == 'production_completion_turn')
+        # Interval coverage checks BOTH bounds: completing before the lower
+        # bound is a forecast miss too, not an early success.
+        verdict = ('early' if observed_turn < window['lower']
+                   else 'in_estimated_window' if observed_turn <= window['upper']
+                   else 'late')
     return {**base, 'outcome': 'completed', 'verdict': verdict}
 
 
+# choose_production's unit fallback order; the comparison mirrors it exactly.
+UNIT_FALLBACK_ORDER = ("BUILDER",) + DEFENDERS + ("SCOUT", "SETTLER")
+
+
+def _unit_fallback_rank(item: str) -> int:
+    return UNIT_FALLBACK_ORDER.index(item) if item in UNIT_FALLBACK_ORDER \
+        else len(UNIT_FALLBACK_ORDER)
+
+
 def _bounded_set(candidates: list[dict], preferences: list[str],
-                 threats: tuple[str, ...] | list[str]) -> list[dict]:
-    """Bounded mirror of the production-policy cascade; not the full legal catalog."""
+                 threats: tuple[str, ...] | list[str],
+                 defense_goal: int | None) -> list[dict]:
+    """Bounded mirror of the production-policy cascade; not the full legal catalog.
+
+    The confirmed-barbarian override fires only under the policy's own
+    shortfall condition (defenders < defense_goal). When threats are visible
+    but the shortfall is unknown (advisory context evaluates no inventory),
+    the growth order stands and the threat contingency branch carries the
+    preempt condition instead of silently flipping the recommendation.
+    """
     eligible = [row for row in candidates if row.get('eligible')]
-    if threats:
+    defenders = sum(row.get('effective', 0) for row in eligible
+                    if row['item_id'] in DEFENDERS)
+    if threats and defense_goal is not None and defenders < defense_goal:
         defense = [item for item in preferences if item in DEFENDERS] + list(DEFENDERS)
 
         def defense_rank(row: dict) -> tuple[int, str]:
@@ -137,10 +166,15 @@ def _bounded_set(candidates: list[dict], preferences: list[str],
 
     def growth_rank(row: dict) -> tuple[int, int, str]:
         item, kind = row['item_id'], row['kind']
-        preference = preferences.index(item) if item in preferences else len(preferences)
-        tier = (0 if item in preferences else 1 if kind == 'building'
-                else 2 if kind in ('district', 'project') else 3)
-        return tier, preference, item
+        if item in preferences:
+            tier, sub = 0, preferences.index(item)
+        elif kind == 'building':
+            tier, sub = 1, 0
+        elif kind in ('district', 'project'):
+            tier, sub = 2, 0
+        else:
+            tier, sub = 3, _unit_fallback_rank(item)
+        return tier, sub, item
 
     return sorted(eligible, key=growth_rank)[:MAX_COMPARE_CANDIDATES]
 
@@ -148,6 +182,7 @@ def _bounded_set(candidates: list[dict], preferences: list[str],
 def compare_alternatives(*, turn: int, city_id: str, candidates: list[dict],
                          catalog: list, preferences: list[str],
                          threats: tuple[str, ...] | list[str] = (),
+                         defense_goal: int | None = None,
                          statics: Mapping[str, dict] | None = None) -> dict:
     """Compare one bounded candidate set at equal budget: per-item timing plus the
     first composed sequence (investment-then-next). Selection mirrors the existing
@@ -160,10 +195,10 @@ def compare_alternatives(*, turn: int, city_id: str, candidates: list[dict],
     if statics is None:
         unsupported.append('static_yield_and_maintenance_effects')
     summaries = []
-    for row in _bounded_set(candidates, preferences, threats):
+    for row in _bounded_set(candidates, preferences, threats, defense_goal):
         item = row['item_id']
         observed = rows.get(item, {})
-        turns = _turns_or_none(observed.get('turns'))
+        turns = turns_or_none(observed.get('turns'))
         entry = {'item_id': item, 'kind': row['kind'],
                  'eligible_reason': row.get('reason'),
                  'cost': _cost_or_none(observed.get('cost')),
@@ -193,6 +228,10 @@ def compare_alternatives(*, turn: int, city_id: str, candidates: list[dict],
         'threat_contingency': {
             'condition': 'confirmed is_barbarian contact within THREAT_RADIUS '
                          'of an owned city',
+            'preempt_condition': 'defenders_owned_queued_reserved < defense_goal',
+            'defense_goal': defense_goal,
+            'shortfall_basis': 'evaluated from policy candidates' if defense_goal is not None
+                               else 'unknown_inventory_not_evaluated',
             'consequence': 'defense candidates preempt; pending investment forecasts '
                            'are censored, never silently kept'},
         'selection': {'algorithm': SELECTION_ALGORITHM,

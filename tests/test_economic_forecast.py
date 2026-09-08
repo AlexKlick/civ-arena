@@ -17,8 +17,8 @@ def row(item="MONUMENT", kind="building", cost=25, turns=3, **extra):
     return {"item_id": item, "kind": kind, "cost": cost, "turns": turns, **extra}
 
 
-def candidate(item, kind="building", eligible=True, reason="building_available"):
-    return {"item_id": item, "kind": kind, "eligible": eligible, "reason": reason}
+def candidate(item, kind="building", eligible=True, reason="building_available", **extra):
+    return {"item_id": item, "kind": kind, "eligible": eligible, "reason": reason, **extra}
 
 
 def horizons(record):
@@ -71,6 +71,7 @@ def test_issued_forecast_is_never_edited_by_outcomes():
     (12, ["MONUMENT"], None),
     (13, ["MONUMENT"], None),
     (14, ["MONUMENT"], "overdue_pending"),
+    (11, [], "completed"),
     (13, [], "completed"),
     (15, [], "completed"),
     (12, ["WARRIOR"], "invalidated_queue_changed"),
@@ -84,7 +85,9 @@ def test_classify_verdicts(observed_turn, queue, expected):
         return
     assert outcome["outcome"] == expected
     if expected == "completed":
-        assert outcome["verdict"] == ("in_estimated_window" if observed_turn <= 13
+        # interval [13, 13]: earlier than the lower bound is a miss too
+        assert outcome["verdict"] == ("early" if observed_turn < 13
+                                      else "in_estimated_window" if observed_turn <= 13
                                       else "late")
 
 
@@ -130,17 +133,50 @@ def test_comparison_bounded_deterministic_and_weighted():
 
 
 def test_comparison_threat_branch_preempts_investment():
-    candidates = [candidate("MONUMENT"), candidate("ARCHER", kind="unit",
-                                                   reason="below_unit_target")]
+    candidates = [candidate("MONUMENT"),
+                  candidate("ARCHER", kind="unit", reason="below_unit_target",
+                            effective=0)]
     catalog = [row("MONUMENT", turns=3),
                row("ARCHER", kind="unit", cost=35, turns=2)]
     record = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
                                   catalog=catalog, preferences=["MONUMENT"],
-                                  threats=("u9:1",))
+                                  threats=("u9:1",), defense_goal=2)
     assert record["selection"]["recommended"] == "ARCHER"
     assert record["observed_threat_unit_ids"] == ["u9:1"]
     assert record["threat_contingency"]["consequence"].startswith("defense")
+    assert record["threat_contingency"]["defense_goal"] == 2
     assert record["candidates"][0]["completion_turn"] == 12
+
+
+def test_comparison_threat_without_shortfall_keeps_growth_order():
+    candidates = [candidate("MONUMENT"),
+                  candidate("ARCHER", kind="unit", reason="below_unit_target",
+                            effective=2)]
+    catalog = [row("MONUMENT", turns=3),
+               row("ARCHER", kind="unit", cost=35, turns=2)]
+    no_shortfall = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
+                                        catalog=catalog, preferences=["MONUMENT"],
+                                        threats=("u9:1",), defense_goal=2)
+    assert no_shortfall["selection"]["recommended"] == "MONUMENT"
+    unknown = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
+                                   catalog=catalog, preferences=["MONUMENT"],
+                                   threats=("u9:1",))
+    # threats visible, shortfall unknown: recorded, contingency carried,
+    # recommendation not silently flipped
+    assert unknown["selection"]["recommended"] == "MONUMENT"
+    assert unknown["observed_threat_unit_ids"] == ["u9:1"]
+    assert unknown["threat_contingency"]["shortfall_basis"] == \
+        "unknown_inventory_not_evaluated"
+
+
+def test_comparison_unit_tier_mirrors_policy_fallback_order():
+    candidates = [candidate("ARCHER", kind="unit", reason="below_unit_target"),
+                  candidate("BUILDER", kind="unit", reason="below_unit_target")]
+    catalog = [row("ARCHER", kind="unit", turns=2), row("BUILDER", kind="unit", turns=3)]
+    record = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
+                                  catalog=catalog, preferences=[])
+    # choose_production's unit order is BUILDER first, never alphabetical
+    assert record["selection"]["recommended"] == "BUILDER"
 
 
 def test_counterfactual_composes_engine_estimates():
