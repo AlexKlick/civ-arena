@@ -263,3 +263,150 @@ def test_cli_roundtrip(tmp_path):
     lines = out.read_text().splitlines()
     assert len(lines) == 2
     assert (tmp_path / "out.jsonl.manifest.json").exists()
+
+
+# -- CAP-R1 #2/#3/#11/#12: joins, keys, cursors, manifest ----------------------
+
+
+def test_production_nested_boundary_audits_join(tmp_path):
+    """#2: production decision audits route through strategy_audit_event,
+    which nests the payload fields inside strategy_payload_json — the
+    exporter must join BOTH that shape and the flat one."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i == 1:  # first turn position becomes the production boundary
+            row = {**row, "kind": "HEARTBEAT", "audit": "decision_boundary",
+                   "strategy_payload_json": json.dumps({
+                       "decision_id": "d1", "directive_id": "dir1",
+                       "provider_requests": 1, "source": "model"},
+                       sort_keys=True)}
+        rebuilt.append(row)
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    samples, _ = export(run_dir)
+    by_seg = {s["segment_id"]: s for s in samples}
+    first = by_seg["turn:1"]
+    assert first["decision_id"] == "d1"
+    assert first["directive_id"] == "dir1"
+    assert first["provider_requests"] == 1
+    assert first["decision_source"] == "model"
+    assert first["request_costs"]["tokens_in"] == 5  # the ledger row joined
+
+
+def test_hotseat_agents_on_one_turn_export_distinct_samples(tmp_path):
+    """#3: a hotseat engine turn carries TWO agents' decisions — each
+    exports as its OWN sample with only its observations/actions/receipts
+    and its OWN boundary; never one merged cross-agent sample."""
+    run_dir = tmp_path / "hotseat"
+    run_dir.mkdir()
+    rows = []
+    seq = 0
+
+    def add(kind, **fields):
+        nonlocal seq
+        rows.append({"schema": 1, "seq": seq, "kind": kind,
+                     "ts": "t", "match_id": "hs", "game_instance_id": "hs-i1",
+                     "turn": fields.pop("turn", 0), "phase_player_id": -1,
+                     **fields})
+        seq += 1
+
+    add("MATCH_START", config={"agents": [["a0", 0, "llm"], ["a1", 1, "llm"]]})
+    for aid in ("a0", "a1"):
+        add("HEARTBEAT", turn=1, audit="decision_boundary", agent_id=aid,
+            decision_id=f"d-{aid}", directive_id=f"dir-{aid}",
+            provider_requests=1, source="model")
+        add("TOOL_CALL", turn=1, player_id=0 if aid == "a0" else 1,
+            agent_id=aid, tool="get_units", args={}, args_digest="x")
+        add("TOOL_RESULT", turn=1, player_id=0 if aid == "a0" else 1,
+            agent_id=aid, tool="get_units", status="accepted",
+            observed={"n": 1})
+        add("TOOL_CALL", turn=1, player_id=0 if aid == "a0" else 1,
+            agent_id=aid, tool="move_unit", args={"unit_id": aid},
+            args_digest="y")
+        add("TOOL_RESULT", turn=1, player_id=0 if aid == "a0" else 1,
+            agent_id=aid, tool="move_unit", status="accepted",
+            mutations=[{"entity_id": f"u{aid}"}], receipts=[{"k": 1}])
+    add("MATCH_END", turn=1, summary={"match_id": "hs",
+                                      "game_instance_id": "hs-i1",
+                                      "final_turn": 1, "aborted": None,
+                                      "phase": "dispatch-hotseat"})
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+    (run_dir / "summary.json").write_text(json.dumps(
+        {"match_id": "hs", "game_instance_id": "hs-i1", "final_turn": 1,
+         "aborted": None, "phase": "dispatch-hotseat"}, sort_keys=True))
+    samples, _ = export(run_dir)
+    assert len(samples) == 2, "two agents on one turn = two samples"
+    segs = {s["segment_id"] for s in samples}
+    assert segs == {"turn:1:a0", "turn:1:a1"}
+    by_agent = {s["agent_id"]: s for s in samples}
+    for aid in ("a0", "a1"):
+        s = by_agent[aid]
+        assert s["decision_id"] == f"d-{aid}"
+        assert s["directive_id"] == f"dir-{aid}"
+        assert len(s["observation_refs"]) == 1
+        assert len(s["requested_action_refs"]) == 1
+        # only THIS agent's refs — the sibling's must not leak in
+        events = rows
+        for ref in s["observation_refs"] + s["requested_action_refs"]:
+            assert events[ref["seq"]]["agent_id"] == aid
+
+
+def test_manifest_digests_every_consumed_input(tmp_path):
+    """#12: samples depend on summary.json AND llm_costs.jsonl — changing a
+    ledger token count must change BOTH the sample bytes and a manifest
+    digest (events digest alone cannot cover it)."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    s1, m1 = export(run_dir)
+    assert "summary_sha256" in m1["source"]
+    assert "llm_costs_sha256" in m1["source"]
+    # mutate the ledger's token count
+    ledger = (run_dir / "llm_costs.jsonl").read_text().replace(
+        '"input_tokens": 5', '"input_tokens": 50')
+    (run_dir / "llm_costs.jsonl").write_text(ledger)
+    s2, m2 = export(run_dir)
+    assert s1 != s2  # the sample carried the cost — it moved
+    assert m1["source"]["events_sha256"] == m2["source"]["events_sha256"]
+    assert m1["source"]["llm_costs_sha256"] != m2["source"]["llm_costs_sha256"]
+
+
+def test_intervals_carry_source_cursors_and_gap_channels(tmp_path):
+    """#11: post-CAP-01 runs carry provenance cursors and TWO gap channels
+    (ring wraps + engine jumps + gap-inferred rounds) — the exporter
+    reports the actual values instead of hard-coded nulls/one count."""
+    run_dir = _write_run(tmp_path, spectate=True)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for row in rows:
+        if row["kind"] == "HUMAN_TURN_START":
+            row = {**row, "source_cursor": "5|HOOK_ENTER|0",
+                   **({"boundary": "gap_inferred"}
+                      if row["turn"] == 2 else {})}
+        elif row["kind"] == "HUMAN_TURN_END":
+            row = {**row, "source_cursor": "9|HOOK_DEACT|0"}
+        elif row["kind"] == "MATCH_END":
+            gap = {"schema": 1, "seq": 999, "kind": "HEARTBEAT",
+                   "ts": "t", "match_id": row["match_id"],
+                   "game_instance_id": row["game_instance_id"], "turn": 2,
+                   "phase_player_id": 0, "player_id": None, "agent_id": None,
+                   "visibility_scope": "spectator", "audit": "capture_gap",
+                   "missing_turns": [2]}
+            rebuilt.append(gap)
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "seq:1")
+    assert first["source_cursor_start"] == "5|HOOK_ENTER|0"
+    assert first["source_cursor_end"] == "9|HOOK_DEACT|0"
+    assert first["engine_jump_gaps"] == 1
+    assert first["gap_inferred_rounds"] == 1
+    second = next(s for s in samples if s["interval_turn_start"] == 2)
+    assert "gap_inferred_round" in second["quality_flags"]
