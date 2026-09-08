@@ -759,3 +759,118 @@ def test_reused_decision_id_joins_costs_once_and_flags_ambiguity(tmp_path):
     assert superseded["request_costs"]["attempts"] == 0
     for s in same_id:
         assert "decision_id_reused_costs_ambiguous" in s["quality_flags"]
+
+
+# -- Codex r2 (capr1-integration) regressions ----------------------------------
+
+
+def test_execution_between_boundaries_belongs_to_its_own_decision(tmp_path):
+    """Codex r2 finding 1: with boundary A -> move/receipt -> boundary B,
+    the move is A's EXECUTION — it must ride A's sample only. A's
+    INPUT observations still span the wide window, but actions and
+    receipts are bounded by (own boundary, next boundary)."""
+    run_dir = _write_run(tmp_path, spectate=False)  # no fixture boundary
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i in (3, 6):  # before turn-1 move_unit, before turn-2 pair
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": f"d-{i}", "directive_id": "dir",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    samples, _ = export(run_dir)
+    by_id = {s["decision_id"]: s for s in samples}
+    # rebuilt: MS(0), TC gu(1), TR gu(2), bA(3), TC mv(4), TR mv(5),
+    #          TC gu(6), bB(7), TR gu(8) ... — turn 1's move (4/5) is
+    # d-3's execution; d-6 (turn 2's replacement) must NOT claim it
+    assert 4 in [r["seq"] for r in by_id["d-3"]["requested_action_refs"]]
+    assert 5 in [r["seq"] for r in by_id["d-3"]["execution_receipt_refs"]]
+    assert 4 not in [r["seq"] for r in by_id["d-6"]["requested_action_refs"]]
+    assert 5 not in [r["seq"] for r in by_id["d-6"]["execution_receipt_refs"]]
+    # the wide observation window still feeds d-6 turn-2 inputs
+    assert 8 in [r["seq"] for r in by_id["d-6"]["observation_refs"]]
+
+
+def test_reused_id_with_following_decision_keeps_costs(tmp_path):
+    """Codex r2 finding 2: A, A, B — the reused id's rows join the LAST
+    A (its final occurrence), not 'no sample'."""
+    run_dir = _write_run(tmp_path, spectate=False)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i == 1:
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-a", "directive_id": "dir1",
+                            "provider_requests": 1, "source": "model"})
+        if i == 2:
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-a", "directive_id": "dir2",
+                            "provider_requests": 0, "source": "model"})
+        if i == 3:
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-b", "directive_id": "dir3",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    ledger = [
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 5, "model": "m", "payload_hash": "h1",
+         "input_tokens": 9, "output_tokens": 1,
+         "decision_id": "d-a", "logical_request_id": "lr-a",
+         "request_set_key": "h1:generation"},
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 4, "model": "m", "payload_hash": "h2",
+         "input_tokens": 3, "output_tokens": 1,
+         "decision_id": "d-b", "logical_request_id": "lr-b",
+         "request_set_key": "h2:generation"},
+    ]
+    (run_dir / "llm_costs.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in ledger) + "\n")
+    samples, _ = export(run_dir)
+    a_samples = [s for s in samples if s["decision_id"] == "d-a"]
+    assert len(a_samples) == 2
+    joined = [s for s in a_samples
+              if s["request_costs"] and s["request_costs"]["attempts"] == 1]
+    assert len(joined) == 1  # the LAST occurrence carries d-a's rows
+    b = next(s for s in samples if s["decision_id"] == "d-b")
+    assert b["request_costs"]["attempts"] == 1
+    assert b["request_costs"]["tokens_in"] == 3
+
+
+def test_captured_ledger_absence_never_resurrects_from_disk(tmp_path):
+    """Codex r2 finding 3: a ledger CREATED between export()'s capture
+    and segmentation must not join — the manifest never hashed it. The
+    captured verdict (ledger_absent=True) wins over disk state."""
+    from civ_arena.research.export_dataset import _controlled_decisions
+    run_dir = _write_run(tmp_path, spectate=False, with_boundaries=True)
+    events = [json.loads(line) for line
+              in (run_dir / "events.jsonl").read_text().splitlines()]
+    summary = json.loads((run_dir / "summary.json").read_text())
+    # the ledger appears AFTER capture (it did not exist at export time)
+    (run_dir / "llm_costs.jsonl").write_text(json.dumps({
+        "ts": "t", "agent_id": "a0", "player_id": 0,
+        "request_kind": "generation", "attempt": 0, "status_code": 200,
+        "latency_ms": 5, "model": "m", "payload_hash": "h1",
+        "input_tokens": 9, "output_tokens": 1,
+        "decision_id": "d1", "logical_request_id": "lr1",
+        "request_set_key": "h1:generation"}) + "\n")
+    samples = _controlled_decisions(run_dir, events, summary,
+                                    cost_rows=[], ledger_absent=True)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert "pre_ledger_run" in first["quality_flags"]
+    assert first["request_costs"] is None

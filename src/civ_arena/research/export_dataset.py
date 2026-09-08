@@ -155,7 +155,8 @@ def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             "controlled export")
     elif any(e["kind"] == "MATCH_START" for e in events):
         samples = _controlled_decisions(run_dir, events, summary,
-                                        cost_rows=cost_rows)
+                                        cost_rows=cost_rows,
+                                        ledger_absent=costs_bytes is None)
     else:
         raise ValueError("run dir is neither spectate nor driven "
                          "(no MATCH_START); refusing export")
@@ -230,7 +231,8 @@ def _parse_costs(raw: bytes) -> list[dict[str, Any]]:
 
 def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                           summary: dict[str, Any], *,
-                          cost_rows: list[dict[str, Any]] | None = None
+                          cost_rows: list[dict[str, Any]] | None = None,
+                          ledger_absent: bool | None = None
                           ) -> list[dict[str, Any]]:
     """CAP-R1 #3: samples are keyed by (turn, agent_id) — a hotseat turn
     carries TWO agents' decisions and each must export as its own sample
@@ -241,7 +243,13 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
 
     R-03: ``cost_rows`` are the rows export() already parsed from the
     exact bytes it digested into the manifest; when omitted (direct
-    calls) the file is read as before."""
+    calls) the file is read as before.
+
+    Codex r2 finding 3: ``ledger_absent`` is the CAPTURED existence
+    verdict from export() — when the ledger was absent at capture, no
+    later disk read may resurrect it (a file created between capture
+    and segmentation would join rows the manifest never hashed).
+    ``None`` derives from disk (the direct-call path, unchanged)."""
     boundaries: dict[tuple[int, str], list[dict[str, Any]]] = {}
     ledger_gaps = 0
     for e in events:
@@ -253,7 +261,8 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 and e.get("audit") == "ledger_write_failed":
             ledger_gaps += 1
 
-    pre_ledger = not (run_dir / "llm_costs.jsonl").exists()
+    pre_ledger = (ledger_absent if ledger_absent is not None
+                  else not (run_dir / "llm_costs.jsonl").exists())
     if not pre_ledger and cost_rows is None:
         cost_rows = _parse_costs((run_dir / "llm_costs.jsonl").read_bytes())
     if cost_rows is None:
@@ -296,40 +305,44 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             boundaries.get((turn, agent_id), [])
             + boundaries.get((turn, "None"), []),
             key=lambda b: b.get("seq") or 0)
-        # Codex r1 finding 6: a decision_id REUSED by several boundaries
-        # of this (turn, agent) is ambiguous — ledger rows cannot be
-        # attributed to one occurrence, so they join ONLY the operative
-        # (last) sample and every sibling carrying the id is flagged.
+        # Codex r1 finding 6 / r2 finding 2: a decision_id REUSED by
+        # several boundaries of this (turn, agent) is ambiguous — rows
+        # join only the LAST OCCURRENCE of that id (A, A, B: the second
+        # A carries A's rows; B its own), every sibling is flagged.
+        last_by_id: dict[str, dict[str, Any]] = {}
         id_counts: dict[str, int] = {}
         for b in segment_boundaries:
             if b.get("decision_id"):
                 id_counts[b["decision_id"]] = \
                     id_counts.get(b["decision_id"], 0) + 1
+                last_by_id[b["decision_id"]] = b
         reused_ids = {d for d, n in id_counts.items() if n > 1}
-        windows: list[tuple[dict[str, Any] | None, int | None, int | None]] = []
+        # windows carry TWO starts: OBSERVATIONS span the wide window
+        # (previous boundary, next boundary) — inputs precede the
+        # boundary (r1 finding 3); ACTIONS/RECEIPTS span the narrow
+        # window (own boundary, next boundary) — an execution belongs
+        # to the decision that commanded it, never to a replacement
+        # that superseded it (r2 finding 1).
+        windows: list[tuple[dict[str, Any] | None, int | None, int | None,
+                            int | None]] = []
         for i, b in enumerate(segment_boundaries):
-            # Codex r1 finding 3: production emits the boundary AFTER
-            # refresh+decide — the decision's INPUT observations precede
-            # it. The honest per-decision window spans (previous
-            # boundary, next boundary): inputs + this decision's
-            # execution. The first decision's window starts at the turn
-            # (None). Boundary HEARTBEAT rows never appear in the tool
-            # reference arrays, so the boundaries themselves stay out.
-            w_start = (segment_boundaries[i - 1].get("seq")
-                       if i > 0
-                       and isinstance(segment_boundaries[i - 1].get("seq"), int)
-                       else None)
+            w_in = (segment_boundaries[i - 1].get("seq")
+                    if i > 0
+                    and isinstance(segment_boundaries[i - 1].get("seq"), int)
+                    else None)
+            w_exec = (b.get("seq")
+                      if isinstance(b.get("seq"), int) else None)
             w_end = (segment_boundaries[i + 1].get("seq")
                      if i + 1 < len(segment_boundaries)
                      and isinstance(segment_boundaries[i + 1].get("seq"), int)
                      else None)
-            windows.append((b, w_start, w_end))
+            windows.append((b, w_in, w_exec, w_end))
         if not windows:
-            windows.append((None, None, None))
+            windows.append((None, None, None, None))
         base_segment = f"turn:{turn}" if single_agent \
             else f"turn:{turn}:{agent_id}"
-        for boundary, w_start, w_end in windows:
-            def _window(e: dict[str, Any], *, _s: int | None = w_start,
+        for boundary, w_start, w_exec, w_end in windows:
+            def _window(e: dict[str, Any], *, _s: int | None,
                         _e: int | None = w_end) -> bool:
                 if not _agents(e):
                     return False
@@ -343,23 +356,26 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 return not (_e is not None and not e["seq"] < _e)
 
             obs = [_ref(e["seq"]) for e in events
-                   if e["kind"] == "TOOL_RESULT" and _window(e)
+                   if e["kind"] == "TOOL_RESULT"
+                   and _window(e, _s=w_start)
                    and e.get("tool") in _OBSERVE_TOOLS]
             actions = [_ref(e["seq"]) for e in events
-                       if e["kind"] == "TOOL_CALL" and _window(e)
+                       if e["kind"] == "TOOL_CALL"
+                       and _window(e, _s=w_exec)
                        and e.get("tool") in _ACTION_TOOLS]
             receipts = [_ref(e["seq"]) for e in events
-                        if e["kind"] == "TOOL_RESULT" and _window(e)
+                        if e["kind"] == "TOOL_RESULT"
+                        and _window(e, _s=w_exec)
                         and e.get("status") == "accepted"
                         and (e.get("mutations") or e.get("receipts"))]
             decision_id = boundary.get("decision_id") if boundary else None
             decision_ids = [decision_id] if decision_id else []
-            operative = boundary is segment_boundaries[-1] \
-                if segment_boundaries else False
+            cost_recipient = (boundary is last_by_id[decision_id]
+                              if decision_id else False)
             shared_id = decision_id in reused_ids
             rows = [r for r in cost_rows
                     if decision_ids
-                    and not (shared_id and not operative)
+                    and cost_recipient
                     and r.get("decision_id") in decision_ids
                     and (r.get("agent_id") is None
                          or str(r.get("agent_id")) == agent_id)] \
@@ -375,10 +391,13 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 if boundary else None
             # Codex r1 finding 4: the expected-vs-recorded comparison
             # runs even with ZERO recorded rows — a boundary that
-            # declared requests with an empty ledger is exactly the
-            # sink-failure shape the flag exists for.
+            # declared requests with an empty (but CAPTURED) ledger is
+            # exactly the sink-failure shape the flag exists for. A
+            # pre-ledger run (absent at capture) keeps request_costs
+            # None: nothing about costs was consumed at all.
             request_costs = None
-            if rows or (isinstance(expected, int) and expected > 0):
+            if rows or (not pre_ledger and isinstance(expected, int)
+                        and expected > 0):
                 tokens_in = [r["input_tokens"] for r in rows
                              if isinstance(r.get("input_tokens"), int)]
                 tokens_out = [r["output_tokens"] for r in rows
@@ -435,7 +454,7 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             if player_id is None:
                 player_id = next(
                     (e["player_id"] for e in events
-                     if _window(e)
+                     if _window(e, _s=w_start)
                      and isinstance(e.get("player_id"), int)), None)
             if player_id is None:
                 player_id = next(
