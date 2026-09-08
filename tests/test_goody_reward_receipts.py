@@ -216,7 +216,8 @@ async def test_adapter_begin_failure_sends_no_move_or_restore():
 @pytest.mark.parametrize('cap', [None, False])
 async def test_preflight_refuses_missing_reward_hook(cap):
     adapter = FireTunerAdapter()
-    doc = {'mod_version': '0.3.10', 'supports_freeze': True, 'supports_ledger': True,
+    # v0.4.0 — the version gate fires first, so the fixture must pass it
+    doc = {'mod_version': '0.4.0', 'supports_freeze': True, 'supports_ledger': True,
            'supports_digest': True, 'supports_command_diff': True, 'supports_guarded_handoff': True}
     if cap is not None:
         doc['supports_reward_receipts'] = cap

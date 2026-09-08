@@ -184,7 +184,9 @@ async def test_adapter_enforces_bound_when_handoff_never_returns():
 @pytest.mark.parametrize('capability', [None, False])
 async def test_preflight_refuses_absent_guarded_handoff(capability):
     adapter = FireTunerAdapter()
-    doc = {'mod_version': '0.3.10', 'supports_freeze': True,
+    # v0.4.0 (the version gate fires BEFORE the capability gate — a
+    # 0.3.10 fixture would be refused for the version, not the cap)
+    doc = {'mod_version': '0.4.0', 'supports_freeze': True,
            'supports_ledger': True, 'supports_digest': True, 'supports_command_diff': True}
     if capability is not None:
         doc['supports_guarded_handoff'] = capability

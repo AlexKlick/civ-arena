@@ -44,13 +44,18 @@ def _write_run(run_dir: Path, rounds: int = 2, *, seqs=None, inject=None,
     rows = [("MATCH_START", {})]
     for turn in range(1, rounds + 1):
         rows.append(("HUMAN_TURN_START", {"turn": turn, "operator": "alexk"}))
+        # CAP-R1 honest brackets: every round's snapshot carries a SELF-
+        # CONSISTENT digest pair — this quiet fixture board does not move
+        # between the bracket reads, so before == after and consistent
+        # is True. (A moving board is before != after with consistent
+        # False — an honest round, never a contradictory one.)
         rows.append(("SPECTATOR_SNAPSHOT", {
             "round": turn, "turn": turn, "phase": "turn_start",
-            "digest": {"before": "aaa", "after": "bbb", "consistent": True},
+            "digest": {"before": "aaa", "after": "aaa", "consistent": True},
         }))
         rows.append(("HUMAN_TURN_END", {
             "turn": turn, "operator": "alexk", "duration_s": 12.0,
-            "human_ambient": [], "digest_after": "ccc", "overrun": False,
+            "human_ambient": [], "digest_after": "aaa", "overrun": False,
         }))
     rows.append(("MATCH_END", {}))
     if drop is not None:
