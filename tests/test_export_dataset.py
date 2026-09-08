@@ -821,18 +821,7 @@ def test_cross_turn_reused_id_joins_its_rows_exactly_once(tmp_path):
     recipient resolution double-counted them — and every occurrence
     carries the ambiguity flag."""
     run_dir = _write_run(tmp_path, spectate=False)
-    lines = (run_dir / "events.jsonl").read_text().splitlines()
-    rows = [json.loads(line) for line in lines]
-    rebuilt = []
-    for i, row in enumerate(rows):
-        if i in (1, 5):  # before each turn's first tool call
-            rebuilt.append({**row, "kind": "HEARTBEAT",
-                            "audit": "decision_boundary",
-                            "decision_id": "d-x", "directive_id": "dir",
-                            "provider_requests": 1, "source": "model"})
-        rebuilt.append(row)
-    for i, row in enumerate(rebuilt):
-        row["seq"] = i
+    rebuilt = _cross_turn_reuse_events(run_dir)
     (run_dir / "events.jsonl").write_text(
         "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
     (run_dir / "llm_costs.jsonl").write_text(json.dumps({
@@ -909,6 +898,123 @@ def test_reused_id_with_following_decision_keeps_costs(tmp_path):
     b = next(s for s in samples if s["decision_id"] == "d-b")
     assert b["request_costs"]["attempts"] == 1
     assert b["request_costs"]["tokens_in"] == 3
+
+
+def _cross_turn_reuse_events(run_dir: Path) -> list[dict]:
+    """Shared fixture body: the same decision_id on a boundary in turn 1
+    AND turn 2 (rebuilt seqs: MS 0, bX 1, ... bX 6, ...)."""
+    rows = [json.loads(line) for line
+            in (run_dir / "events.jsonl").read_text().splitlines()]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i in (1, 5):  # before each turn's first tool call
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-x", "directive_id": "dir",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    return rebuilt
+
+
+def test_integral_float_seq_still_ranks_as_its_integer(tmp_path):
+    """Codex r4 finding 2: ``seq: 6.0`` satisfies the contiguity check
+    (6.0 == 6) but is not an ``int``, so before normalization every
+    isinstance-guarded ordering path ranked that boundary as unsequenced
+    and the EARLIER occurrence collected the reused id's ledger row."""
+    run_dir = _write_run(tmp_path, spectate=False)
+    rebuilt = _cross_turn_reuse_events(run_dir)
+    assert rebuilt[6]["audit"] == "decision_boundary"  # turn-2 boundary
+    rebuilt[6]["seq"] = 6.0  # the integral float, written as "6.0"
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    assert '"seq": 6.0' in (run_dir / "events.jsonl").read_text()
+    (run_dir / "llm_costs.jsonl").write_text(json.dumps({
+        "ts": "t", "agent_id": "a0", "player_id": 0,
+        "request_kind": "generation", "attempt": 0, "status_code": 200,
+        "latency_ms": 5, "model": "m", "payload_hash": "h1",
+        "input_tokens": 9, "output_tokens": 1,
+        "decision_id": "d-x", "logical_request_id": "lr-x",
+        "request_set_key": "h1:generation"}, sort_keys=True) + "\n")
+    samples, _ = export(run_dir)
+    reused = [s for s in samples if s["decision_id"] == "d-x"]
+    # exactly-once survived the float spelling even before the fix; what
+    # broke was WHICH occurrence collected the row
+    assert sum(s["request_costs"]["attempts"] for s in reused) == 1
+    joined = [s for s in reused if s["request_costs"]["attempts"] == 1]
+    assert joined[0]["segment_id"] == "turn:2"  # the last occurrence
+    # the float is normalized to a real int, so refs stay int-typed
+    refs = [r["seq"] for s in samples for r in s["observation_refs"]]
+    assert refs and all(isinstance(seq, int) for seq in refs)
+
+
+def test_usage_complete_requires_covering_every_expected_attempt(tmp_path):
+    """Codex r4 finding 1: usage_complete asserts the known subtotal
+    covers the WHOLE decision. A decision that expected two attempts and
+    recorded one — or recorded NONE — is not complete, however
+    well-formed the rows present are."""
+    run_dir = _write_run(tmp_path, spectate=False, with_boundaries=True)
+    rows = [json.loads(line) for line
+            in (run_dir / "events.jsonl").read_text().splitlines()]
+    for row in rows:  # turn 1 expects TWO provider requests
+        if row.get("audit") == "decision_boundary" and row["turn"] == 1:
+            row["provider_requests"] = 2
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+    (run_dir / "llm_costs.jsonl").write_text(json.dumps({
+        "ts": "t", "agent_id": "a0", "player_id": 0,
+        "request_kind": "generation", "attempt": 0, "status_code": 200,
+        "latency_ms": 5, "model": "m", "payload_hash": "h1",
+        "input_tokens": 9, "output_tokens": 1,
+        "decision_id": "d1", "logical_request_id": "lr1",
+        "request_set_key": "h1:generation"}, sort_keys=True) + "\n")
+    samples, _ = export(run_dir)
+    by_turn = {s["segment_id"]: s for s in samples}
+    short = by_turn["turn:1"]
+    # one fully-recorded row, but the decision expected two attempts
+    assert short["request_costs"]["attempts"] == 1
+    assert short["request_costs"]["attempts_with_unknown_usage"] == 0
+    assert short["request_costs"]["usage_complete"] is False
+    assert "costs_attempts_missing" in short["quality_flags"]
+
+
+def test_usage_complete_false_when_no_attempt_was_recorded(tmp_path):
+    """The zero-recorded-attempts shape: a captured but empty ledger
+    beside a boundary that declared a request must not publish
+    usage_complete: true over an empty subtotal."""
+    run_dir = _write_run(tmp_path, spectate=False, with_boundaries=True)
+    (run_dir / "llm_costs.jsonl").write_text("")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert first["request_costs"]["attempts"] == 0
+    assert first["request_costs"]["usage_complete"] is False
+    assert "costs_attempts_missing" in first["quality_flags"]
+
+
+def test_usage_complete_false_when_a_ledger_write_was_lost(tmp_path):
+    """A ledger_write_failed audit means rows were lost somewhere in the
+    run and cannot be attributed to a sample — so no sample may claim
+    its subtotal covers the decision, however complete it looks."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    rows = [json.loads(line) for line
+            in (run_dir / "events.jsonl").read_text().splitlines()]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i == 1:
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "ledger_write_failed", "sink": "jsonl"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert "ledger_write_gaps" in first["quality_flags"]
+    assert first["request_costs"]["attempts"] == 1
+    assert first["request_costs"]["usage_complete"] is False
 
 
 def test_captured_ledger_absence_never_resurrects_from_disk(tmp_path):

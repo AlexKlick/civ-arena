@@ -67,15 +67,26 @@ filled. `quality_flags` values and their meaning:
 
 | Flag | Meaning |
 |---|---|
-| `boundary_superseded_within_turn` | a later boundary replaced this decision inside the same turn |
-| `decision_id_reused_costs_ambiguous` | the id repeats within the `(turn, agent)`; only the last occurrence joins the cost rows, every sibling is flagged |
-| `costs_partial` | at least one attempt's usage or latency was not recorded — the totals are a **known subtotal**, not a total |
+| `boundary_superseded_within_turn` | **turn-level context, not a claim about this sample**: the turn carried more than one boundary. It is set on *every* sample of that turn, including the surviving last boundary, so a consumer reading one sample knows the turn's decision grain was split. |
+| `decision_id_reused_costs_ambiguous` | the id appears on more than one boundary **anywhere in the run** — across turns and agents, not only within one `(turn, agent)`. Every occurrence is flagged. |
+| `costs_partial` | at least one *recorded* attempt's usage or latency was not captured — the totals are a **known subtotal**, not a total |
 | `costs_attempts_missing` | fewer attempts were recorded than the boundary expected |
 
-Cost honesty rules that hold without a flag: `usage_complete` states whether the
-subtotal is whole; an empty known-usage list yields `None`, never `0`, so "no
-known usage" stays distinguishable from "usage known to be zero"; a recorded `0`
-is preserved as data.
+Cost joining: each ledger row is assigned to **exactly one** sample. A row is
+eligible for the occurrences whose agent it may join (a row with no `agent_id`
+may join any), and it goes to the **last eligible occurrence** for its decision
+id. Agent-qualified rows for one reused id can therefore land on different
+occurrences — the rule is last-eligible-per-row, not one universal final
+occurrence for the id.
+
+`usage_complete` asserts that the known subtotal **covers the whole decision**:
+every recorded attempt has usage and latency, at least one attempt was recorded,
+the count is not short of what the boundary expected, and no ledger write is
+known to have been lost anywhere in the run (a lost write is unattributable, so
+no sample may claim coverage). It is not a statement about the well-formedness
+of the rows present. Independent of it: an empty known-usage list yields `None`,
+never `0`, so "no known usage" stays distinguishable from "usage known to be
+zero"; a recorded `0` is preserved as data.
 
 **Sample-level (spectator_interval)**
 
@@ -86,8 +97,12 @@ is preserved as data.
 | `gap_inferred_round` | the round's start was inferred from a capture gap, not observed |
 | `interval_open_at_export` | the final round was interrupted; the end is `null`, never faked |
 
-Run-wide counters ride on every interval: `capture_gaps`, `engine_jump_gaps`,
-`gap_inferred_rounds`, `truncated`.
+Three **run-wide** counters ride on every interval: `capture_gaps`,
+`engine_jump_gaps`, `gap_inferred_rounds`. `truncated` is **interval-local and
+nullable** — it reports whether *this* interval's own snapshot was truncated, and
+is `null` when the interval has no snapshot (including the open final interval).
+Successive intervals in one run legitimately carry different values, so reading
+one interval never establishes run-wide truncation.
 
 ## 4. Actor uncertainty — the hard limit on spectate data
 
@@ -124,7 +139,9 @@ mod version, and the mod gate refuses anything below 0.4.0.
 
 - Imitating a human spectate subject's actions, or attributing intent/reasoning
   to them — declared ineligible on every interval.
-- Treating `request_costs` totals as complete when `usage_complete` is false.
+- Treating `request_costs` totals as complete when `usage_complete` is false, or
+  as covering a decision whose sample carries `costs_partial`,
+  `costs_attempts_missing` or `ledger_write_gaps`.
 - Treating a `pre_ledger_run` or `pre_boundary_run` sample as if identity or
   costs merely happened to be zero.
 - Mixing samples across `split_group` when constructing train/eval splits:

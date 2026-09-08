@@ -61,6 +61,17 @@ def _load_events(run_dir: Path) -> list[dict[str, Any]]:
 def _parse_events(raw: bytes) -> list[dict[str, Any]]:
     rows = [json.loads(line) for line
             in raw.decode().splitlines() if line.strip()]
+    # Codex r4 finding 2: `6.0` passes the contiguity check below (list
+    # equality compares 6.0 == 6) but is not an ``int``, so every
+    # isinstance-guarded ordering path would rank it as UNSEQUENCED and
+    # could pay a decision's costs to an earlier boundary. seq is our own
+    # ordering key, so an INTEGRAL float denotes exactly that integer:
+    # normalize once here instead of guarding each consumer. A
+    # non-integral seq stays as it is and fails contiguity.
+    for row in rows:
+        seq = row.get("seq")
+        if isinstance(seq, float) and seq.is_integer():
+            row["seq"] = int(seq)
     if [r.get("seq") for r in rows] != list(range(len(rows))):
         raise ValueError("event sequence is not contiguous — refusing export")
     return rows
@@ -450,8 +461,21 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                     "tokens_in": sum(tokens_in) if tokens_in else None,
                     "tokens_out": sum(tokens_out) if tokens_out else None,
                     "latency_ms_sum": sum(latencies) if latencies else None,
-                    "usage_complete": unknown_usage == 0
-                    and unknown_latency == 0,
+                    # Codex r4 finding 1: this asserts the KNOWN subtotal
+                    # covers the WHOLE decision, not merely that the rows
+                    # present were well-formed. Checking only the
+                    # recorded rows let a decision with one of two
+                    # expected attempts — or with ZERO recorded attempts
+                    # — publish usage_complete: true beside
+                    # costs_attempts_missing. A ledger write known to
+                    # have been lost anywhere in the run is
+                    # unattributable, so no sample may claim coverage.
+                    "usage_complete": (unknown_usage == 0
+                                       and unknown_latency == 0
+                                       and bool(rows)
+                                       and not ledger_gaps
+                                       and (not isinstance(expected, int)
+                                            or len(rows) >= expected)),
                 }
                 if unknown_usage or unknown_latency:
                     segment_flags.append("costs_partial")
