@@ -293,3 +293,135 @@ async def test_validate_spectate_tamper_matrix(tmp_path) -> None:
     result = validate(run_dir, rounds=2, require_live=False)
     assert result["status"] == "FAIL"
     assert any("interleave" in e for e in result["errors"])
+
+
+# -- CAP-01: interval semantics, attach cases, roster, transport audit -------
+
+async def test_attach_active_human_without_prior_enter_is_partial_not_invented(
+        tmp_path) -> None:
+    """Default fake = attach mid-human-turn with no prior ENTER observed.
+    Round 1 must be labeled a PARTIAL attach interval — never a claimed
+    boundary state (we cannot bound when the turn began relative to our
+    reads)."""
+    mod = _spectate_mod()
+    rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=2)
+    assert rc == 0
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    snaps = [e for e in events if e["kind"] == "SPECTATOR_SNAPSHOT"]
+    assert starts[0]["boundary"] == "attach"
+    assert starts[0]["state_at_boundary"] is False  # partial, not invented
+    assert starts[0]["observed_at"] and starts[0]["source_cursor"]
+    assert snaps[0]["census_phase"] == "read_time"
+    assert snaps[0]["state_at_boundary"] is False
+    # later rounds are directly observed hooks and MAY claim boundary state
+    assert starts[1]["boundary"] == "hook_observed"
+    assert starts[1]["state_at_boundary"] is True
+    assert summary["per_round"][0]["boundary"] == "attach"
+
+
+async def test_attach_during_ai_turn_does_not_replay_stale_human_history(
+        tmp_path) -> None:
+    """Attached between turns with a STALE ring: every pre-read entry is
+    dropped as history (audited), and round 1 opens only at the next
+    UNAMBIGUOUS fresh HOOK_ENTER — no turn from before or during the
+    attach is ever recorded as an observed round."""
+    mod = _spectate_mod(polls=2, attach_turn_active=False)
+    mod.trace = ["1|HOOK_ENTER|0", "1|HOOK_DEACT|0"]
+    rc, events, summary, _ = await run_spectate(
+        tmp_path, mod, turns=1, poll_s=0.02)
+    assert rc == 0
+    # the drain audited the discarded history
+    assert any(e.get("audit") == "attach_history_discarded" for e in events)
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    assert len(starts) == 1
+    # round 1 opens at the first fresh ENTER observed AFTER the drain
+    # (turn 2's ENTER arrives in the second trace read — genuinely new);
+    # the drained pre-attach turn-1 history stays unrecorded
+    assert starts[0]["turn"] == 2
+    assert starts[0]["boundary"] == "hook_observed"
+    assert not any(e["kind"] == "HUMAN_TURN_START" and e["turn"] == 1
+                   for e in events)
+    assert summary["attach"]["attached_mid_turn"] is False
+
+
+async def test_multiple_turn_boundaries_in_one_poll_do_not_forge_historical_snapshots(
+        tmp_path) -> None:
+    """One poll batch containing [human DEACT, AI turns, next human ENTER]:
+    the EARLIER boundary's events are written with reads that happened
+    AFTER the later entries existed — they must carry
+    state_at_boundary=False; only the batch's LAST boundary may claim
+    boundary state."""
+    mod = _spectate_mod(polls=1, advance_on=["trace"])
+    rc, events, summary, _ = await run_spectate(
+        tmp_path, mod, turns=2, poll_s=0.02)
+    assert rc == 0
+    ends = [e for e in events if e["kind"] == "HUMAN_TURN_END"]
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    # turns=2 => exactly two rounds (the attach round counts as round 1);
+    # every TRACE read that advances rolls a whole round into one batch
+    assert len(ends) == 2 and len(starts) == 2
+    # a batch boundary EARLIER than the batch's last entry: its reads ran
+    # after later entries existed — the forged-historical-state marker
+    # must be False
+    assert ends[0]["state_at_boundary"] is False
+    assert ends[0]["window_start_cursor"] == starts[0]["source_cursor"]
+    assert ends[0]["window_end_cursor"] == ends[0]["source_cursor"]
+    # a batch's LAST boundary may claim boundary state
+    assert any(s["state_at_boundary"] is True
+               for s in starts if s["boundary"] == "hook_observed")
+
+
+async def test_sparse_player_ids_and_unconfigured_actor_classes_have_coverage_status(
+        tmp_path) -> None:
+    """The OVERVIEW read discovers the REAL roster — sparse ids beyond the
+    configured set (a city-state at pid 63) get explicit coverage status;
+    the configured set is a claim, the board is the truth."""
+    mod = _spectate_mod()
+    mod.players[63] = {"gold": 0, "researching": "", "researched": []}
+    rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=1)
+    assert rc == 0
+    roster = next(e for e in events if e.get("audit") == "roster_discovery")
+    assert roster["discovered"] == [0, 1, 63]
+    assert roster["observed"] == [0, 1]
+    assert roster["unconfigured_discovered"] == [63]
+    assert roster["actor_classes"]["63"] == "minor_or_unconfigured"
+    assert roster["actor_classes"]["0"] == "observed_major"
+    assert summary["roster"]["unconfigured_discovered"] == [63]
+
+
+async def test_bootstrap_and_teardown_are_inside_spectator_command_audit(
+        tmp_path) -> None:
+    """setup/inject/teardown are lifecycle ops — permitted, counted
+    separately from recorder commands, and the capability census shows
+    zero rejected attempts and zero game writes."""
+    mod = _spectate_mod()
+    rc, _, summary, _ = await run_spectate(tmp_path, mod, turns=1)
+    assert rc == 0
+    census = summary["command_census"]
+    assert census["recorder_lifecycle"] == 3  # setup + inject + teardown
+    assert census["recorder_commands"] > 0
+    assert census["rejected"] == 0
+    assert census["game_writes"] == 0
+    assert census["status_polls"] >= 1 and census["trace_polls"] >= 1
+    assert census["digest_reads"] >= 2  # the census bracket
+
+
+async def test_trace_ring_wrap_declares_gap_and_gap_inferred_round(
+        tmp_path) -> None:
+    """A ring small enough to evict the cursor between polls: every
+    subsequent round is opened as boundary=gap_inferred with capture-gap
+    audits — the turns are recorded COARSELY and honestly, never silently
+    lost or fabricated as direct observations."""
+    mod = _spectate_mod(polls=1, trace_ring_cap=4)
+    rc, events, summary, _ = await run_spectate(
+        tmp_path, mod, turns=3, poll_s=0.02)
+    assert rc == 0
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    assert starts[0]["boundary"] in ("attach", "gap_inferred")
+    gap_rounds = [s for s in starts if s["boundary"] == "gap_inferred"]
+    assert gap_rounds, "wrap must produce gap-inferred rounds"
+    assert all(s["state_at_boundary"] is False for s in gap_rounds)
+    gap_audits = [e for e in events if e.get("audit") == "trace_gap"]
+    assert gap_audits and all("ring_size" in a for a in gap_audits)
+    assert summary["trace_gaps"] >= 1
+    assert summary["trace_generations"] >= 0  # epoch resets counted apart

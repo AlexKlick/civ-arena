@@ -46,16 +46,36 @@ class SpectateLimits:
 
 
 class TurnWatch:
-    """Cursor over the mod's bounded hook-trace ring (wrap-safe)."""
+    """Cursor over the mod's bounded hook-trace ring (wrap-safe). ``gaps``
+    counts wraps past the cursor; ``generation`` counts ring EPOCH resets
+    (the ring restarting at an earlier turn — a mod reload or engine
+    transition). Both are reported, never fabricated over."""
 
     def __init__(self) -> None:
         self._prev: list[str] = []
         self.gaps = 0
+        self.generation = 0
+        self._prev_first_turn: int | None = None
 
     def new_entries(self, lines: list[str]) -> tuple[list[str], bool]:
         """Returns (new entries, gap). On a gap every current entry is
         returned as new (some history was lost to the wrap)."""
         current = [ln for ln in lines if ln.strip()]
+        if current:
+            first = TurnWatch.parse(current[0])
+            first_turn = first[0] if first else None
+            if (self._prev_first_turn is not None
+                    and first_turn is not None
+                    and first_turn < self._prev_first_turn):
+                # the ring restarted at an earlier turn: new epoch, and
+                # continuity across it is void — report BOTH a new
+                # generation and a gap (entries between epochs unknowable)
+                self.generation += 1
+                self.gaps += 1
+                self._prev_first_turn = first_turn
+                self._prev = current
+                return current, True
+            self._prev_first_turn = first_turn
         overlap = 0
         if self._prev:
             for k in range(min(len(self._prev), len(current)), 0, -1):
@@ -82,16 +102,33 @@ class TurnWatch:
             return None
 
 
+def _owner_of(entity_id: str) -> int | None:
+    """Owner encoded in a qualified id (``u<owner>:<id>`` / ``c<owner>:<id>``
+    / ``p<owner>``) — the entity's owner AT OBSERVATION, which is evidence
+    about OWNERSHIP, never about WHO ACTED."""
+    head = entity_id.split(":", 1)[0]
+    if len(head) > 1 and head[0] in "ucp" and head[1:].isdigit():
+        return int(head[1:])
+    return None
+
+
 def parse_ambient_rows(lines: list[str]) -> list[dict[str, Any]]:
     """``AMBIENT|kind|entity_type|entity_id|attr|before|after`` rows from
-    DumpAmbient -> compact docs (values stay strings: canonical JSON)."""
+    DumpAmbient -> compact docs (values stay strings: canonical JSON).
+    Every row is a NET state-interval difference: ``actor_id`` is null by
+    construction (owner != actor — an owner's-unit change can be caused by
+    any participant or an automatic effect) and ``evidence_kind`` says so."""
     rows: list[dict[str, Any]] = []
     for line in lines:
         parts = line.split("|")
         if len(parts) == 7 and parts[0] == "AMBIENT":
             rows.append({"kind": parts[1], "entity_type": parts[2],
                          "entity_id": parts[3], "attr": parts[4],
-                         "before": parts[5], "after": parts[6]})
+                         "before": parts[5], "after": parts[6],
+                         "entity_owner_at_observation":
+                             _owner_of(parts[3]),
+                         "actor_id": None,
+                         "evidence_kind": "state_interval_diff"})
     return rows
 
 
@@ -110,7 +147,11 @@ def _compact_cities(cities: list[dict[str, Any]]) -> list[dict[str, Any]]:
 class SpectatorCensus:
     """Lease-free per-round capture: ambient windows + digest-bracketed
     census reads. ``snapshot`` is called at human turn START (all AI turns
-    of the previous game turn are complete by construction)."""
+    of the previous game turn are complete by construction) — but the
+    reads themselves happen at READ TIME: every snapshot doc carries
+    ``census_phase="read_time"`` and an explicit ``atomic`` flag (True
+    only when the digest bracket held). A snapshot NEVER claims to be the
+    historical state at the boundary hook that triggered it."""
 
     def __init__(self, adapter: Any, spec: Any) -> None:
         self._adapter = adapter
@@ -120,10 +161,19 @@ class SpectatorCensus:
     async def open_window(self, pid: int) -> None:
         await self._adapter.read_raw(lua_translator.begin_ambient_window(pid))
 
-    async def close_window(self, pid: int) -> list[dict[str, Any]]:
+    async def close_window(self, pid: int, *,
+                           actor_class: str | None = None) -> list[dict[str, Any]]:
+        """Close the window and drain its AMBIENT rows. ``actor_class``
+        annotates WINDOW PROVENANCE (e.g. "human_seat") — it never sets
+        ``actor_id``: a window diff is net state change, and who caused it
+        is not observable through this seam."""
         await self._adapter.read_raw(lua_translator.end_ambient_window(pid))
         dumped = await self._adapter.read_raw(lua_translator.dump_ambient())
-        return parse_ambient_rows(dumped)
+        rows = parse_ambient_rows(dumped)
+        if actor_class is not None:
+            for row in rows:
+                row["actor_class"] = actor_class
+        return rows
 
     async def snapshot(self) -> dict[str, Any]:
         """One census read, digest-bracketed. One retry on drift; a still-
@@ -138,6 +188,7 @@ class SpectatorCensus:
                                player_id=self._spec.human_seat))
             doc: dict[str, Any] = {
                 "overview": overview,
+                "census_phase": "read_time",
                 "counts": {
                     "units": {str(p): 0 for p in self._spec.observed_players},
                     "cities": {str(p): 0 for p in self._spec.observed_players},
@@ -167,6 +218,7 @@ class SpectatorCensus:
             consistent = before == after
             doc["digest"] = {"before": before, "after": after,
                              "consistent": consistent}
+            doc["atomic"] = consistent
             doc["census_ms"] = int((time.monotonic() - started) * 1000)
             if consistent:
                 return self._capped(doc)
@@ -182,3 +234,87 @@ class SpectatorCensus:
         if len(json.dumps(doc, sort_keys=True).encode()) > MAX_SNAPSHOT_BYTES:
             doc.pop("overview", None)
         return doc
+
+
+class RecorderCapabilityError(RuntimeError):
+    """The spectator transport refused an operation outside its capability
+    allowlist — raised BEFORE dispatch, so the operation never reaches the
+    wire (Exchange-2 F-03: enforcement at the dispatch boundary, not a
+    declared constant)."""
+
+
+class SpectateTransport:
+    """Capability wrapper around the adapter the spectate phase uses.
+
+    Allowlisted: the observer operations (poll_status / read_trace /
+    refresh_digest / observe) and the mod's lease-free ambient-window
+    RECORDER commands via read_raw. Lifecycle (setup / inject_mod /
+    teardown) is explicitly permitted and counted separately as
+    ``recorder_lifecycle`` — mod injection executes recorder-local Lua
+    source, it is not a gameplay mutation. EVERYTHING else — act,
+    write_raw, begin/end_phase, set_puppet, and any attribute not listed
+    here — raises :class:`RecorderCapabilityError` before dispatch.
+
+    ``census`` counts what actually went out: per-op sent counts, the
+    lifecycle count, and ``rejected`` (blocked attempts). The summary's
+    command_census is derived from this, not from a literal."""
+
+    _ALLOWED_READ_RAW = ("Puppeteer.BeginAmbientWindow",
+                         "Puppeteer.EndAmbientWindow",
+                         "Puppeteer.DumpAmbient")
+
+    def __init__(self, adapter: Any) -> None:
+        self._adapter = adapter
+        self.census: dict[str, int] = {
+            "status_polls": 0, "trace_polls": 0, "digest_reads": 0,
+            "observe_reads": 0, "recorder_commands": 0,
+            "recorder_lifecycle": 0, "rejected": 0,
+        }
+
+    # -- lifecycle (permitted, audited separately) -------------------------
+    async def setup(self, cfg: dict[str, Any]) -> Any:
+        self.census["recorder_lifecycle"] += 1
+        return await self._adapter.setup(cfg)
+
+    async def inject_mod(self, lua_text: str) -> Any:
+        self.census["recorder_lifecycle"] += 1
+        return await self._adapter.inject_mod(lua_text)
+
+    async def teardown(self) -> None:
+        self.census["recorder_lifecycle"] += 1
+        await self._adapter.teardown()
+
+    # -- observer operations -------------------------------------------------
+    async def poll_status(self) -> dict[str, Any]:
+        self.census["status_polls"] += 1
+        return await self._adapter.poll_status()
+
+    async def read_trace(self) -> list[str]:
+        self.census["trace_polls"] += 1
+        return await self._adapter.read_trace()
+
+    async def refresh_digest(self) -> str:
+        self.census["digest_reads"] += 1
+        return await self._adapter.refresh_digest()
+
+    async def observe(self, req: Any) -> Any:
+        self.census["observe_reads"] += 1
+        return await self._adapter.observe(req)
+
+    async def read_raw(self, lua: str) -> list[str]:
+        if not lua.startswith(self._ALLOWED_READ_RAW):
+            self.census["rejected"] += 1
+            raise RecorderCapabilityError(
+                f"spectator read_raw is restricted to the ambient-window "
+                f"recorder commands, refusing: {lua[:80]!r}")
+        self.census["recorder_commands"] += 1
+        return await self._adapter.read_raw(lua)
+
+    # -- everything else is refused BEFORE dispatch --------------------------
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        self.census["rejected"] += 1
+        raise RecorderCapabilityError(
+            f"spectator transport does not expose {name!r} — the recorder "
+            "has no gameplay-mutating path")

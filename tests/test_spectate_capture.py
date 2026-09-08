@@ -64,9 +64,13 @@ def test_parse_ambient_rows() -> None:
         "garbage line",
         "---END---",
     ])
+    # CAP-01: rows additionally carry owner/evidence attribution fields
     assert rows == [{"kind": "unit.moved", "entity_type": "unit",
                      "entity_id": "u1:3", "attr": "pos",
-                     "before": "30,30", "after": "31,30"}]
+                     "before": "30,30", "after": "31,30",
+                     "entity_owner_at_observation": 1,
+                     "actor_id": None,
+                     "evidence_kind": "state_interval_diff"}]
 
 
 # -- SpectatorCensus over the socket ------------------------------------------
@@ -163,3 +167,205 @@ async def test_ai_window_captures_engine_ai_turn() -> None:
         assert not any(r["kind"] == "player.gold" for r in rows)
 
     await with_fake(_spectate_mod(), check)
+
+
+# -- CAP-01: interval semantics, actor/owner, generation, transport ----------
+
+def test_ambient_rows_carry_owner_and_evidence_fields() -> None:
+    rows = parse_ambient_rows([
+        "AMBIENT|unit.moved|unit|u1:3|pos|30,30|31,30",
+        "AMBIENT|player.gold|player|p1|gold|100|105",
+    ])
+    assert rows[0]["entity_owner_at_observation"] == 1
+    assert rows[0]["actor_id"] is None  # owner != actor — never invented
+    assert rows[0]["evidence_kind"] == "state_interval_diff"
+    assert rows[1]["entity_owner_at_observation"] == 1
+    assert rows[1]["evidence_kind"] == "state_interval_diff"
+
+
+async def test_opponent_damage_to_owned_unit_is_not_owner_action() -> None:
+    """A damage row inside the HUMAN's window is a net state difference —
+    the mover may be an opponent attacking the human's unit. The row must
+    not claim the human (the owner) acted."""
+    async def check(adapter, server, mod):
+        await adapter.poll_status()  # attach: human turn 1 active
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        await census.open_window(0)
+        # an opponent attacks the human's warrior during the human's turn:
+        # the unit's damage changes while its OWNER never acted
+        mod.units[2]["damage"] = 30
+        rows = await census.close_window(0, actor_class="human_seat")
+        damage = [r for r in rows if r["entity_id"] == "u0:2"
+                  and r["attr"] == "damage"]
+        assert damage, f"expected damage row, got {rows}"
+        assert damage[0]["entity_owner_at_observation"] == 0
+        assert damage[0]["actor_id"] is None  # owner attribution is NOT actor
+        assert damage[0]["evidence_kind"] == "state_interval_diff"
+        assert damage[0]["actor_class"] == "human_seat"  # window provenance
+
+    await with_fake(_spectate_mod(), check)
+
+
+async def test_net_diff_does_not_claim_complete_command_sequence() -> None:
+    """Two distinct actions within one window (a move AND a moves-refresh)
+    collapse into net rows without order or attempt semantics — the
+    representation must say interval-diff, not a command sequence."""
+    async def check(adapter, server, mod):
+        await adapter.poll_status()
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        await census.open_window(0)
+        mod.units[2]["x"] = 6  # action 1
+        mod.units[2]["x"] = 7  # action 2 — same attr, net diff only
+        rows = await census.close_window(0)
+        moved = [r for r in rows if r["entity_id"] == "u0:2"
+                 and r["attr"] == "pos"]
+        assert len(moved) == 1  # ONE net row for two actions
+        assert moved[0]["evidence_kind"] == "state_interval_diff"
+        assert "attempt" not in moved[0] and "order" not in moved[0]
+
+    await with_fake(_spectate_mod(), check)
+
+
+async def test_engine_advances_between_census_reads_is_marked_non_atomic() -> None:
+    async def check(adapter, server, mod):
+        await adapter.poll_status()
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        doc = await census.snapshot()
+        assert doc["digest"]["consistent"] is False
+        assert doc["census_phase"] == "read_time"  # snapshot = read-time state
+        assert doc["atomic"] is False  # explicit non-atomicity marker
+        assert census.retries == 1
+
+    await with_fake(_spectate_mod(mutate_during_census=True), check)
+
+
+async def test_quiet_census_declares_read_time_phase() -> None:
+    async def check(adapter, server, mod):
+        await adapter.poll_status()
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        doc = await census.snapshot()
+        assert doc["census_phase"] == "read_time"
+        assert doc["atomic"] is True
+
+    await with_fake(_spectate_mod(), check)
+
+
+def test_ring_wrap_and_source_reset_preserve_gap_and_generation() -> None:
+    watch = TurnWatch()
+    watch.new_entries(["1|HOOK_ENTER|0", "1|HOOK_DEACT|0"])
+    # wrap: everything we had is gone, a later window arrives
+    new, gap = watch.new_entries(["5|HOOK_ENTER|0"])
+    assert gap is True and watch.gaps == 1
+    assert watch.generation == 0  # turns moved FORWARD — same ring epoch
+    # source reset (mod reload): the ring restarts at an EARLIER turn
+    new, gap = watch.new_entries(["1|HOOK_ENTER|0"])
+    assert gap is True
+    assert watch.generation == 1  # a NEW ring epoch, counted separately
+
+
+async def test_window_dump_duplicate_does_not_duplicate_an_action() -> None:
+    async def check(adapter, server, mod):
+        await adapter.poll_status()
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        await census.open_window(0)
+        mod.units[2]["x"] = 6
+        first = await census.close_window(0)
+        assert any(r["entity_id"] == "u0:2" for r in first)
+        # re-dump without a new window: NOTHING (drained, not replayed)
+        dumped = await adapter.read_raw(
+            __import__("civ_arena.game.civ6.lua_translator",
+                       fromlist=["lua_translator"]).dump_ambient())
+        assert parse_ambient_rows(dumped) == []
+        # end-without-begin produces no rows either (no fabricated diff)
+        again = await census.close_window(0)
+        assert again == []
+
+    await with_fake(_spectate_mod(), check)
+
+
+def test_spectator_transport_rejects_mutating_operation_before_send() -> None:
+    from civ_arena.game.civ6.spectate_capture import (
+        RecorderCapabilityError,
+        SpectateTransport,
+    )
+
+    class _MutatingAdapter:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        async def read_raw(self, lua: str) -> list[str]:
+            self.sent.append(lua)
+            return []
+
+        async def act(self, cmd):
+            self.sent.append("ACT!")
+            return None
+
+        async def write_raw(self, lua: str):
+            self.sent.append(lua)
+
+    inner = _MutatingAdapter()
+    transport = SpectateTransport(inner)
+    import asyncio as _asyncio
+
+    async def attempts():
+        for bad in (
+            lambda: transport.act(object()),
+            lambda: transport.write_raw("UI.RequestAction(ActionTypes.ACTION_ENDTURN)"),
+            lambda: transport.read_raw("Puppeteer.SetPuppet(0, true)"),
+            lambda: transport.begin_phase(0, 1),
+            lambda: transport.set_puppet(0, True),
+        ):
+            try:
+                result = bad()
+                if hasattr(result, "__await__"):
+                    await result
+                raise AssertionError("mutation was not rejected")
+            except RecorderCapabilityError:
+                pass
+        # reads still flow
+        rows = await transport.read_raw("Puppeteer.DumpAmbient()")
+        assert rows == []
+
+    _asyncio.run(attempts())
+    assert inner.sent == ["Puppeteer.DumpAmbient()"]  # only the allowed read
+    assert transport.census["rejected"] == 5
+    assert transport.census["recorder_commands"] == 1
+
+
+def test_transport_census_counts_lifecycle_separately() -> None:
+    from civ_arena.game.civ6.spectate_capture import SpectateTransport
+
+    class _LifecycleAdapter:
+        def __init__(self):
+            self.calls = []
+
+        async def setup(self, cfg):
+            self.calls.append("setup")
+            return {}
+
+        async def inject_mod(self, lua):
+            self.calls.append("inject")
+            return {"mod_version": "0.3.10"}
+
+        async def teardown(self):
+            self.calls.append("teardown")
+
+    inner = _LifecycleAdapter()
+    transport = SpectateTransport(inner)
+    import asyncio as _asyncio
+
+    async def run():
+        await transport.setup({})
+        await transport.inject_mod("-- mod")
+        await transport.teardown()
+
+    _asyncio.run(run())
+    assert transport.census["recorder_lifecycle"] == 3
+    assert transport.census["recorder_commands"] == 0  # lifecycle != commands
+
