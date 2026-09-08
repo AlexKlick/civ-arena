@@ -117,6 +117,79 @@ async def test_adapter_rejects_unrequested_tile_before_populating_memory(monkeyp
     assert adapter.visibility_for(0) == (frozenset(), frozenset())
 
 
+async def test_adapter_remembers_static_keys_and_drops_dynamic_keys(monkeypatch):
+    """M4: a remembered tile keeps its STATIC keys (feature/river, like
+    its terrain) and loses every DYNAMIC key plus ownership; the tile the
+    unit still sees keeps the re-validated dynamic set."""
+    units = [{'owner': 0, 'q': 0, 'r': 0}]
+    monkeypatch.setattr(response_parser, 'parse_units', lambda *a, **kw: units)
+    monkeypatch.setattr(response_parser, 'parse_cities', lambda *a, **kw: [])
+    row = ('TILEROW|{q}|{r}|TERRAIN_TUNDRA|true|1|old_city|FEATURE_FOREST|'
+           'RESOURCE_IRON|IMPROVEMENT_FARM|-|true|12|true')
+
+    async def read(lua, **kwargs):
+        if 'TILEROW' in lua:
+            coords = [(u['q'], u['r']) for u in units]
+            return ['VMAP|4', 'TURN|7', *(row.format(q=q, r=r)
+                                           for q, r in coords)]
+        return []
+
+    async def write(lua, **kwargs):
+        return []
+
+    adapter = FireTunerAdapter('unused.invalid', 0)
+    adapter._conn = SimpleNamespace(execute_read=read, execute_write=write)
+    first = await adapter.observe(ObserveRequest(kind=ObserveKind.VISIBLE_MAP,
+                                                 player_id=0))
+    assert first['tiles']['0,0']['resource'] == 'RESOURCE_IRON'
+    assert first['tiles']['0,0']['engine_visible'] is True
+    units[0].update(q=10, r=10)
+    second = await adapter.observe(ObserveRequest(kind=ObserveKind.VISIBLE_MAP,
+                                                  player_id=0))
+    remembered = second['tiles']['0,0']
+    assert remembered == {'terrain': 'PLAINS',
+                          'native_terrain': native_terrain('TERRAIN_TUNDRA'),
+                          'feature': 'FEATURE_FOREST', 'river': True}
+    assert 'owner' not in remembered and 'city' not in remembered
+    # the default PROJECTION strips the new keys entirely: remembered
+    # packets stay terrain-fields only
+    projected = VisibilityPolicy().project(
+        {'turn': 7, 'tiles': {'0,0': remembered}},
+        'visible_map', 0, frozenset(), frozenset({'0,0'}))
+    assert projected['tiles']['0,0'] == {
+        'coord': '0,0', 'terrain': 'PLAINS',
+        'native_terrain': native_terrain('TERRAIN_TUNDRA')}
+
+
+def test_static_and_dynamic_tile_field_helpers_revalidate_types():
+    """The typed re-validation gates: malformed tokens drop the key
+    (absent), appeal is bounded to [-100, 100], booleans must be real."""
+    from civ_arena.game.terrain_metadata import (
+        DYNAMIC_TILE_FIELDS,
+        STATIC_TILE_FIELDS,
+        static_tile_fields,
+        visible_tile_fields,
+    )
+    assert STATIC_TILE_FIELDS == ('feature', 'river')
+    assert DYNAMIC_TILE_FIELDS == ('resource', 'improvement', 'district',
+                                   'appeal', 'engine_visible')
+    tile = {'terrain': 'PLAINS', 'feature': 'FEATURE_FOREST', 'river': True,
+            'resource': 'RESOURCE_IRON', 'improvement': '', 'district': '',
+            'appeal': 42, 'engine_visible': False}
+    assert static_tile_fields(tile) == {'terrain': 'PLAINS',
+                                        'feature': 'FEATURE_FOREST',
+                                        'river': True}
+    assert visible_tile_fields(tile) == {'resource': 'RESOURCE_IRON',
+                                         'improvement': '', 'district': '',
+                                         'appeal': 42,
+                                         'engine_visible': False}
+    bad = {'terrain': 'PLAINS', 'feature': 'bad words', 'river': 'yes',
+           'resource': 'x' * 65, 'improvement': 7, 'appeal': 101,
+           'engine_visible': 'true'}
+    assert static_tile_fields(bad) == {'terrain': 'PLAINS'}
+    assert visible_tile_fields(bad) == {}
+
+
 @pytest.mark.parametrize('direction,sign', [('north', 1), ('south', -1)])
 def test_cold_direction_is_observed_concentration_not_unexplored_warmth(direction, sign):
     tiles = {f'0,{sign}': {'native_terrain': native_terrain('TERRAIN_TUNDRA_HILLS')},

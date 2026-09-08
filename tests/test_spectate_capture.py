@@ -24,8 +24,11 @@ SPECTATE_DOC = {
 
 def _spectate_mod(**overrides) -> FakeMod:
     cfg = {"human_seat": 0, "ai_seats": [1], "polls_per_human_turn": 50}
+    kwargs = {}
+    if "fail_spectator" in overrides:
+        kwargs["fail_spectator"] = overrides.pop("fail_spectator")
     cfg.update(overrides)
-    return FakeMod(spectate=cfg, ambient_diffs=True)
+    return FakeMod(spectate=cfg, ambient_diffs=True, **kwargs)
 
 
 # -- TurnWatch ----------------------------------------------------------------
@@ -120,10 +123,106 @@ async def test_census_scope_ambient_drops_detail() -> None:
         census = SpectatorCensus(adapter, spec)
         doc = await census.snapshot()
         assert "units" not in doc and "cities" not in doc
+        assert "world" not in doc, "the world block is full-scope only"
         assert doc["digest"]["consistent"] is True
         assert doc["overview"]  # counts still carried
 
     await with_fake(_spectate_mod(), check)
+
+
+# -- M4: the additive world block (contract §4b) --------------------------------
+
+
+async def test_census_world_block_read_transport_only_with_bracket() -> None:
+    async def check(adapter, server, mod):
+        await adapter.poll_status()  # attach (human turn 1 active)
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        doc = await census.snapshot()
+        world = doc["world"]
+        assert world["schema"] == 1 and world["after_seat"] == -1
+        # palette is EXCLUDED from the spectate carrier (write transport)
+        assert world["contexts"]["palette"] == "absent"
+        assert "palette" not in world
+        assert {r["kind"] for r in world["roster"]} == {"major"}
+        assert set(world["owned_tiles_columns"]) == {"0"}
+        assert world["digest_consistent"] is True
+        assert doc["digest"]["consistent"] is True
+        assert "truncated" not in doc
+        assert mod.turn == 1  # the world read never advanced the game
+
+    await with_fake(_spectate_mod(), check)
+
+
+async def test_census_world_failure_degrades_to_error_doc() -> None:
+    async def check(adapter, server, mod):
+        await adapter.poll_status()
+        spec = parse_config(SPECTATE_DOC).spectate
+        census = SpectatorCensus(adapter, spec)
+        doc = await census.snapshot()
+        assert doc["world"]["error"] == "LuaError"
+        assert "digest_consistent" in doc["world"]
+        assert doc["digest"]["consistent"] is True  # the census itself held
+
+    await with_fake(_spectate_mod(fail_spectator=True), check)
+
+
+def test_world_drops_first_under_the_snapshot_cap(monkeypatch) -> None:
+    import civ_arena.game.civ6.spectate_capture as sc
+
+    monkeypatch.setattr(sc, "MAX_SNAPSHOT_BYTES", 512)
+    census = SpectatorCensus(object(), None)
+    doc = {"digest": {"before": "a", "after": "a"}, "counts": {},
+           "world": {"schema": 1, "roster": ["r" * 64] * 8},
+           "units": ["u" * 64] * 4, "cities": [], "overview": {"o": 1}}
+    capped = census._capped(doc)  # noqa: SLF001
+    assert "world" not in capped
+    assert capped["truncated"] == {"world": True}
+    # a doc that fits is returned untouched
+    small = {"digest": {"before": "a", "after": "a"}, "counts": {},
+             "world": {"schema": 1}}
+    assert census._capped(small) is small  # noqa: SLF001
+
+
+def test_transport_allows_exactly_the_world_reads() -> None:
+    from civ_arena.game.civ6 import world_capture
+    from civ_arena.game.civ6.spectate_capture import (
+        RecorderCapabilityError,
+        SpectateTransport,
+    )
+
+    class _Inner:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        async def read_raw(self, lua: str) -> list[str]:
+            self.sent.append(lua)
+            return []
+
+    import asyncio as _asyncio
+
+    inner = _Inner()
+    transport = SpectateTransport(inner)
+    roster = world_capture.roster_read()
+    tiles = world_capture.owned_tiles_read()
+
+    async def attempts():
+        # the exact full-command reads flow (EXACT match, not prefix)
+        await transport.read_raw(roster)
+        await transport.read_raw(tiles)
+        # a one-character edit re-tightens the allowlist by construction
+        for lua in (roster + " ", roster.replace("SPECW|1|roster", "SPECW|1|Roster"),
+                    roster[:-1]):
+            try:
+                await transport.read_raw(lua)
+                raise AssertionError("mutated world read was not rejected")
+            except RecorderCapabilityError:
+                pass
+
+    _asyncio.run(attempts())
+    assert inner.sent == [roster, tiles]
+    assert transport.census["rejected"] == 3
+    assert transport.census["recorder_commands"] == 2
 
 
 async def test_census_drift_reports_inconsistent_after_retry() -> None:

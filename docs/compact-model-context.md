@@ -40,6 +40,13 @@ actor rows. Its absence is unknown, and ordinary foreign units are not thereby
 classified as hostile. Native collection/projection is a separately tested
 change.
 
+Honest hp note (M4, 2026-09-08): the parser no longer synthesizes the
+legacy `hp: 100` placeholder on city rows — the CITIES\|2 extended read
+carries the engine's real `hp`/`max_hp` when it answers, and an unread hp
+is ABSENT, never a fabricated 100 (the planner's belief layer documents
+its 100 default as a prior, not an observation). A city row without `hp`
+therefore means "hp not observed", not "healthy".
+
 Focused verification: 31 tests passed, zero failed/skipped; Ruff passed. Tests
 cover the retained failure, whole-request metadata accounting, exact expansion,
 absence/false/zero/null distinctions, all adjacent tiles for a dispersed

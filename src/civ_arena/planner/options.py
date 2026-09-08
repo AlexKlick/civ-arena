@@ -303,7 +303,7 @@ def _fortify_line_step(state: SimState, pid: int) -> Plan:
 def _all_buildings_done(state: SimState, pid: int) -> bool:
     cities = _own_cities(state, pid)
     return bool(cities) and all(
-        set(BUILDINGS) <= set(c["buildings"]) for c in cities)
+        set(BUILDINGS) <= set(c.get("buildings", [])) for c in cities)
 
 
 OPTIONS: dict[str, Option] = {o.option_id: o for o in (

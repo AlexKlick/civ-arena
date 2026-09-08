@@ -91,3 +91,51 @@ def test_model_string_still_display_only_alongside_llm():
     agent = parse_config(doc).agents[0]
     assert agent.model == "display-hint"
     assert agent.llm.model_id == "MiniMax-M3"
+
+
+def test_own_economy_context_explicit_boolean_no_coupling():
+    # default off
+    assert parse_config(llm_doc(dict(VALID))).agents[0].llm \
+        .own_economy_context is False
+    # opt-in works WITHOUT adaptive_context (unlike the briefing) and on
+    # ANY decision mode
+    spec = parse_config(llm_doc(dict(VALID, own_economy_context=True)))
+    assert spec.agents[0].llm.own_economy_context is True
+    assert spec.agents[0].llm.adaptive_context is None
+    for bad in ("yes", 1, None, []):
+        with pytest.raises(ConfigError, match="own_economy_context"):
+            parse_config(llm_doc(dict(VALID, own_economy_context=bad)))
+
+
+def test_spectator_capture_requires_firetuner_and_explicit_boolean():
+    def doc(**extra):
+        base = llm_doc(dict(VALID))
+        base["match"].update(extra)
+        return base
+
+    assert parse_config(doc()).spectator_capture is False
+    spec = parse_config(doc(adapter="firetuner", spectator_capture=True))
+    assert spec.spectator_capture is True
+    with pytest.raises(ConfigError, match="spectator_capture"):
+        parse_config(doc(spectator_capture=True))  # simulator adapter
+    for bad in ("yes", 1, None):
+        with pytest.raises(ConfigError, match="spectator_capture"):
+            parse_config(doc(adapter="firetuner", spectator_capture=bad))
+
+
+def test_live_visible_map_context_exact_values():
+    def doc(live):
+        base = llm_doc(dict(VALID))
+        base["match"]["adapter"] = "firetuner"
+        base["live"] = live
+        return base
+
+    assert parse_config(doc(None)).live is None
+    assert parse_config(doc({})).live.visible_map_context == "gamecore"
+    assert parse_config(doc({"visible_map_context": "ingame"})).live \
+        .visible_map_context == "ingame"
+    for bad in ("InGame", "lua", ""):
+        with pytest.raises(ConfigError, match="visible_map_context"):
+            parse_config(doc({"visible_map_context": bad}))
+    with pytest.raises(ConfigError, match="unsupported keys"):
+        parse_config(doc({"visible_map_context": "gamecore", "extra": 1}))

@@ -64,13 +64,28 @@ print("---END---")
 
 
 def overview_read() -> str:
-    """Sim-OVERVIEW-shaped read: turn + one row per alive major (players
-    dict). The projection consumes exactly turn/players; civ_name via
+    """Sim-OVERVIEW-shaped read, M4 wire v2 (13-field OVROW): turn + one
+    row per alive major (players dict). civ_name via
     PlayerConfigurations (live-learned: GetCivilizationTypeName is not a
-    Players-entry method — per-entry nil guards everywhere)."""
+    Players-entry method — per-entry nil guards everywhere).
+
+    M4 economy fields (Amendment 1.1, live-probed 2026-09-08): gold
+    balance/gpt/upkeep via Treasury, science via Techs, culture/faith via
+    Culture/Religion, era via GetEra — ALL confirmed on GameCore, so this
+    read stays on the read transport by default. The named-but-wrong
+    getters (GetGold, GetScience, treasury:GetScienceYield, …) never
+    appear. The civic-progress triple is InGame-only
+    (GetCulturalProgress/GetCostNextCivic missing on GameCore): the whole
+    group is gated on GetCulturalProgress being callable and reads '?'
+    (unread -> key absent) on the read transport — spectate snapshots
+    therefore carry yields + era but no civic progress. Researched civics
+    ride OVCIVICS rows (HasCivic IS GameCore-confirmed); OVERA carries the
+    game era NAME (max major era through GameInfo.Eras, pcall — omitted
+    when unresolvable)."""
     return """
-print("OVX|1")
+print("OVX|2")
 print("TURN|" .. Game.GetCurrentGameTurn())
+local maxEra = nil
 for pid, p in pairs(Players) do
     if p.IsAlive ~= nil and p.IsMajor ~= nil and p.IsBarbarian ~= nil
         and p:IsAlive() and p:IsMajor() and not p:IsBarbarian() then
@@ -97,7 +112,42 @@ for pid, p in pairs(Players) do
                 end
             end
         end)
-        print("OVROW|" .. pid .. "|" .. civ .. "|" .. gold .. "|" .. res)
+        local sci, cul, fai, gpt, upkeep, era = "?", "?", "?", "?", "?", "?"
+        pcall(function() sci = tostring(math.floor(p:GetTechs():GetScienceYield())) end)
+        pcall(function() cul = tostring(math.floor(p:GetCulture():GetCultureYield())) end)
+        pcall(function() fai = tostring(math.floor(p:GetReligion():GetFaithYield())) end)
+        pcall(function() gpt = tostring(math.floor(p:GetTreasury():GetGoldYield())) end)
+        pcall(function()
+            upkeep = tostring(math.floor(p:GetTreasury():GetTotalMaintenance())) end)
+        pcall(function()
+            local e = p:GetEra()
+            if type(e) == "number" then
+                era = tostring(math.floor(e))
+                if maxEra == nil or e > maxEra then maxEra = math.floor(e) end
+            end
+        end)
+        local civic, cprog, ccost = "?", "?", "?"
+        pcall(function()
+            local cu = p:GetCulture()
+            if cu.GetCulturalProgress == nil or cu.GetCostNextCivic == nil then
+                error("civic progress unavailable on this context")
+            end
+            local idx = cu:GetProgressingCivic()
+            if type(idx) == "number" and idx ~= -1 then
+                local row = GameInfo.Civics[idx]
+                if row ~= nil and row.CivicType ~= nil then
+                    civic = row.CivicType
+                end
+            else
+                civic = "-"
+            end
+            cprog = tostring(math.floor(cu:GetCulturalProgress()))
+            ccost = tostring(math.floor(cu:GetCostNextCivic()))
+        end)
+        print("OVROW|" .. pid .. "|" .. civ .. "|" .. gold .. "|" .. res
+            .. "|" .. sci .. "|" .. cul .. "|" .. fai .. "|" .. gpt
+            .. "|" .. upkeep .. "|" .. era .. "|" .. civic .. "|" .. cprog
+            .. "|" .. ccost)
         local done = {}
         pcall(function()
             for row in GameInfo.Technologies() do
@@ -112,7 +162,29 @@ for pid, p in pairs(Players) do
             table.sort(done)
             print("OVRESEARCHED|" .. pid .. "|" .. table.concat(done, ";"))
         end
+        local civics = {}
+        pcall(function()
+            for row in GameInfo.Civics() do
+                if p:GetCulture():HasCivic(row.Index) then
+                    table.insert(civics, row.CivicType)
+                end
+            end
+        end)
+        if #civics > 0 then
+            table.sort(civics)
+            print("OVCIVICS|" .. pid .. "|" .. table.concat(civics, ";"))
+        end
     end
+end
+if maxEra ~= nil then
+    local eraName = nil
+    pcall(function()
+        if GameInfo.Eras ~= nil and GameInfo.Eras[maxEra] ~= nil then
+            local nm = GameInfo.Eras[maxEra].EraType
+            if type(nm) == "string" and nm ~= "" then eraName = nm end
+        end
+    end)
+    if eraName ~= nil then print("OVERA|" .. eraName) end
 end
 print("---END---")
 """
@@ -177,7 +249,7 @@ print("---END---")
 """
 
 
-def cities_read() -> str:
+def cities_read(*, extended: bool = False) -> str:
     """Sim-CITIES-shaped omniscient read. production_queue is read back via
     GetCurrentProductionTypeHash — the accessor every shipped UI consumer
     uses (citysupport/productionpanel/productionhelper; 0 = nothing
@@ -186,9 +258,161 @@ def cities_read() -> str:
     and the queue read '-' on every row — which made housekeeping re-fill
     production EVERY turn and overwrite the agent's own choice
     (live-tourney-glm53: MONUMENT x10 replacing SCOUT/SETTLER).
-    hp/food_bucket/production_bucket/buildings are placeholder constants:
-    foreign cities are hidden entirely under M14d's empty visibility sets,
-    so only OWN cities (projection pass-through) ever carry them."""
+
+    M4 (contract §2, CITIES|2): ``extended=True`` enumerates
+    PlayerManager.GetAlive() — city-states included (CAP-R1 finding 8 in
+    substance) — with a boolean-asserted IsBarbarian skip and IsMajor on
+    the row. Majors keep the fail-loud queue contract; a MINOR's queue is
+    pcall-guarded ('?' -> key absent). Every extended city accessor beyond
+    the confirmed seven is pcall-wrapped with a '?' fallback: the 2026-09-08
+    parked-game probe (Amendment 1.5) proved cities are only enumerable on
+    a driver-attached game, so the growth/HP/building/district getters stay
+    unconfirmed live until scripts/live_capture_check.py runs against the
+    attached chain — texlua stub tests pin the shapes meanwhile. The legacy
+    hp/food_bucket/production_bucket/buildings PLACEHOLDER constants are
+    gone from the parser: unread now means absent, never a fabricated 100."""
+    if not extended:
+        return _cities_read_lite()
+    return """
+print("CITIES|2")
+for _, p in ipairs(PlayerManager.GetAlive()) do
+    local barbarian = p:IsBarbarian()
+    assert(type(barbarian) == "boolean", "IsBarbarian must return boolean")
+    if not barbarian then
+    local major = "?"
+    pcall(function() major = tostring(p:IsMajor()) end)
+    for _, city in p:GetCities():Members() do
+        local name = ""
+        pcall(function()
+            if Locale ~= nil then name = Locale.Lookup(city:GetName()) end
+        end)
+        if name == nil or name == "" then name = "c" .. city:GetID() end
+        name = string.gsub(name, "|", "-")
+        name = string.gsub(name, "%c", " ")
+        local bq = city:GetBuildQueue()
+        local queue = "?"
+        if bq == nil or bq.GetCurrentProductionTypeHash == nil then
+            if major == "true" then
+                error("city production queue unavailable")
+            end
+        else
+            local h = bq:GetCurrentProductionTypeHash()
+            if type(h) ~= "number" then
+                if major == "true" then
+                    error("city production hash unavailable")
+                end
+            else
+                queue = "-"
+                if h ~= 0 then
+                    for row in GameInfo.Units() do
+                        if row.Hash == h then queue = row.UnitType break end
+                    end
+                    if queue == "-" then
+                        for row in GameInfo.Buildings() do
+                            if row.Hash == h then queue = row.BuildingType break end
+                        end
+                    end
+                    if string.match(queue, '^UNIT_DISTRICT_')
+                        or string.match(queue, '^UNIT_PROJECT_')
+                        or string.match(queue, '^BUILDING_DISTRICT_')
+                        or string.match(queue, '^BUILDING_PROJECT_') then
+                        error('legacy queue collides with reserved productive namespace')
+                    end
+                    if queue == "-" and GameInfo.Districts ~= nil then
+                        for row in GameInfo.Districts() do
+                            if row.Hash == h then queue = row.DistrictType break end
+                        end
+                    end
+                    if queue == "-" and GameInfo.Projects ~= nil then
+                        for row in GameInfo.Projects() do
+                            if row.Hash == h then queue = row.ProjectType break end
+                        end
+                    end
+                    if queue == "-" then
+                        queue = "UNKNOWN_PRODUCTION_" .. tostring(h)
+                    end
+                end
+                if string.sub(queue, 1, 5) == "UNIT_" then
+                    queue = string.sub(queue, 6)
+                elseif string.sub(queue, 1, 9) == "BUILDING_" then
+                    queue = string.sub(queue, 10)
+                end
+            end
+        end
+        local pop = 1
+        pcall(function() pop = math.floor(city:GetPopulation()) end)
+        local capital = "?"
+        pcall(function()
+            if city.IsCapital ~= nil then capital = tostring(city:IsCapital()) end
+        end)
+        local hp, maxhp = "?", "?"
+        pcall(function()
+            local maximum = city:GetMaxDefenseHitPoints()
+            local damage = city:GetDefenseDamage()
+            if type(maximum) == "number" and type(damage) == "number"
+                and maximum > 0 and maximum <= 1000000
+                and maximum == math.floor(maximum) and damage == math.floor(damage)
+                and damage >= 0 and damage <= maximum then
+                maxhp, hp = math.floor(maximum),
+                    math.floor(maximum - damage)
+            end
+        end)
+        local food, thr, surplus, grow = "?", "?", "?", "?"
+        pcall(function()
+            food = tostring(math.floor(city:GetFood()))
+            thr = tostring(math.floor(city:GetGrowthThreshold()))
+            surplus = tostring(math.floor(city:GetFoodSurplusPerTurn()))
+            grow = tostring(math.floor(city:GetTurnsUntilGrowth()))
+        end)
+        local prodturns = "?"
+        pcall(function()
+            if bq ~= nil and bq.GetTurnsLeft ~= nil then
+                local h = bq:GetCurrentProductionTypeHash()
+                if type(h) == "number" and h ~= 0 then
+                    prodturns = tostring(math.floor(bq:GetTurnsLeft(h)))
+                end
+            end
+        end)
+        local buildings = "?"
+        pcall(function()
+            local done = {}
+            for row in GameInfo.Buildings() do
+                if city:HasBuilding(row.Index) then
+                    table.insert(done, row.BuildingType)
+                end
+            end
+            table.sort(done)
+            if #done == 0 then buildings = "-" else
+                buildings = table.concat(done, ";") end
+        end)
+        local districts = "?"
+        pcall(function()
+            local done = {}
+            for _, d in city:GetDistricts():Members() do
+                local dt = GameInfo.Districts[d:GetDistrictType()]
+                if dt ~= nil then table.insert(done, dt.DistrictType) end
+            end
+            table.sort(done)
+            if #done == 0 then districts = "-" else
+                districts = table.concat(done, ";") end
+        end)
+        local x = city:GetX() local y = city:GetY()
+        print("CITYROW|c" .. p:GetID() .. ":" .. city:GetID()
+            .. "|" .. p:GetID() .. "|" .. name
+            .. "|" .. (x - math.floor(y / 2)) .. "|" .. y
+            .. "|" .. pop .. "|" .. queue .. "|" .. major .. "|" .. capital
+            .. "|" .. hp .. "|" .. maxhp .. "|" .. food .. "|" .. thr
+            .. "|" .. surplus .. "|" .. grow .. "|" .. prodturns
+            .. "|" .. buildings .. "|" .. districts)
+    end
+    end
+end
+print("---END---")
+"""
+
+
+def _cities_read_lite() -> str:
+    """The legacy CITIES|1 read — majors only, fail-loud queue (byte-stable)."""
     return """
 print("CITIES|1")
 for _, p in ipairs(PlayerManager.GetAliveMajors()) do
@@ -258,27 +482,76 @@ print("---END---")
 
 
 def visible_map_read(player_id: int, tiles: list[tuple[int, int]]) -> str:
-    """M17c targeted terrain read. The engine's per-player fog state is NOT
-    exposed in this build's GameCore Lua (live-probed 2026-08-31: plot
-    IsRevealed/IsVisible nil, Player:GetVisibility errors, nothing
-    enumerable on Map/Game) — so visibility is DERIVED adapter-side from
-    the player's own units/cities and this read fetches terrain for
-    exactly that derived-visible coordinate list. Leak-safe by
-    construction: no coordinate outside the player's own-entity sight is
-    ever asked about, so the wire doc cannot carry unseen terrain.
+    """M17c targeted terrain read, M4 wire v4 (13-field TILEROW). The
+    adapter's DERIVED visibility still decides which coordinates are asked
+    about (leak-safe by construction: no coordinate outside the player's
+    own-entity sight is ever requested), and the 13th field `engvis` now
+    carries the ENGINE's own answer via the PlayersVisibility TABLE route
+    — live-probed 2026-09-08 (probe/accessor-matrix-20260908.md): the
+    table route works on GameCore (the 2026-08-31 negative finding applied
+    to the PLOT-object route), so fog is reachable on the read transport
+    and `live.visible_map_context: ingame` is an opt-in experiment, not a
+    requirement.
 
-    Coordinates are AXIAL (q, r); the engine's offset (x, y) with the
-    odd-row stagger is the inverse of the units/cities convention
-    (q = x - floor(y/2), r = y => x = q + floor(r/2), y = r). Terrain is
-    the ENGINE TerrainType; the parser maps it into the sim vocabulary.
-    plot:GetOwner IS live-verified — a visible tile's true ownership is
-    read here; GetOwningCity is nil in this build, so city tagging is a
-    Python-side join against the (already-omniscient) cities read."""
+    Token conventions (contract §2): '?' = unread (pcall fallback — the
+    parser drops the key), '-' = observed none. Resources are tech-gated
+    seatResource()-style per the game's own UI mirror
+    (GameInfo.Resources[idx].PrereqTech + techs:HasTech): an unrevealed
+    resource reads as '-' on the wire — the seat cannot see it. The Lua
+    avoids pattern iteration and escape sequences entirely (the tuner
+    lexer rejects both — live-learned run 009)."""
     coords = ", ".join(f"{{{x},{y}}}" for x, y in (axial_to_xy(q, r) for q, r in tiles))
     return f"""
-print("VMAP|3")
+print("VMAP|4")
 print("TURN|" .. Game.GetCurrentGameTurn())
 local coords = {{ {coords} }}
+local techs = nil
+pcall(function()
+    if Players ~= nil and Players[{player_id}] ~= nil then
+        techs = Players[{player_id}]:GetTechs()
+    end
+end)
+local function seatResource(idx)
+    local row = nil
+    pcall(function() row = GameInfo.Resources[idx] end)
+    if row == nil then return "?" end
+    local nm = ""
+    pcall(function() nm = row.ResourceType or "" end)
+    if nm == "" then return "?" end
+    local tech = nil
+    pcall(function() tech = row.PrereqTech end)
+    if tech ~= nil and tech ~= -1 then
+        if techs == nil or techs.HasTech == nil then return "?" end
+        local ok = false
+        pcall(function() ok = techs:HasTech(tech) end)
+        if ok ~= true then return "-" end
+    end
+    return nm
+end
+local function named(kind, idx)
+    local name = "?"
+    pcall(function()
+        if type(idx) ~= "number" then return end
+        if idx < 0 then name = "-" return end
+        local cat = GameInfo[kind]
+        if cat == nil or cat[idx] == nil then return end
+        local v = cat[idx][string.sub(kind, 1, -2) .. "Type"]
+        if type(v) == "string" and v ~= "" then
+            v = string.gsub(v, "|", "-")
+            v = string.gsub(v, "%c", " ")
+            name = v
+        end
+    end)
+    return name
+end
+local function rawIndex(getter)
+    local idx = "?"
+    pcall(function()
+        local v = getter()
+        if type(v) == "number" then idx = math.floor(v) end
+    end)
+    return idx
+end
 for _, c in ipairs(coords) do
     local plot = nil
     pcall(function() plot = Map.GetPlot(c[1], c[2]) end)
@@ -292,9 +565,35 @@ for _, c in ipairs(coords) do
         terrain = string.gsub(terrain, "%c", " ")
         local owner = -1
         pcall(function() owner = plot:GetOwner() end)
+        local feature = named("Features", rawIndex(function() return plot:GetFeatureType() end))
+        local resource = "?"
+        pcall(function()
+            local i = plot:GetResourceType()
+            if type(i) == "number" then
+                if math.floor(i) == -1 then resource = "-" else resource = seatResource(i) end
+            end
+        end)
+        local improvement = named("Improvements",
+            rawIndex(function() return plot:GetImprovementType() end))
+        local district = named("Districts",
+            rawIndex(function() return plot:GetDistrictType() end))
+        local river = "?"
+        pcall(function()
+            if plot.IsRiver ~= nil then river = tostring(plot:IsRiver()) end
+        end)
+        local appeal = "?"
+        pcall(function() appeal = tostring(math.floor(plot:GetAppeal())) end)
+        local engvis = "?"
+        pcall(function()
+            if PlayersVisibility ~= nil and PlayersVisibility[{player_id}] ~= nil then
+                engvis = tostring(PlayersVisibility[{player_id}]:IsVisible(plot))
+            end
+        end)
         local q = c[1] - math.floor(c[2] / 2) local r = c[2]
         print("TILEROW|" .. q .. "|" .. r .. "|" .. terrain
-            .. "|true|" .. owner .. "|")
+            .. "|true|" .. owner .. "|" .. "|" .. feature .. "|" .. resource
+            .. "|" .. improvement .. "|" .. district .. "|" .. river
+            .. "|" .. appeal .. "|" .. engvis)
     end
 end
 print("---END---")

@@ -83,6 +83,105 @@ def _fake_mod():
     return mod
 
 
+# -- M4: the spectator_world audit (contract §4a) -------------------------------
+
+SPECTATOR_DOC = {
+    "match": {"match_id": "m4p-spectator-hotseat", "seed": 271828,
+              "max_turns": 30, "checkpoint_every": 5, "adapter": "firetuner",
+              "watchdog_mode": "flag_and_continue", "violation_limit": 10,
+              "completeness_gate": True, "declare_own_endpath_drift": True,
+              "spectator_capture": True},
+    "agents": [
+        {"agent_id": "hotseat-planner", "player_id": 0, "policy": "planner",
+         "seed": 7},
+        {"agent_id": "hotseat-turtler", "player_id": 1, "policy": "turtler",
+         "seed": 22},
+    ],
+    "chaos": [],
+}
+
+
+async def _run_hotseat(tmp_path, mod, rounds=1):
+    from civ_arena.config import parse_config
+    from civ_arena.game.civ6 import live_driver as ld
+    from civ_arena.game.civ6.fake_tuner_server import FakeTunerServer
+    from civ_arena.game.civ6.firetuner import FireTunerAdapter
+
+    server = FakeTunerServer(mod=mod)
+    port = await server.start()
+    adapter = FireTunerAdapter("127.0.0.1", port,
+                               simulate_hook=ld._fake_hook)  # noqa: SLF001
+    run_dir = tmp_path / "run"
+    try:
+        result = await ld.phase_dispatch_hotseat(
+            parse_config(json.loads(json.dumps(SPECTATOR_DOC))), adapter,
+            run_dir, rounds, "h1", ld.MOD_DEFAULT.read_text())
+    finally:
+        await adapter.teardown()
+        await server.stop()
+    events = [json.loads(line) for line in
+              (run_dir / "events.jsonl").read_text().splitlines()]
+    summary = json.loads((run_dir / "summary.json").read_text())
+    return result, events, summary, run_dir
+
+
+async def test_spectator_capture_rehearsal_writes_baseline_and_per_seat_audits(
+        tmp_path):
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+
+    mod = FakeMod(hotseat=[0, 1])
+    result, events, summary, run_dir = await _run_hotseat(tmp_path, mod, rounds=1)
+    assert result == 0, summary["failure_reason"]
+    assert summary["clean"] is True
+    worlds = [e for e in events if e.get("audit") == "spectator_world"]
+    # baseline (after the initial-attach step) + one per completed seat turn
+    assert [w["after_seat"] for w in worlds] == [-1, 0, 1]
+    assert all(w["visibility_scope"] == "spectator" for w in worlds)
+    assert all(w["phase_player_id"] == -1 and w["player_id"] is None
+               for w in worlds)
+    baseline, after0, after1 = (w["world"] for w in worlds)
+    for world in (baseline, after0, after1):
+        assert world["schema"] == 1
+        assert {r["kind"] for r in world["roster"]} == {"major"}
+        assert [p["player_id"] for p in world["players"]] == [0, 1]
+        assert world["cities"] and world["cities"][0]["owner"] == 0
+        assert world["cities"][0]["hp"] == 200  # real hp, not the placeholder
+        assert set(world["owned_tiles_columns"]) == {"0"}
+        assert world["contexts"] == {"roster": "gamecore", "tiles": "gamecore",
+                                     "palette": "ingame"}
+        assert world["palette"]["0"]["primary"] == -1000000 + 2**32
+        assert world["game_era"] == "ERA_FAKE"
+        assert world["fog_audit"]["requested"] >= 0
+        assert world["truncated"]["world"] is False
+        assert len(json.dumps(world)) <= 256 * 1024
+    # the baseline precedes the first completed seat turn in the log
+    first_completed = next(e for e in events
+                           if e.get("audit") == "completed_seat_turn")
+    assert worlds[0]["seq"] < first_completed["seq"]
+    # CAP-02 territory: a clean hotseat validation IGNORES the audit
+    from civ_arena.game.civ6.validate_run import validate
+    verdict = validate(run_dir, 1, require_live=False)
+    expected_errors = (["clean commit identity"]
+                       if summary["identity"]["dirty"] else [])
+    assert verdict["errors"] == expected_errors
+
+
+async def test_fail_spectator_audits_failure_and_match_stays_clean(tmp_path):
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod
+
+    mod = FakeMod(hotseat=[0, 1], fail_spectator=True)
+    result, events, summary, _ = await _run_hotseat(tmp_path, mod, rounds=1)
+    assert result == 0, "the spectator audit must never kill the match"
+    assert summary["clean"] is True
+    failures = [e for e in events if e.get("audit") == "spectator_world_failed"]
+    assert [f["after_seat"] for f in failures] == [-1, 0, 1]
+    assert all(f["visibility_scope"] == "spectator" for f in failures)
+    # the message ran through the existing redactor: bounded, non-empty
+    assert all(isinstance(f.get("error"), str) and f["error"]
+               and len(f["error"]) <= 1500 for f in failures)
+    assert not [e for e in events if e.get("audit") == "spectator_world"]
+
+
 def test_fake_mod_ownership_follows_local_player_switch():
     """A2: on the Architecture-1 path the engine makes the lease-holder
     local — the fake's `me` derives from local_player (Codex r1 P2-10)

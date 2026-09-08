@@ -9,8 +9,10 @@ action tools routed GameCore/InGame per the live-probed table
 (docs/live-validation.md §6).
 
 Still NotImplementedError: ``snapshot``/``restore``, ``export_state``/
-``import_state`` (live save/load is M14e), and ground-truth visibility
-(``visibility_for`` returns EMPTY sets — the M14d declaration below).
+``import_state`` (live save/load is M14e). Visibility stays DERIVED from
+own entities (``visibility_for``); the engine's own fog answer is
+reachable on GameCore since M4 (the PlayersVisibility table route) and is
+audited via ``fog_audit_for`` — never used to widen what a seat sees.
 
 Design notes that cost nothing to forget:
 
@@ -53,7 +55,10 @@ from civ_arena.game.adapter import (
 from civ_arena.game.civ6 import lua_translator, productive_native, response_parser
 from civ_arena.game.civ6.entity_ids import decode
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
-from civ_arena.game.terrain_metadata import terrain_fields
+from civ_arena.game.terrain_metadata import (
+    static_tile_fields,
+    visible_tile_fields,
+)
 
 _LIVE_POINTER = (
     "live FireTuner support is not implemented yet — see "
@@ -228,13 +233,24 @@ _ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
 SimulateHook = Callable[[str, int, int], str]
 
 # M17c derived-visibility sight radii (axial hex distance). The engine's
-# fog state is not exposed in this build's GameCore Lua, so the adapter
-# derives the visible set from own entities. Deliberately CONSERVATIVE:
-# a hill-top unit or a walled city sees farther in the real engine —
-# under-revealing is the safe side of the no-leak contract (declared
-# approximation; hills/walls bonuses would need a per-plot read to lift).
+# OWN fog answer is now reachable (M4, Amendment 1.2: the
+# PlayersVisibility TABLE route works on GameCore — the 2026-08-31
+# negative finding applied to the plot-object route), but the ADAPTER's
+# derived visible set stays the no-leak authority: only derived-visible
+# coordinates are ever asked about. The derived set is deliberately
+# CONSERVATIVE — a hill-top unit or a walled city sees farther in the real
+# engine, and under-revealing is the safe side of the no-leak contract
+# (declared approximation; hills/walls bonuses would need a per-plot read
+# to lift). VMAP|4's `engvis` field audits the disagreement between the
+# two (fog_audit_for).
 UNIT_SIGHT = 2
 CITY_SIGHT = 3
+
+# which VM the targeted terrain read runs in (contract §5). gamecore (the
+# default) is the read transport — engvis works there (Amendment 1.2) —
+# so ingame is an OPT-IN experiment for future InGame-only tile fields,
+# never a fog requirement.
+VISIBLE_MAP_CONTEXTS = frozenset({"gamecore", "ingame"})
 
 
 def _ring(q: int, r: int, radius: int) -> set[str]:
@@ -276,11 +292,18 @@ class FireTunerAdapter:
         poll_timeout_s: float = 10.0,
         turn_wait_s: float = 120.0,
         simulate_hook: SimulateHook | None = None,
+        visible_map_context: str = "gamecore",
     ) -> None:
         if end_phase_strategy not in ("h1", "h2", "h3"):
             raise ValueError(
                 f"end_phase_strategy must be h1|h2|h3, got "
                 f"{end_phase_strategy!r}")
+        if visible_map_context not in VISIBLE_MAP_CONTEXTS:
+            raise ValueError(
+                f"visible_map_context must be one of "
+                f"{sorted(VISIBLE_MAP_CONTEXTS)}, got "
+                f"{visible_map_context!r}")
+        self._visible_map_context = visible_map_context
         self._conn = conn if conn is not None else GameConnection(host, port)
         self._strategy = end_phase_strategy
         self._poll_interval_s = poll_interval_s
@@ -294,7 +317,8 @@ class FireTunerAdapter:
         self._digest_text: str | None = None
         # M17c per-player visibility cache: player_id -> the last parsed
         # visible-map doc (tiles + the currently-seen key set). Written on
-        # each VISIBLE_MAP observe; read by visibility_for().
+        # each VISIBLE_MAP observe; read by visibility_for(). M4 adds the
+        # fog_audit slice (derived vs engine visibility per read).
         self._map_vis: dict[int, dict[str, Any]] = {}
         # hash scoping (Codex P1-4): while a phase is open (and for the
         # sealed phase-end hash) state_hash covers ONLY the phase owner's
@@ -621,23 +645,33 @@ class FireTunerAdapter:
             lines = await self._conn.execute_read(lua_translator.units_read())
             return response_parser.parse_units(lines, qualified=True)
         if req.kind is ObserveKind.CITIES:
-            lines = await self._conn.execute_write(lua_translator.cities_read())
+            # M4: extended rows (CITIES|2) — city-states included, real hp
+            # when the engine answers, unread keys absent (no placeholder
+            # 100). The build-queue getter stays InGame-only, so the read
+            # keeps the write transport.
+            lines = await self._conn.execute_write(
+                lua_translator.cities_read(extended=True))
             return response_parser.parse_cities(lines, qualified=True)
         if req.kind is ObserveKind.VISIBLE_MAP:
-            # M17c derived visibility (the engine's fog state is not
-            # exposed in this build's GameCore Lua — live-probed
-            # 2026-08-31). The currently-visible set is hex radius
-            # UNIT_SIGHT around own units / CITY_SIGHT around own city
-            # centers, computed from the same reads the agents use; the
-            # targeted terrain read asks ONLY about those coordinates, so
-            # no unseen terrain can enter the doc. Remembered tiles are
-            # the ACCUMULATION of every previously-visible set (the M11
-            # no-expiry epistemics, adapter-side), served from cache with
-            # their last-seen terrain — never re-read from the wire.
+            # M17c derived visibility. The engine's own fog answer is now
+            # reachable (M4, Amendment 1.2: the PlayersVisibility TABLE
+            # route works on GameCore), but the no-leak authority stays
+            # the DERIVED set: hex radius UNIT_SIGHT around own units /
+            # CITY_SIGHT around own city centers, computed from the same
+            # reads the agents use; the targeted terrain read asks ONLY
+            # about those coordinates, so no unseen terrain can enter the
+            # doc. VMAP|4's `engvis` field audits engine agreement
+            # (fog_audit_for). Remembered tiles are the ACCUMULATION of
+            # every previously-visible set (the M11 no-expiry
+            # epistemics, adapter-side), served from cache with their
+            # last-seen static keys — never re-read from the wire.
             units = response_parser.parse_units(await self._conn.execute_read(
                 lua_translator.units_read()), qualified=True)
+            # lite rows here: the map read only needs positions/owners —
+            # extended fields would double the InGame round-trips.
             cities = response_parser.parse_cities(
-                await self._conn.execute_write(lua_translator.cities_read()), qualified=True)
+                await self._conn.execute_write(
+                    lua_translator.cities_read(extended=False)), qualified=True)
             visible: set[str] = set()
             for u in units:
                 if u["owner"] == req.player_id:
@@ -647,22 +681,40 @@ class FireTunerAdapter:
                     visible |= _ring(c["q"], c["r"], CITY_SIGHT)
             coords = [(int(k.split(",")[0]), int(k.split(",", 1)[1]))
                       for k in sorted(visible)]
-            parsed = response_parser.parse_visible_map(
-                await self._conn.execute_read(
-                    lua_translator.visible_map_read(req.player_id, coords),
-                    timeout=25.0))
+            map_lua = lua_translator.visible_map_read(req.player_id, coords)
+            map_call = (self._conn.execute_write(map_lua, timeout=25.0)
+                        if self._visible_map_context == "ingame"
+                        else self._conn.execute_read(map_lua, timeout=25.0))
+            parsed = response_parser.parse_visible_map(await map_call)
             turn = parsed["turn"]
             fresh = parsed["tiles"]
             if set(fresh) - visible:
                 raise ValueError("terrain response contains unrequested coordinates")
             cache = self._map_vis.setdefault(
                 req.player_id, {"turn": turn, "tiles": {}, "visible": set()})
-            # remembered = every tile EVER visible, terrain frozen at its
-            # last-seen read; the merge is monotone by construction
+            # remembered = every tile EVER visible, static keys frozen at
+            # their last-seen read; the merge is monotone by construction
             for key, tile in fresh.items():
                 cache["tiles"][key] = tile
             cache["turn"] = turn
             cache["visible"] = visible
+            # M4 fog audit: engine agreement over exactly the requested
+            # (derived-visible) coordinates — an `engvis: false` there is
+            # a derived-vs-engine disagreement, reported, never acted on.
+            engine_visible = sum(
+                1 for t in fresh.values() if t.get("engine_visible") is True)
+            engine_not = sum(
+                1 for t in fresh.values() if t.get("engine_visible") is False)
+            unavailable = len(fresh) - engine_visible - engine_not
+            disagree = [k for k, t in sorted(fresh.items())
+                        if t.get("engine_visible") is False]
+            cache["fog_audit"] = {
+                "requested": len(coords),
+                "engine_visible": engine_visible,
+                "engine_not_visible": engine_not,
+                "unavailable": unavailable,
+                "disagree_coords": disagree[:64],
+            }
             # city tagging: a Python-side join against the omniscient
             # cities read, applied ONLY on currently-visible tiles (a
             # visible tile legitimately shows the city standing on it)
@@ -673,15 +725,22 @@ class FireTunerAdapter:
                     entry = cache["tiles"][key]
                     if "owner" in entry:
                         entry["city"] = city_at[key]
-            # the returned doc: visible tiles with owner/city, remembered
-            # tiles terrain-only (ownership stripped on the way out — the
-            # cache keeps full rows but the doc never leaks fog ownership)
+            # the returned doc: visible tiles with owner/city plus their
+            # re-validated static+dynamic keys, remembered tiles
+            # static-only (ownership/dynamic keys stripped on the way out
+            # — the cache keeps full rows but the doc never leaks fog
+            # ownership)
             out: dict[str, dict[str, Any]] = {}
             for key, tile in cache["tiles"].items():
                 if key in visible:
-                    out[key] = {**tile, **terrain_fields(tile)}
+                    entry = {**static_tile_fields(tile),
+                             **visible_tile_fields(tile)}
+                    if "owner" in tile:
+                        entry["owner"] = tile["owner"]
+                        entry["city"] = tile["city"]
+                    out[key] = entry
                 else:
-                    out[key] = terrain_fields(tile)
+                    out[key] = static_tile_fields(tile)
             return {"turn": turn, "tiles": out}
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
             if req.research_building_briefing:
@@ -705,22 +764,38 @@ class FireTunerAdapter:
 
     def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
         """M17c: (observable, remembered) from the CACHED derived map read.
-        The engine's fog state is not exposed in this build's GameCore
-        Lua, so visibility is derived from the player's own entities
+        The engine's own fog answer is reachable since M4 (the
+        PlayersVisibility table route works on GameCore — Amendment 1.2)
+        but visibility stays DERIVED from the player's own entities
         (under-approximation by construction: own-entity sight, never the
         engine's full reveal). Before the first map observation of a
         player the sets are EMPTY — under-visibility, never
         over-visibility, the same fail-safe side as the retired M14d
         declaration. The projection therefore shows a foreign entity only
         while its tile is within current own-entity sight, and remembered
-        tiles keep their terrain (never fog ownership — the doc strips
-        it on the way out)."""
+        tiles keep their static keys (never fog ownership — the doc strips
+        it on the way out). Engine-vs-derived agreement is AUDITED, never
+        acted on: see fog_audit_for()."""
         vis = self._map_vis.get(player_id)
         if vis is None:
             return frozenset(), frozenset()
         visible = frozenset(vis["visible"])
         revealed = frozenset(vis["tiles"])
         return visible, revealed - visible
+
+    def fog_audit_for(self, player_id: int) -> dict[str, Any]:
+        """M4: the last VMAP|4 read's engine-visibility audit for a player
+        — how often the ENGINE's own PlayersVisibility answer agreed with
+        the adapter's derived visible set over exactly the requested
+        coordinates. Zeroed before the first map observation (fail-safe:
+        no claim either way). Audit-only: the projection never consults
+        it."""
+        vis = self._map_vis.get(player_id)
+        if vis is None or "fog_audit" not in vis:
+            return {"requested": 0, "engine_visible": 0,
+                    "engine_not_visible": 0, "unavailable": 0,
+                    "disagree_coords": []}
+        return vis["fog_audit"]
 
     # -- action -----------------------------------------------------------------
     async def act(self, cmd: ActionCommand) -> ActionResult:
