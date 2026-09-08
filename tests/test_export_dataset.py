@@ -475,7 +475,7 @@ def test_turn_with_replacement_decision_exports_per_decision_segments(tmp_path):
     assert "boundary_superseded_within_turn" in first["quality_flags"]
     assert first["request_costs"]["attempts"] == 1   # only lr2 joins
     assert first["request_costs"]["tokens_in"] == 7
-    superseded = by_seg["turn:1@d-start"]
+    superseded = by_seg["turn:1@d-start~1"]  # d-start's boundary seq = 1
     assert superseded["decision_id"] == "d-start"
     assert superseded["directive_id"] == "dir1"
     assert superseded["provider_requests"] == 1

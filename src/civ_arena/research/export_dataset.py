@@ -375,7 +375,14 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                     segment_flags.append("costs_partial")
                 if isinstance(expected, int) and len(rows) < expected:
                     segment_flags.append("costs_attempts_missing")
-            suffix = f"@{decision_id}" if (superseded and decision_id) else ""
+            # the superseded suffix carries the boundary's seq too — a
+            # replacement chain reusing one decision_id would otherwise
+            # mint duplicate segment_ids (downstream dicts key on it)
+            suffix = (f"@{decision_id}~{boundary['seq']}"
+                      if superseded and decision_id
+                      and isinstance(boundary.get("seq"), int)
+                      else f"@{decision_id}" if superseded and decision_id
+                      else "")
             samples.append({
                 "sample_class": "controlled_decision",
                 "schema_version": SCHEMA_CONTROLLED,
