@@ -97,6 +97,7 @@ class FakeMod:
         self._ambient_windows: dict[int, dict[str, object]] = {}
         self._spectate_polls = 0
         self._spectate_started = False
+        self._advance_pending = False  # deact_only_advance split state
         # engine effect that lands inside every ambient window:
         # (kind, entity_type, numeric_id, attr, before, after)
         self.auto_ambient = auto_ambient
@@ -149,8 +150,13 @@ class FakeMod:
             self._switch_local_player(human)
             if self.spectate.get("attach_turn_active", True):
                 self.turn_active = True
-                # attach-mid-turn: the hook fired before we attached
-                self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
+                # attach-mid-turn: the hook fired before we attached —
+                # UNLESS attach_seed_enter is False, which models a ring
+                # whose history predates the recorder (fresh injection or
+                # a wrap took the ENTER): nothing to keep
+                if self.spectate.get("attach_seed_enter", True):
+                    self._spectate_trace_append(
+                        f"{self.turn}|HOOK_ENTER|{human}")
             return
         if source not in advance_on:
             return
@@ -171,6 +177,18 @@ class FakeMod:
 
     def _spectate_advance(self) -> None:
         human = self.spectate["human_seat"]
+        # deact_only_advance: split the round boundary from the AI turns —
+        # the human DEACT lands alone and the ring PARKS on it (a window
+        # the live engine genuinely has: AI turns take seconds); the AI
+        # hooks + next ENTER arrive on the following advance. Exercises
+        # the END boundary-state corroboration both ways.
+        if self.spectate.get("deact_only_advance") \
+                and not self._advance_pending:
+            self._advance_pending = True
+            self.turn_active = False
+            self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
+            return
+        self._advance_pending = False
         self.turn_active = False
         self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
         for ai in self.spectate.get("ai_seats", []):
