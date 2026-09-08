@@ -315,7 +315,8 @@ def test_every_match_room_script_parses_under_node(tmp_path):
     if NODE is None:
         pytest.fail('node is required')
     scripts = sorted(ASSETS.glob('*.js'))
-    assert [script.name for script in scripts] == ['app.js', 'compare-core.js', 'compare.js']
+    assert [script.name for script in scripts] == ['app.js', 'compare-core.js', 'compare.js',
+                                                   'journal-core.js', 'journal.js']
     for script in scripts:
         proc = subprocess.run([NODE, '--check', str(script)], capture_output=True, text=True,
                               timeout=60)

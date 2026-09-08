@@ -138,9 +138,37 @@ Selecting an owned unit joins its stable qualified `unit_id` to the latest
 eligible graph's decision and execution rows. The inspector shows candidate
 coordinates, exclusion reasons, heuristic components, source selection weights,
 selected destination, and recorded submission/observed-displacement outcomes.
-A dashed line joins the audit's original origin and chosen destination; the unit
-marker remains at the packet's observed coordinate. This makes accepted input
-without observed movement visible without pretending the plan executed.
+The map itself carries the same row as an overlay (M3): a ring on the audit's
+origin hex, one inset outline on every candidate hex whose stroke width is
+`1 + 3 × recorded weight`, a hatched dim outline on excluded candidates, thin
+origin→candidate lines, and one solid edge from origin to the recorded chosen
+destination. The unit marker remains at the packet's observed coordinate, so an
+accepted input without observed movement stays visible without pretending the
+plan executed. Nothing is inferred: a candidate without a finite recorded weight
+draws the thinnest outline and reads `unscored`, a recorded `0.0` is a weight and
+not an unknown, a destination that fails coordinate parsing is dropped and
+counted in `data-dropped`, any selection without a destination draws the ring
+plus an `<action> (recorded)` label and no edge when the row recorded an action
+string (`fortify (recorded)`, `skip (recorded)`) and no label when it did not,
+and a null selection draws no edge and no label — its recorded candidates, if
+any, are still outlined. At most two hex labels are printed — the chosen hex and the strongest
+remaining unexcluded candidate — and a runner-up label that would overprint the
+chosen label is placed below its hex and prefixed with `↑` (never dropped), so it
+is never read as belonging to the hex it sits on; each label carries
+`data-side="above"`/`"below"`. Three views of one number, and they are not the
+same number: the card list keeps the **source value** as the packet recorded it
+(`1.5` stays `1.5`); `data-weight` and the polygon's `aria-label`/`<title>` carry
+the **normalised recorded weight** (clamped to 0–1, printed to three decimals in
+the text, `unscored` when none was recorded), excluded candidates included
+(`candidate 41,16 · excluded: observed_threat_proximity · recorded weight
+0.000`); and the map label carries the two-decimal `weightText` form. Printed hex
+labels never round toward certainty: a recorded weight just under 1 reads `>0.99` and one just
+above 0 reads `<0.01`, while an exactly recorded `0`/`1` prints as `0.00`/`1.00`;
+the chosen polygon also says `· chosen` in both `aria-label` and `<title>`.
+Labels are drawn in a `labels` layer painted after the actor layer, so a unit
+badge can never overpaint one. Destination-linked cards (every candidate card,
+and the head card when a destination was recorded) are focusable buttons; Enter
+or Space on a card or its polygon highlights the pair.
 The source field named `probability` is displayed as **selection weight**, never
 as calibrated success probability. The audit has its own turn/sequence, often
 older than the selected packet. This is recorded controller output, not private

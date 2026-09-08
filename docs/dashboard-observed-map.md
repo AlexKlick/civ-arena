@@ -131,6 +131,26 @@ context, not live research state, and the two seats' blocks can be as-of
 different turns. The block-level contract is in
 [observed-minimap-preview.md](observed-minimap-preview.md).
 
+## Decision overlay (M3)
+
+Selecting an owned unit now draws its recorded decision row on the map instead of
+one dashed origin→destination line: an origin ring, an inset outline per candidate
+hex whose thickness restates the recorded selection weight, a hatched dim outline
+for excluded candidates, and one solid edge for the recorded chosen move. The
+`#graph` cards are unchanged; destination-linked cards (every candidate card, and
+the head card when a destination was recorded) are focusable buttons, and Enter
+or Space on a card or its polygon highlights the pair. Real-run behaviour in
+`minimax100-20260907T183425Z` at turn 38: the bound audit is T33, so the ring can
+sit one hex away from the unit badge — that is the recorded origin, not a stale
+drawing. Both labels are always printed; the runner-up moves below its own hex
+and gains an `↑` prefix when the two would overprint (the T33 `u0:196608` row has
+two 0.4999999 candidates one hex apart, and reads `↑ weight 0.50` below its hex).
+The numbers are three different views: the card list keeps the source value, the
+`data-weight` attribute and the polygon's `aria-label`/`<title>` carry the
+normalised recorded weight (clamped to 0–1, three decimals in the text), and the
+map label carries the two-decimal `weightText` form. The mark contract lives in
+[observed-minimap-preview.md](observed-minimap-preview.md).
+
 ## Verified findings
 
 - Repository proof: **75 focused tests passed, zero failed/skipped**, in 1.22s;

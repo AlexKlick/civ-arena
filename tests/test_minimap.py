@@ -295,6 +295,14 @@ def test_research_context_refuses_malformed_fields(field, value):
         build([bind(p)], [], player=0)
 
 
+def test_rendered_page_hosts_the_decision_overlay_without_dynamic_html():
+    html = render(build([packet()], [], player=0))
+    assert 'decisionShapes' in html and 'decision-hatch' in html
+    assert 'not a success probability' in html and 'hatched outline' in html
+    assert 'dashed path' not in html
+    assert 'textContent' in html and 'innerHTML' not in html and 'fetch(' not in html
+
+
 def test_rendered_page_hosts_the_research_block_without_dynamic_html():
     p = packet()
     p['projected_state']['you']['researched'] = ['POTTERY']

@@ -42,6 +42,9 @@ if (data.dashboard_source) {
   const p = svg('pattern', {id: 'unknown-hatch', patternUnits: 'userSpaceOnUse', width: 6, height: 6, patternTransform: 'rotate(45)'}, d);
   svg('rect', {width: 6, height: 6, fill: palette.terrain.UNKNOWN.fill}, p);
   svg('line', {x1: 0, y1: 0, x2: 0, y2: 6, stroke: palette.terrain.UNKNOWN.hatch, 'stroke-width': 1.2}, p);
+  // Excluded candidates keep the tile visible through the hatch: no background rect.
+  const x = svg('pattern', {id: 'decision-hatch', patternUnits: 'userSpaceOnUse', width: 6, height: 6, patternTransform: 'rotate(45)'}, d);
+  svg('line', {class: 'decision-hatch-line', x1: 0, y1: 0, x2: 0, y2: 6}, x);
 }
 const terrainFill = key => key === 'UNKNOWN' ? 'url(#unknown-hatch)' : palette.terrain[key].fill;
 const classify = id => ownerClass(id, seatIds, roster.ids);
@@ -167,7 +170,10 @@ function draw() {
   $('world').replaceChildren(); $('mini-world').replaceChildren(); $('actors').replaceChildren();
   option($('actors'), '', 'Select an actor…');
   layers = {};
-  for (const name of ['tiles', 'tints', 'borders', 'elevation', 'paths', 'districts', 'actors']) {
+  // `labels` is painted after `actors` so an actor badge can never overpaint a
+  // decision label; it takes no pointer events, so it never hides a target.
+  for (const name of ['tiles', 'tints', 'borders', 'elevation', 'paths', 'districts', 'actors',
+                      'labels']) {
     layers[name] = svg('g', {class: `layer layer-${name}`}, $('world'));
   }
   const marks = {hills: {0: [], 1: []}, mountain: {0: [], 1: []}};
@@ -331,7 +337,13 @@ function renderLegend(union) {
   g = group('Provenance');
   item(g, s => tile(s, 'GRASS', null, true), 'Dim = older packet receipt for that seat (hexes, borders, tints) — receipt age, not visibility');
   item(g, null, 'Blank = unsupplied, not empty world. Extents are observed receipts, not map bounds.');
-  item(g, s => svg('line', {class: 'path', x1: -12, y1: 7, x2: 12, y2: -7}, s), 'dashed path = recorded choice, not movement or current orders');
+  const swatch = {points: ring(10), strokeWidth: 2.5};
+  item(g, s => candidatePolygon(s, swatch, T.seat0),
+    'outline = recorded candidate hex for the selected unit; thickness = recorded selection weight (seeded action choice, not a success probability)');
+  item(g, s => candidatePolygon(s, {...swatch, excluded: 'excluded candidate'}, T.seat0),
+    'hatched outline = excluded candidate (reason in tooltip)');
+  item(g, s => svg('line', {class: 'decision-edge', x1: -12, y1: 7, x2: 12, y2: -7, stroke: T.seat0}, s),
+    'solid edge = the recorded chosen move, not movement or current orders');
   if (union) item(g, null, 'Union view: each hex takes the newest receipt carrying an owner key; seats are asynchronous.');
 }
 function setView() {$('map').setAttribute('viewBox',view.join(' '));
@@ -351,7 +363,7 @@ function zoom(factor){
 }
 function selectTile(alternatives){
   $('actors').value='';$('graph').replaceChildren();
-  $('world').querySelectorAll('.path').forEach(e=>e.remove());
+  $('world').querySelectorAll('.path,.decision,.decision-labels').forEach(e=>e.remove());
   const t = alternatives[0].observation, cls = classifyTile(t, palette), own = resolve(alternatives);
   $('selection-title').textContent=`Hex ${t.coord}`;
   $('selection-summary').textContent='Source terrain and ownership at receipt. Actual fog visibility and current ownership are unknown.';
@@ -368,6 +380,62 @@ function selectTile(alternatives){
   alternatives.forEach(row=>text('pre',pretty(row),detail));
   $('graph-note').textContent='No legal-action or expansion valuation is inferred for this hex.';
 }
+// The polygons and the cards are two views of one recorded candidate row, so a
+// click or Enter on either highlights both. Matching is by destination coordinate.
+function focusCard(dest){
+  const cards=[...$('graph').querySelectorAll('.card')],polygons=[...$('world').querySelectorAll('.candidate')];
+  cards.concat(polygons).forEach(e=>e.classList.remove('focus'));
+  polygons.filter(e=>e.dataset.dest===dest).forEach(e=>e.classList.add('focus'));
+  const card=cards.find(e=>e.dataset.dest===dest);
+  if(card){card.classList.add('focus');card.scrollIntoView({block:'nearest'});}
+}
+function cardDest(card,dest){
+  card.dataset.dest=dest;card.setAttribute('tabindex',0);card.setAttribute('role','button');
+  card.addEventListener('click',()=>focusCard(dest));
+  card.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();focusCard(dest);}});
+}
+// One primitive for the map and for the key: the legend passes a synthetic candidate,
+// so a swatch cannot drift from the mark it explains.
+function candidatePolygon(parent,c,color){
+  return svg('polygon',{class:`candidate${c.excluded?' excluded':''}${c.chosen?' chosen':''}${c.unscored?' unscored':''}`,
+    points:c.points,'stroke-width':fmt(c.strokeWidth),stroke:c.excluded?null:color,
+    fill:c.excluded?'url(#decision-hatch)':null},parent);
+}
+// One recorded decision row → one overlay group on the map. Widths, hatch and the
+// single solid edge restate the audit; no ordering, path or outcome is implied.
+function drawDecision(d,pid,unitId){
+  const shapes=decisionShapes(d);
+  if(shapes.origin===null)return shapes;
+  const color=ownerColorFor(pid),o=shapes.origin;
+  const g=svg('g',{class:'decision','data-unit':unitId,'data-candidates':shapes.candidates.length,
+    'data-dropped':shapes.dropped},layers.paths);
+  shapes.candidates.forEach(c=>svg('line',{class:`decision-alt${c.excluded?' excluded':''}`,
+    x1:fmt(o.x),y1:fmt(o.y),x2:fmt(c.cx),y2:fmt(c.cy),stroke:color},g));
+  if(shapes.chosen)svg('line',{class:'decision-edge',x1:fmt(shapes.chosen.x1),y1:fmt(shapes.chosen.y1),
+    x2:fmt(shapes.chosen.x2),y2:fmt(shapes.chosen.y2),stroke:color},g);
+  svg('circle',{class:'origin-ring',cx:fmt(o.x),cy:fmt(o.y),r:HEX_R-1,stroke:color},g);
+  shapes.candidates.forEach(c=>{
+    // An excluded candidate still states the weight it was recorded with; exclusion is
+    // a separate recorded fact, not a missing weight.
+    const weight=c.unscored?'unscored':c.weight.toFixed(3);
+    const state=c.excluded?`excluded: ${c.excluded} · recorded weight ${weight}`
+      :`selection weight ${weight}`;
+    const label=`candidate ${c.coord} · ${state}${c.score!==null?` · score ${c.score}`:''}`+
+      (c.chosen?' · chosen':'');
+    const parts=c.components?Object.entries(c.components).map(([k,v])=>`${k} ${v}`):[];
+    const poly=candidatePolygon(g,c,color);
+    Object.entries({tabindex:0,role:'button','data-dest':c.coord,
+      'data-weight':c.unscored?'unscored':c.weight,'data-excluded':c.excluded||'',
+      'aria-label':label}).forEach(([k,v])=>poly.setAttribute(k,v));
+    svg('title',{},poly).textContent=parts.length?`${label} · ${parts.join(', ')}`:label;
+    poly.addEventListener('click',()=>focusCard(c.coord));
+    poly.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();focusCard(c.coord);}});
+  });
+  const tags=svg('g',{class:'decision-labels','data-unit':unitId},layers.labels);
+  shapes.labels.forEach(l=>{svg('text',{class:'decision-label','data-side':l.side,x:fmt(l.x),
+    y:fmt(l.y)},tags).textContent=l.text;});
+  return shapes;
+}
 function selectActor(i){
   selected=actors[i];$('actors').value=String(i);const a=selected,o=a.observation;
   $('selection-title').textContent=`${o.type || 'City'} · ${a.id}`;
@@ -378,7 +446,7 @@ function selectActor(i){
     (a.kind.startsWith('own') ? '' : Number.isInteger(o.owner_id) ? ` · ${ownerLabel(o.owner_id)}` : ' · owner not supplied in packet'),$('selection'));
   const detail=document.createElement('details');$('selection').append(detail);
   text('summary','Source observation & packet provenance',detail);text('pre',pretty(a),detail);
-  $('graph').replaceChildren();$('world').querySelectorAll('.path').forEach(e=>e.remove());
+  $('graph').replaceChildren();$('world').querySelectorAll('.path,.decision,.decision-labels').forEach(e=>e.remove());
   const s=snapshots.find(s=>s.receipt.player_id===a.receipt.player_id),g=s.graph;
   if(a.kind.includes('cities')){
     $('graph-note').textContent='Observed queue → production intent. Completion timing, expansion site quality, and feasibility are unknown.';
@@ -390,21 +458,22 @@ function selectActor(i){
       recorded_targets:g.value.directive?.unit_targets}),$('graph'));
     return;
   }
-  $('graph-note').textContent='Recorded selection weights are not success probabilities. Dashed lines show historical choices, not promised paths or current orders.';
-  if(!a.kind.startsWith('own')||!g){text('p','No owned-unit audit available at or before this packet.',$('graph'));return;}
+  if(!a.kind.startsWith('own')||!g){
+    $('graph-note').textContent='No recorded decision overlay: no owned-unit audit at or before this packet.';
+    text('p','No owned-unit audit available at or before this packet.',$('graph'));return;}
+  $('graph-note').textContent='Outline thickness = recorded selection weight (seeded action choice, not a success probability). Hatched = excluded. Solid edge = the recorded chosen move, not movement or current orders.';
   text('p',`Audit T${g.receipt.turn}, seq ${g.receipt.seq}; independent of packet position.`,$('graph'));
   const decisions=(g.value.decisions||[]).filter(d=>d.unit_id===a.id);
   if(!decisions.length)text('p','No decision row for this unit in the retained graph.',$('graph'));
   decisions.forEach(d=>{
-    text('div',`${d.origin} → ${d.selected?.args?.dest || 'no destination'} · ${d.reason}`,$('graph'),'card selected');
-    const start=point(d.origin),dest=d.selected?.args?.dest;
-    if(dest && /^-?\d+,-?\d+$/.test(dest)){
-      const end=point(dest);svg('path',{class:'path',d:`M${start.join(',')} L${end.join(',')}`},layers.paths);
-    }
+    const shapes=drawDecision(d,a.receipt.player_id,a.id);
+    const head=text('div',`${d.origin} → ${d.selected?.args?.dest || 'no destination'} · ${d.reason}`,$('graph'),'card selected');
+    if(shapes.chosen)cardDest(head,shapes.chosen.coord);
     (d.candidates||[]).forEach(c=>{
       const card=text('div',`${c.dest} · ${c.excluded || 'candidate'}`,$('graph'),`card ${c.excluded?'excluded':''}`);
       text('p',`Heuristic score ${c.score ?? 'not supplied'} · selection weight ${c.probability ?? 'not supplied'}`,card);
       if(c.components)text('p',pretty(c.components),card);
+      if(typeof c.dest==='string')cardDest(card,c.dest);
     });
   });
   const executions=(g.value.execution||[]).filter(e=>e.unit_id===a.id);
@@ -433,7 +502,7 @@ function showProductionJournal() {
 }
 function selectProduction(a) {
   $('actors').value='';$('graph').replaceChildren();$('selection').replaceChildren();
-  $('world').querySelectorAll('.path').forEach(e=>e.remove());
+  $('world').querySelectorAll('.path,.decision,.decision-labels').forEach(e=>e.remove());
   $('selection-title').textContent=`${a.item_id} · placement observed`;
   $('selection-summary').textContent=`Historical P${a.call.player_id} district placement at ${a.admission.coord}. Not proof of a completed or currently present district.`;
   productionCard(a,$('selection'));

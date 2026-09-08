@@ -8,6 +8,8 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
+  <script src="/journal-core.js" defer></script>
+  <script src="/journal.js" defer></script>
   <script src="/compare-core.js" defer></script>
   <script src="/compare.js" defer></script>
 </head>
@@ -65,10 +67,10 @@
       </section>
       <section class="workspace" aria-label="Turn activity">
         <div class="graph-panel panel">
-          <div class="panel-heading"><div><p class="eyebrow">TURN JOURNAL</p><h2>Action sequence <span id="graphTurn" class="subtle"></span></h2></div><span class="legend"><span aria-hidden="true">↓</span> Recorded order, not causality</span><div id="decisionStrip" class="decision-strip" aria-label="Recorded decisions for the selected turn"></div></div>
-          <div class="graph-tools"><div class="filters" role="group" aria-label="Filter recorded calls"><button type="button" data-filter="all" class="selected" aria-pressed="true">All calls</button><button type="button" data-filter="actions" aria-pressed="false">Actions</button><button type="button" data-filter="observations" aria-pressed="false">Observations</button></div><span id="callCount" class="subtle">0 calls</span></div>
+          <div class="panel-heading"><div><p class="eyebrow">TURN JOURNAL</p><h2>Action sequence <span id="graphTurn" class="subtle"></span></h2></div><span class="legend"><span aria-hidden="true">→</span> Recorded order, not causality</span><div id="decisionStrip" class="decision-strip" aria-label="Recorded decisions for the selected turn"></div></div>
+          <div class="graph-tools"><div class="filters" role="group" aria-label="Filter recorded calls"><button type="button" data-filter="all" class="selected" aria-pressed="true">All calls</button><button type="button" data-filter="actions" aria-pressed="false">Actions</button><button type="button" data-filter="observations" aria-pressed="false">Observations</button><button type="button" data-filter="notes" aria-pressed="false">Notes</button></div><span id="callCount" class="subtle">0 calls shown</span></div>
           <div id="graphScroll" class="graph-scroll"><svg id="actionGraph" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Recorded actions in each seat’s turn"></svg><div id="graphEmpty" class="graph-empty">Select a match to explore its turns.</div></div>
-          <div class="graph-foot"><span class="tiny-dot gold"></span> Seat 1 <span class="tiny-dot teal"></span> Seat 2 <span class="graph-hint">Select any call to inspect it</span></div>
+          <div class="graph-foot"><span class="tiny-dot gold"></span> Seat 1 <span class="tiny-dot teal"></span> Seat 2 <span class="glyph-key"><b>◉</b> observation <b>▶</b> action <b>✎</b> note</span><span class="glyph-key"><b>✓</b> accepted <b>✕</b> rejected <b>◌</b> pending</span><span class="graph-hint">Select any call to inspect it · Shift-click a pill to open a second turn</span></div>
         </div>
         <aside class="detail-panel panel" aria-label="Selected call details"><div class="panel-heading"><div><p class="eyebrow">CLOSER LOOK</p><h2 id="detailTitle">Select a call</h2></div><span id="detailStatus" class="badge" hidden></span></div><div id="detailBody" class="detail-body"><div class="detail-empty"><span aria-hidden="true">⌖</span><p>Every action leaves a record.</p><small>Choose a node to see what was requested and what the game returned.</small></div></div></aside>
       </section>

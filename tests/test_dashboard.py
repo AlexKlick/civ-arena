@@ -287,6 +287,13 @@ def test_the_comparison_core_module_reaches_neither_the_page_nor_the_network():
     assert 'window.civArenaCompareCore = Core' in code
 
 
+def test_the_journal_core_module_reaches_neither_the_page_nor_the_network():
+    code = (ASSETS / 'journal-core.js').read_text()
+    for forbidden in ('document', 'fetch(', 'XMLHttpRequest', 'window.civArena.'):
+        assert forbidden not in code, forbidden
+    assert 'window.civArenaJournalCore = Core' in code
+
+
 def test_static_scripts_only_reach_same_origin_api_paths():
     scripts = sorted(ASSETS.glob('*.js'))
     assert len(scripts) >= 3

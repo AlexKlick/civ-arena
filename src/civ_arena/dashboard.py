@@ -39,6 +39,7 @@ MAX_TECH_EDGES = 2048
 MAX_TECH_ROW = 8
 NOTE_TOOLS = frozenset({'write_diary', 'set_goal', 'record_prediction', 'record_lesson'})
 STATIC_FILES = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js',
+                '/journal-core.js': 'journal-core.js', '/journal.js': 'journal.js',
                 '/compare-core.js': 'compare-core.js', '/compare.js': 'compare.js',
                 '/style.css': 'style.css', '/styles.css': 'styles.css',
                 '/favicon.svg': 'favicon.svg'}

@@ -14,10 +14,13 @@ binds only to loopback and has no write or game-control endpoints.
 
 Select a match and engine turn, or leave Follow latest turn enabled. Each
 seat shows accepted planning notes, recorded request counts and action timing.
-The graph displays tool calls in recorded order, with separate action and
-observation filters. Click a node or use keyboard focus and Enter to inspect
-the arguments, result and rejection. Rejected planning calls remain visible in
-the graph but do not become accepted plan notes.
+The turn journal is a horizontal swimlane — one lane per seat, one column per
+engine turn, time running left to right. The selected turn is expanded into one
+node per recorded call in recorded order; the turns around it stay as pills that
+summarise the seat turn. All, Actions, Observations and Notes filter what the
+lanes and the pills count. Click a node or use keyboard focus and Enter to
+inspect the arguments, result and rejection. Rejected planning calls remain
+visible in the journal but do not become accepted plan notes.
 
 Graph arrows describe sequence, not causal dependencies. Notes are what the
 model chose to report, and confidence is model-reported. Forecast branches
@@ -148,6 +151,62 @@ runs it.
 Colours carry seats only: seat 0 gold, seat 1 teal, in both the tree halves and
 the chart lines; labels stay on text colours so no reading depends on hue.
 Charts draw no animation and honour `prefers-reduced-motion`.
+
+## Turn journal (M3)
+
+The journal replaced the vertical two-column graph. It is one horizontal
+swimlane per seat over a window of thirteen recorded turns centred on the
+selected one, with time running left to right and one column per engine turn.
+The selected turn's column is expanded — every recorded call is a node, in
+recorded order, with an arrow to the next node in the same lane. Every other
+turn in the window is a pill carrying that seat turn's recorded call count, the
+per-kind glyph counts and, when there are any, the rejection count; its tooltip
+prints accepted, rejected and pending totals. A seat that recorded no turn at
+that number says "no seat turn recorded" rather than showing an empty lane, and
+a lane whose calls the filter removed says "No matching calls recorded" — an
+absence of records and an absence of matches are different statements.
+
+Arrows join consecutive nodes in one lane. They are recorded order and nothing
+else: not causality, not a dependency, not a plan. The head keeps the line
+"→ Recorded order, not causality" for that reason.
+
+Clicking a pill selects that turn for the whole page; Shift-clicking one opens
+it beside the selected turn without changing the selection, and clicking the
+turn label of an opened column closes it again. The jump pills in the header
+("‹ N earlier turns" / "N later turns ›") move the window by six turns without
+changing the selected turn, so the recorded turns outside the window are stated
+rather than hidden, and the strip starts at the first column of the window they
+open. A poll that records a new turn moves the window's edge, never the reader's
+place in it. A turn the reader opened keeps the records behind its calls
+even after the window has moved past it, and CLOSER LOOK keeps showing the
+selected call; while the window sits away from the selected turn the journal
+prints no empty state, because the pills on screen are recorded turns. Choosing
+a different turn starts the journal over — including when Follow latest turn
+moves the selection without anybody clicking, and re-checking Follow latest turn
+starts it over even when the selection is already the latest turn, so the window
+comes back to it. Arrow keys walk a lane by recorded
+position, Up and Down cross between the lanes and the header, and Enter or Space
+activates whatever is focused — the same reach as the pointer.
+
+Consecutive calls with the same tool *and* the same status fold into one dashed
+run node labelled `×n`; two are enough, and a rejection never folds into an
+acceptance. Folding hides no record: the foot prints "N calls shown · M folded
+into runs", the run's tooltip lists the recorded sequence numbers, and clicking
+the run opens it into its individual calls. When the reader is inside a run,
+CLOSER LOOK says which call of how many it is.
+
+Kind is carried by a hue *and* a glyph (◉ observation, ▶ action, ✎ note) and
+status by a glyph *and* a colour (✓ accepted, ✕ rejected, ◌ pending), both keyed
+in the journal foot, so nothing here has to be read by hue. The lane gutter with
+the seat labels stays pinned while the strip scrolls under it.
+
+The pure half of the journal — filtering, run folding, the pill summary, the
+turn window and the whole strip geometry — lives in
+`dashboard_static/journal-core.js` and is served at `/journal-core.js`. It
+touches no page and makes no request, so `tests/test_journal_core.py` evaluates
+it under Node exactly as the browser runs it, and the same test parses the five
+match-room scripts as one concatenation because the browser loads them into a
+single global scope.
 
 ## Stop and preserve
 

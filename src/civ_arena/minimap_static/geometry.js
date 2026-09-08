@@ -1,6 +1,6 @@
 'use strict';
 // Pure hex geometry, terrain classification and ownership resolution for the
-// observed atlas. No DOM access: pytest evaluates this file under Node to pin
+// observed atlas. No DOM access: pytest runs this file under Node to pin
 // the neighbour table, border rules and classification contracts. It is
 // concatenated in front of app.js into the single CSP-hash-pinned script.
 const HEX_R = 14;
@@ -147,4 +147,92 @@ function segmentPath(segments) {
 }
 function hexOutlinePath(coords, radius = HEX_R) {
   return coords.map(c => 'M' + hexVertices(...point(c), radius).map(p => p.map(fmt).join(' ')).join(' L') + ' Z').join(' ');
+}
+// Recorded decision overlay. One audited decision row becomes hex outlines on the
+// map: outline width states the recorded selection weight (a seeded action choice,
+// never a success probability), hatch states exclusion, the solid edge states the
+// recorded chosen move. Nothing is inferred: a candidate without a finite recorded
+// weight stays "unscored" at the thinnest outline, a destination that fails
+// parseCoord is dropped and counted, and a selection without a destination draws
+// no edge.
+const DECISION_INSET = 2.5;
+// Centre distance below which two 8px labels on one row overprint each other.
+const DECISION_LABEL_GAP = 70;
+function weightOf(candidate) {
+  const p = candidate !== null && typeof candidate === 'object' ? candidate.probability : null;
+  return typeof p === 'number' && Number.isFinite(p) ? Math.min(1, Math.max(0, p)) : null;
+}
+function candidateStroke(weight) {
+  return 1 + 3 * (typeof weight === 'number' && Number.isFinite(weight) ? weight : 0);
+}
+// Printed weights must never round toward certainty: a weight just under 1 reads
+// ">0.99", never "1.00", and a weight just above 0 reads "<0.01", never "0.00".
+// Exact 0 and exact 1 are recorded values and print as themselves. The 3-decimal
+// value stays in data-weight, the aria-label and the tooltip.
+function weightText(weight) {
+  if (typeof weight !== 'number' || !Number.isFinite(weight)) return 'unscored';
+  if (weight > 0 && weight < 0.005) return '<0.01';
+  if (weight > 0.995 && weight < 1) return '>0.99';
+  return weight.toFixed(2);
+}
+// A label printed under its hex would otherwise read as belonging to the hex it sits
+// on, so a below-side label states its direction: "↑ " means the hex above this text.
+function decisionLabel(coord, label, side = 'above') {
+  const [x, y] = point(coord);
+  return {coord, x, y: side === 'below' ? y + HEX_R + 9 : y - HEX_R - 3,
+          text: side === 'below' ? `↑ ${label}` : label, side};
+}
+function decisionShapes(decision) {
+  const d = decision !== null && typeof decision === 'object' ? decision : {};
+  const selected = d.selected !== null && typeof d.selected === 'object' ? d.selected : null;
+  const action = selected !== null && typeof selected.action === 'string' ? selected.action : null;
+  const reason = typeof d.reason === 'string' ? d.reason : null;
+  const rows = Array.isArray(d.candidates) ? d.candidates : [];
+  if (parseCoord(d.origin) === null) {
+    return {origin: null, action, reason, chosen: null, candidates: [], labels: [],
+            dropped: rows.length};
+  }
+  const [ox, oy] = point(d.origin);
+  const args = selected !== null && selected.args !== null && typeof selected.args === 'object'
+    ? selected.args : {};
+  const dest = parseCoord(args.dest) === null ? null : args.dest;
+  const candidates = [];
+  let dropped = 0;
+  for (const row of rows) {
+    const c = row !== null && typeof row === 'object' ? row : {};
+    if (parseCoord(c.dest) === null) { dropped++; continue; }
+    const weight = weightOf(c), [cx, cy] = point(c.dest);
+    candidates.push({coord: c.dest, points: hexPoints(c.dest, HEX_R - DECISION_INSET), cx, cy,
+      weight, unscored: weight === null,
+      excluded: typeof c.excluded === 'string' && c.excluded !== '' ? c.excluded : null,
+      score: typeof c.score === 'number' && Number.isFinite(c.score) ? c.score : null,
+      components: c.components !== null && typeof c.components === 'object' &&
+        !Array.isArray(c.components) ? c.components : null,
+      chosen: c.dest === dest, strokeWidth: candidateStroke(weight)});
+  }
+  const labels = [];
+  if (dest !== null) {
+    const picked = candidates.find(c => c.coord === dest);
+    const w = picked === undefined ? null : picked.weight;
+    labels.push(decisionLabel(dest, `chosen · ${w === null ? 'unscored' : `weight ${weightText(w)}`}`));
+    // At most one runner-up label: the strongest recorded weight that was neither
+    // chosen nor excluded. Unscored candidates cannot win a weight label.
+    const rest = candidates.filter(c => !c.chosen && c.excluded === null && c.weight !== null)
+      .sort((a, b) => b.weight - a.weight || (a.coord < b.coord ? -1 : a.coord > b.coord ? 1 : 0));
+    if (rest.length) {
+      const second = decisionLabel(rest[0].coord, `weight ${weightText(rest[0].weight)}`);
+      // Two neighbouring candidates share a label row, and one label is wider than a
+      // hex: printing both above their hexes overprints them into nonsense. The
+      // runner-up label then moves below its own hex; it is never dropped.
+      const overprints = Math.abs(second.y - labels[0].y) <= 10 &&
+        Math.abs(second.x - labels[0].x) < DECISION_LABEL_GAP;
+      labels.push(overprints ? decisionLabel(second.coord, second.text, 'below') : second);
+    }
+  } else if (action !== null) {
+    labels.push(decisionLabel(d.origin, `${action} (recorded)`));
+  }
+  return {origin: {coord: d.origin, x: ox, y: oy}, action, reason,
+          chosen: dest === null ? null
+            : {coord: dest, x1: ox, y1: oy, x2: point(dest)[0], y2: point(dest)[1]},
+          candidates, labels, dropped};
 }

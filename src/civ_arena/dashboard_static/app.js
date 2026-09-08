@@ -4,8 +4,9 @@
   const $ = id => document.getElementById(id);
   const svgNS = 'http://www.w3.org/2000/svg';
   const state = {runId: '', runPinned: false, turn: null, follow: true, filter: 'all',
-    data: null, selectedCall: null, busy: false, timer: null, lastGraph: '', lastCards: '',
-    callsByKey: new Map(), lastStrategy: ''};
+    data: null, selectedCall: null, busy: false, timer: null, lastCards: '',
+    callsByKey: new Map(), lastStrategy: '', expandedTurns: new Set(), expandedRuns: new Set(),
+    journalCenter: null, runHint: null};
   const observation = tool => /^(get_|observe|read_|list_|query_|inspect_)/.test(tool || '');
   const noteTool = tool => /(diary|journal|goal|prediction|lesson|note|recall|strategy)/.test(tool || '');
   const kindOf = tool => observation(tool) ? 'Observation' : noteTool(tool) ? 'Note' : 'Action';
@@ -61,18 +62,28 @@
   function announceTurn() {
     document.dispatchEvent(new CustomEvent('civarena:turn', {detail: {turn: state.turn, runId: state.runId}}));
   }
+  // A new selected turn starts the journal over: nothing opened, centred or
+  // hinted for the turn the reader just left may survive into the next one.
+  // Every path that changes the selected turn goes through here, including the
+  // one where follow-latest moves it without anybody clicking.
+  function resetJournal() {
+    state.expandedTurns = new Set(); state.expandedRuns = new Set();
+    state.journalCenter = null; state.runHint = null;
+  }
   function selectTurn(turn) {
     state.turn = turn == null || turn === '' ? null : String(turn);
     state.follow = false;
     $('followLive').checked = false;
     $('turnSelect').value = state.turn == null ? '' : state.turn;
     state.selectedCall = null;
+    resetJournal();
     renderCards(); renderGraph(); renderStrategy(); renderMap();
     $('graphTurn').textContent = state.turn == null ? '' : ` / ${state.turn}`;
     runRenderers(); announceTurn();
   }
   window.civArena = {state, renderers: [], helpers: {element, append, svg, badge, humanize, count,
-    duration, text, isAccepted, timestamp, localTime, finite, agentList, selectTurn}};
+    duration, text, isAccepted, timestamp, localTime, finite, agentList, selectTurn, kindOf,
+    callKey, markSelection, renderDetail, secondsBetween, selectedTurns}};
   function callKey(turn, call) { return `${turn.turn}:${turn.player_id}:${call.seq}`; }
   function selectedTurns() {
     return (state.data?.turns || []).filter(turn => String(turn.turn) === String(state.turn));
@@ -108,7 +119,12 @@
   }
   function renderTurnSelect() {
     const values = [...new Set((state.data?.turns || []).map(turn => turn.turn))].sort((a, b) => Number(a) - Number(b));
+    const previous = state.turn;
     if (state.follow || !values.some(value => String(value) === String(state.turn))) state.turn = values.at(-1) ?? null;
+    // Follow-latest moves the selected turn without going through selectTurn(),
+    // so the journal has to be reset here too or it stays centred and expanded
+    // on a turn nobody is looking at any more.
+    if (String(state.turn) !== String(previous)) resetJournal();
     const select = $('turnSelect');
     select.replaceChildren(...(values.length ? values.map(value => {
       const option = element('option', '', `Turn ${value}`); option.value = String(value); return option;
@@ -162,61 +178,12 @@
     $('seatCards').replaceChildren(...cards);
   }
   function renderGraph() {
-    const turns = selectedTurns(), agents = agentList();
-    const signature = JSON.stringify([state.runId, turns, state.filter]);
+    // The selected turn's calls are always addressable; the journal adds the
+    // calls of any further turn it opens before it draws.
     state.callsByKey = new Map();
-    turns.forEach(turn => (turn.calls || []).forEach(call => state.callsByKey.set(callKey(turn, call), {turn, call})));
-    if (signature === state.lastGraph) { renderDetail(); return; }
-    state.lastGraph = signature;
-    const lanes = agents.map(agent => {
-      const turn = seatTurn(agent);
-      const calls = (turn?.calls || []).filter(call => state.filter === 'all' ||
-        (state.filter === 'observations' ? kindOf(call.tool) === 'Observation' : kindOf(call.tool) === 'Action'));
-      return {agent, turn, calls};
-    });
-    const graph = $('actionGraph');
-    const maximum = Math.max(...lanes.map(lane => lane.calls.length), 0);
-    const height = maximum ? maximum * 75 + 59 : 300;
-    graph.setAttribute('viewBox', `0 0 720 ${height}`);
-    graph.replaceChildren();
-    const defs = svg('defs');
-    ['gold', 'teal'].forEach((name, index) => {
-      const marker = svg('marker', {id: `arrow-${name}`, viewBox: '0 0 10 10', refX: 5, refY: 5,
-        markerWidth: 5, markerHeight: 5, orient: 'auto-start-reverse'});
-      append(marker, svg('path', {d: 'M 0 0 L 10 5 L 0 10 z', fill: index === 0 ? '#806e4d' : '#3b746b'}));
-      append(defs, marker);
-    });
-    append(graph, defs);
-    lanes.forEach(({turn, calls}, seat) => {
-      const x = seat === 0 ? 29 : 389, color = seat === 0 ? '#e5bd73' : '#65cbb8';
-      append(graph, svg('text', {x: x + 5, y: 27, fill: color, class: 'lane-label'}, `SEAT ${seat + 1}`));
-      if (!calls.length && maximum) append(graph, svg('text', {x: x + 5, y: 70, fill: '#8292a8', 'font-size': 11}, 'No matching calls recorded'));
-      calls.forEach((call, index) => {
-        const y = 44 + index * 75, key = callKey(turn, call);
-        if (index > 0) append(graph, svg('path', {d: `M ${x + 149} ${y - 22} L ${x + 149} ${y - 7}`,
-          stroke: seat === 0 ? '#806e4d' : '#3b746b', 'stroke-width': 1.2, 'marker-end': `url(#arrow-${seat === 0 ? 'gold' : 'teal'})`}));
-        const group = svg('g', {class: `graph-node seat-${seat === 0 ? 'gold' : 'teal'}${state.selectedCall === key ? ' selected' : ''}`, role: 'button', tabindex: 0,
-          'aria-label': `Seat ${seat + 1}, ${humanize(call.tool)}, ${call.status || 'pending'}, recorded call ${call.seq}`,
-          'data-key': key});
-        append(group, svg('title', {}, `${call.tool} · ${call.status || 'pending'} · ${localTime(call.ts)}`),
-          svg('rect', {x, y, width: 301, height: 54, rx: 8, class: 'node-bg'}),
-          svg('text', {x: x + 13, y: y + 24, class: 'node-index'}, String(index + 1).padStart(2, '0')),
-          svg('text', {x: x + 42, y: y + 22, class: 'node-label'}, humanize(call.tool).slice(0, 32)),
-          svg('text', {x: x + 42, y: y + 39, class: 'node-meta'}, `${kindOf(call.tool)} · ${humanize(call.status || 'pending')}`),
-          svg('circle', {cx: x + 285, cy: y + 25, r: 3,
-            fill: isAccepted(call.status) ? color : ['rejected', 'failed', 'error'].includes(call.status) ? '#f08f91' : '#64768e'}));
-        const activate = () => { state.selectedCall = key; markSelection(); renderDetail(); };
-        group.addEventListener('click', activate);
-        group.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); } });
-        append(graph, group);
-      });
-    });
-    const shown = lanes.reduce((total, lane) => total + lane.calls.length, 0);
-    $('callCount').textContent = `${shown} ${shown === 1 ? 'call' : 'calls'}`;
-    $('graphEmpty').hidden = shown > 0;
-    $('graphEmpty').textContent = !state.data ? 'Select a match to explore its turns.' :
-      state.turn == null ? 'No seat turns recorded yet.' : 'No matching calls recorded for this turn.';
-    renderDetail();
+    selectedTurns().forEach(turn => (turn.calls || []).forEach(call =>
+      state.callsByKey.set(callKey(turn, call), {turn, call})));
+    if (window.civArenaJournal) window.civArenaJournal.render(); else renderDetail();
   }
   function markSelection() {
     document.querySelectorAll('.graph-node').forEach(node => node.classList.toggle('selected', node.getAttribute('data-key') === state.selectedCall));
@@ -242,6 +209,11 @@
       ['Requested at', localTime(call.ts)], ['Response time', duration(secondsBetween(call.ts, call.ended_at))]].forEach(([label, value]) =>
       append(meta, append(element('div'), element('dt', '', label), element('dd', '', value))));
     body.replaceChildren(meta);
+    // A folded run keeps every call it swallowed; say where in the run this one sits.
+    if (state.runHint && state.runHint.key === state.selectedCall) {
+      append(body, element('p', 'subtle run-hint', `Call ${state.runHint.position} of ` +
+        `${state.runHint.size} in a consecutive run of ${humanize(state.runHint.tool)}`));
+    }
     [['Arguments', call.args], ['Result', call.result]].forEach(([label, value]) =>
       append(body, append(element('section', 'detail-section'), element('h3', '', label),
         element('pre', '', value == null ? label === 'Result' ? 'No result recorded yet.' : 'No arguments recorded.' : text(value)))));
@@ -382,13 +354,21 @@
   }
   $('runSelect').addEventListener('change', event => {
     state.runId = event.target.value; state.runPinned = true; state.turn = null;
-    state.selectedCall = null; state.data = null; state.lastCards = ''; state.lastGraph = '';
+    state.selectedCall = null; state.data = null; state.lastCards = '';
+    resetJournal();
     render(); refresh();
   });
   $('turnSelect').addEventListener('change', event => selectTurn(event.target.value));
   $('mapPerspective').addEventListener('change', () => renderMap());
   $('refreshMap').addEventListener('click', () => renderMap(true));
-  $('followLive').addEventListener('change', event => { state.follow = event.target.checked; render(); });
+  $('followLive').addEventListener('change', event => {
+    state.follow = event.target.checked;
+    // Turning follow-latest back on is a fresh start even when the selected turn
+    // is already the latest one: renderTurnSelect() then sees no change to reset
+    // on, and the journal would stay centred and expanded where the reader left it.
+    if (state.follow) resetJournal();
+    render();
+  });
   document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => {
     state.filter = button.dataset.filter;
     document.querySelectorAll('[data-filter]').forEach(item => {
