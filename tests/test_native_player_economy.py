@@ -67,8 +67,11 @@ def test_parse_overview_accepts_era_name_string_from_live_probe():
     # OVROW so the era branch is reached, not the field-count
     # check; and the strict ERA_ prefix rejects arbitrary
     # identifiers like 'x' and reserved words like 'nan').
-    for bad in ("1.5", "+7", "nan", "x"):
-        with pytest.raises(ValueError):
+    # Codex r5 finding 1: ERA_-prefixed but unknown era names must
+    # also raise (the closed civ6 catalog is the authority).
+    for bad in ("1.5", "+7", "nan", "x", "ERA_ANCIENT_BAD",
+                "era_ancient", ""):
+        with pytest.raises(ValueError, match="non-canonical era"):
             response_parser.parse_overview([
                 'OVX|2', 'TURN|1',
                 f'OVROW|0|C|F|0|0|0|0|0|0|{bad}|-|7|60', '---END---'])

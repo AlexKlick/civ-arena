@@ -283,6 +283,13 @@ def parse_cities(lines: list[str], *, qualified: bool = False) -> list[dict[str,
     return sorted(out, key=lambda c: entity_ids.sort_key(c["city_id"]))
 
 
+_KNOWN_ERA_TYPES = frozenset({
+    "ERA_ANCIENT", "ERA_CLASSICAL", "ERA_MEDIEVAL", "ERA_RENAISSANCE",
+    "ERA_INDUSTRIAL", "ERA_MODERN", "ERA_ATOMIC", "ERA_INFORMATION",
+    "ERA_FUTURE",
+})
+
+
 def _era_name(value) -> str:
     """Amendment 3 item 2: the world doc carries era as a NAME STRING,
     never an int. The wire may carry either:
@@ -293,8 +300,17 @@ def _era_name(value) -> str:
     well-formed era token, regardless of transport. The fallback for
     a string that doesn't resolve is the empty string; for an out-of-
     range int, the stringified int (the previous rehearsal-only
-    fallback)."""
+    fallback).
+
+    Codex r5 finding 1: era-name strings are validated against the
+    closed civ6 catalog — the ERA_ prefix alone permits arbitrary
+    identifiers like ERA_ANCIENT_BAD. The catalog is the authoritative
+    source for which era names the engine emits; anything else is a
+    malformed wire token.
+    """
     if isinstance(value, str):
+        if value not in _KNOWN_ERA_TYPES:
+            raise ValueError(f"non-canonical era name: {value!r}")
         return value
     if type(value) is int:
         return str(value)
