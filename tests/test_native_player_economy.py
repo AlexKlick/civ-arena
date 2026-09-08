@@ -34,20 +34,6 @@ def test_ovx2_parse_yields_and_civic_progress_split():
     assert spain["science"] == 6 and spain["culture"] == 5
     assert spain["faith"] == 4 and spain["gold_per_turn"] == 2
     assert spain["upkeep"] == 3 and spain["era"] == "0"
-
-
-def test_parse_overview_accepts_era_name_string_from_live_probe():
-    """Codex r2 finding 2: the Lua emits era NAMES (e.g. ERA_ANCIENT) on
-    the live probe path; the parser must accept both forms."""
-    from civ_arena.game.civ6 import response_parser
-    lines = [
-        'OVX|2', 'TURN|1',
-        'OVROW|0|CIV_FAKE|100|TECH_FAKE|10|8|5|2|1|ERA_ANCIENT|CIVIC_FAKE|7|60',
-        'OVRESEARCHED|0',
-        'OVCIVICS|0|CIVIC_FAKE', 'OVERA|ERA_ANCIENT', '---END---']
-    doc = response_parser.parse_overview(lines)
-    assert doc["players"]["0"]["era"] == "ERA_ANCIENT"
-    assert doc["game_era"] == "ERA_ANCIENT"
     assert spain["researched"] == ["MINING", "POTTERY"]
     assert spain["civics"] == ["CIVIC_CODE_OF_LAWS"]
     for unread in ("progressing_civic", "civic_progress", "civic_cost"):
@@ -64,6 +50,29 @@ def test_parse_overview_accepts_era_name_string_from_live_probe():
     assert "game_era" not in legacy
 
 
+def test_parse_overview_accepts_era_name_string_from_live_probe():
+    """Codex r2 finding 2: the Lua emits era NAMES (e.g. ERA_ANCIENT) on
+    the live probe path; the parser must accept both forms (canonical
+    int and identifier string) — and REJECT malformed tokens."""
+    lines = [
+        'OVX|2', 'TURN|1',
+        'OVROW|0|CIV_FAKE|100|TECH_FAKE|10|8|5|2|1|ERA_ANCIENT|CIVIC_FAKE|7|60',
+        'OVRESEARCHED|0',
+        'OVCIVICS|0|CIVIC_FAKE', 'OVERA|ERA_ANCIENT', '---END---']
+    doc = response_parser.parse_overview(lines)
+    assert doc["players"]["0"]["era"] == "ERA_ANCIENT"
+    assert doc["game_era"] == "ERA_ANCIENT"
+    # malformed tokens must still raise (Codex r3 finding 3)
+    with pytest.raises(ValueError):
+        response_parser.parse_overview([
+            'OVX|2', 'TURN|1',
+            'OVROW|0|C|F|0|0|0|0|0|0|1.5|-|-', '---END---'])
+    with pytest.raises(ValueError):
+        response_parser.parse_overview([
+            'OVX|2', 'TURN|1',
+            'OVROW|0|C|F|0|0|0|0|0|0|+7|-|-', '---END---'])
+
+
 def test_ovx2_ordering_and_strictness():
     # OVCIVICS must FOLLOW its OVROW
     with pytest.raises(ValueError, match="before its OVROW"):
@@ -74,7 +83,7 @@ def test_ovx2_ordering_and_strictness():
         response_parser.parse_overview([
             "OVX|2", "TURN|7", "OVRESEARCHED|9|MINING", "---END---"])
     for bad in ("OVROW|0|CIV|100|-|6.5|1|1|1|1|0|?|?|?",
-                "OVROW|0|CIV|100|-|6|1|1|1|1|x|?|?|?",
+                "OVROW|0|CIV|100|-|6|1|1|1|1|+7|?|?|?",
                 "OVERA|ERA|x"):
         with pytest.raises(ValueError):
             response_parser.parse_overview(["OVX|2", "TURN|7", bad, "---END---"])

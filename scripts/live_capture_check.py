@@ -121,13 +121,16 @@ async def main(host: str, port: int) -> None:
                 missing = sum(1 for t in tiles if key not in t)
                 print(f"    {key}: unread(absent) on {missing}/{len(tiles)}")
         # the three SPECW reads (palette is InGame-only)
-        roster, ms = await timed(
+        # Codex r3 finding 1: parse_roster returns (rows,
+        # truncated_count) since the ROSTER_TRUNCATED carry-through
+        # — unpack the tuple.
+        (roster, roster_truncated), ms = await timed(
             "SPECW roster (read)", lambda: conn.execute_read(
                 world_capture.roster_read(), timeout=25.0),
             world_capture.parse_roster)
         total += ms
-        print(f"  roster: {len(roster)} rows; kinds="
-              f"{sorted({r['kind'] for r in roster})}; levels="
+        print(f"  roster: {len(roster)} rows; truncated={roster_truncated}; "
+              f"kinds={sorted({r['kind'] for r in roster})}; levels="
               f"{sorted({r.get('level', '<absent>') for r in roster})}")
         tiles_doc, ms = await timed(
             "SPECW tiles (read)", lambda: conn.execute_read(

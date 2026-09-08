@@ -527,20 +527,36 @@ def test_roster_truncated_count_carries_into_doc():
 def test_tile_framing_rejects_truncated_before_grid_and_ownedrow_after_truncated():
     """Codex r2 finding 6: framing order is GRID -> OWNEDROW* ->
     optional TILES_TRUNCATED -> TILES_END. TILES_TRUNCATED before
-    GRID, and OWNEDROW after TILES_TRUNCATED, raise."""
+    GRID, and OWNEDROW after TILES_TRUNCATED, raise. Codex r3
+    finding 5: the fixture rows must be otherwise valid (river=true
+    or false, not '-') so the ordering check is the isolated defect."""
     with pytest.raises(ValueError, match="TILES_TRUNCATED before GRID"):
         wc.parse_owned_tiles(["SPECW|1|tiles",
                               "TILES_TRUNCATED|1",
                               "GRID|1|1|1",
-                              "OWNEDROW|0|0|0|T|-|-|-|-|-|0",
+                              "OWNEDROW|0|0|0|T|?|?|?|?|?|-1",
                               "TILES_END|1", "---END---"])
     with pytest.raises(ValueError, match="OWNEDROW after TILES_TRUNCATED"):
         wc.parse_owned_tiles(["SPECW|1|tiles",
                               "GRID|1|1|1",
-                              "OWNEDROW|0|0|0|T|-|-|-|-|-|0",
+                              "OWNEDROW|0|0|0|T|?|?|?|?|?|-1",
                               "TILES_TRUNCATED|1",
-                              "OWNEDROW|0|1|0|T|-|-|-|-|-|0",
+                              "OWNEDROW|0|1|0|T|?|?|?|?|?|-1",
                               "TILES_END|2", "---END---"])
+
+
+def test_tile_framing_accepts_empty_ownedrow_sequence():
+    """Codex r3 finding 6: the contract specifies OWNEDROW* (zero or
+    more), so GRID -> TILES_TRUNCATED|0 -> TILES_END|0 is valid and
+    must NOT raise on the TILES_TRUNCATED-before-OWNEDROW ordering
+    check (which the r2 fix removed)."""
+    doc = wc.parse_owned_tiles(["SPECW|1|tiles",
+                                "GRID|1|1|1",
+                                "TILES_TRUNCATED|0",
+                                "TILES_END|0", "---END---"])
+    assert doc["rows"] == []
+    assert doc["truncated"] == 0
+    assert doc["grid"] == {"w": 1, "h": 1}
 
 
 def test_world_doc_omits_null_researching_and_null_civics():

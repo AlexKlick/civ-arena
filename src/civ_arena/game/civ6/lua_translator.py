@@ -308,9 +308,10 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
         -- resolved unit) actually reaches the wire instead of "?" —
         -- the previous rewrite was a no-op for nonzero hashes.
         local bq_h = nil
+        local bq = nil  -- retained for the prodturns read below; nil on minors
         if major == "true" then
             -- majors: no swallow. Original fail-loud contract.
-            local bq = city:GetBuildQueue()
+            bq = city:GetBuildQueue()
             if bq == nil or bq.GetCurrentProductionTypeHash == nil then
                 error("city production queue unavailable")
             end
@@ -322,11 +323,16 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
         else
             -- minors: every accessor below is pcall-wrapped. A nil
             -- accessor or a non-numeric hash leaves queue = "?".
+            -- Codex r3 finding 2: retain `bq` so the prodturns read
+            -- below can call GetTurnsLeft on it (the production hash
+            -- is cached in `bq_h` so the second GetCurrentProduction
+            -- call is avoided).
             pcall(function()
                 local q = city:GetBuildQueue()
                 if q ~= nil and q.GetCurrentProductionTypeHash ~= nil then
                     local h = q:GetCurrentProductionTypeHash()
                     if type(h) == "number" then
+                        bq = q
                         bq_h = h
                     end
                 end
@@ -405,11 +411,11 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
         end)
         local prodturns = "?"
         pcall(function()
-            if bq ~= nil and bq.GetTurnsLeft ~= nil then
-                local h = bq:GetCurrentProductionTypeHash()
-                if type(h) == "number" and h ~= 0 then
-                    prodturns = tostring(math.floor(bq:GetTurnsLeft(h)))
-                end
+            -- Codex r3 finding 2: reuse the cached `bq_h` rather than
+            -- calling GetCurrentProductionTypeHash a second time.
+            if bq ~= nil and bq.GetTurnsLeft ~= nil and bq_h ~= nil
+                    and bq_h ~= 0 then
+                prodturns = tostring(math.floor(bq:GetTurnsLeft(bq_h)))
             end
         end)
         local buildings = "?"
