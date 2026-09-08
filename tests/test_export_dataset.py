@@ -410,3 +410,60 @@ def test_intervals_carry_source_cursors_and_gap_channels(tmp_path):
     assert first["gap_inferred_rounds"] == 1
     second = next(s for s in samples if s["interval_turn_start"] == 2)
     assert "gap_inferred_round" in second["quality_flags"]
+
+
+def test_turn_with_replacement_decision_aggregates_both_boundaries(tmp_path):
+    """CAP-R1 #4: the economy refresh emits a SECOND decision_boundary on
+    the same turn. The turn's sample carries the OPERATIVE (last) identity,
+    the SUMMED request count, both decisions' cost rows, and the
+    superseded-within-turn flag — the turn-start decision's costs never
+    vanish from the join."""
+    run_dir = _write_run(tmp_path, spectate=False)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i == 1:
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-start", "directive_id": "dir1",
+                            "provider_requests": 1, "source": "model"})
+        if i == 2:
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-refresh", "directive_id": "dir2",
+                            "provider_requests": 1, "source": "model",
+                            "phase": "economy_refresh"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    ledger = [
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 10, "model": "m", "payload_hash": "h1",
+         "input_tokens": 5, "output_tokens": 1,
+         "decision_id": "d-start", "logical_request_id": "lr1",
+         "request_set_key": "h1:generation"},
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 20, "model": "m", "payload_hash": "h2",
+         "input_tokens": 7, "output_tokens": 2,
+         "decision_id": "d-refresh", "logical_request_id": "lr2",
+         "request_set_key": "h2:generation"},
+    ]
+    (run_dir / "llm_costs.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in ledger) + "\n")
+    samples, _ = export(run_dir)
+    by_seg = {s["segment_id"]: s for s in samples}
+    first = by_seg["turn:1"]
+    assert first["decision_id"] == "d-refresh"   # operative = last
+    assert first["directive_id"] == "dir2"
+    assert first["provider_requests"] == 2        # summed across decisions
+    assert first["decisions_in_turn"] == 2
+    assert "boundary_superseded_within_turn" in first["quality_flags"]
+    assert first["request_costs"]["attempts"] == 2   # BOTH rows joined
+    assert first["request_costs"]["tokens_in"] == 12
+    second = by_seg["turn:2"]
+    assert "boundary_superseded_within_turn" not in second["quality_flags"]

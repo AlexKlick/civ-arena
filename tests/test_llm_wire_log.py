@@ -235,3 +235,32 @@ async def test_wire_log_absent_when_not_opted_in(monkeypatch, tmp_path):
     await _create(client)
     assert (tmp_path / "llm_costs.jsonl").exists()
     assert not (tmp_path / "llm-wire").exists()
+
+
+async def test_rotated_key_echoed_in_response_never_reaches_any_sink(
+        monkeypatch, tmp_path):
+    """CAP-R1 #13: the env key rotates WHILE a request is in flight and the
+    response echoes the OLD credential. The attempt record is swept at
+    FIRE time with the key actually sent, so the old value never reaches
+    any sink (wire transcript, cost ledger) — and everything else (the
+    marker) stays verbatim."""
+    old_secret, new_secret = "sk-old-rotate-me", "sk-new-rotate-me"
+    monkeypatch.setenv("WIRE_LOG_TEST_KEY", old_secret)
+
+    def handler_echo(request: httpx.Request) -> httpx.Response:
+        # the rotation lands mid-flight, before the response arrives
+        monkeypatch.setenv("WIRE_LOG_TEST_KEY", new_secret)
+        doc = _reply()
+        doc["content"][0]["text"] = f"echo {old_secret}"  # provider echo
+        return httpx.Response(200, json=doc)
+
+    client = MiniMaxMessagesClient(_spec(wire_log=True))
+    client._http = httpx.AsyncClient(  # noqa: SLF001
+        transport=httpx.MockTransport(handler_echo))
+    wire = WireLog(tmp_path, "rotate-agent", 0, _spec(wire_log=True))
+    client.on_attempt = wire.note
+    await _create(client, system=f"system prompt with {MARKER}")
+    line = (tmp_path / "llm-wire" / "rotate-agent.jsonl").read_text()
+    assert MARKER in line            # everything else verbatim
+    assert old_secret not in line    # the OLD key never lands on disk
+    assert new_secret not in line

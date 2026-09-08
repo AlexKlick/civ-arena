@@ -717,6 +717,18 @@ class StrategicController:
                 self._emit(runtime, 'strategy_economy', source='autopilot',
                            tool='set_city_production', production_policy=policy,
                            outcome='requesting_one_strategy_refresh')
+                # CAP-R1 #4: the exhaustion path accepts a REPLACEMENT
+                # directive — a second decision this turn. It gets its OWN
+                # decision identity ON THE CLIENT BEFORE the provider call
+                # (so ledger rows join the replacement, not the turn-start
+                # decision), a fresh directive id (quiet turns after this
+                # cite the directive actually running), and its own
+                # decision_boundary audit with an honest request count.
+                refresh_decision_id = uuid.uuid4().hex
+                refresh_client = runtime.client
+                if refresh_client is not None:
+                    refresh_client.decision_id = refresh_decision_id
+                refresh_posts_before = getattr(refresh_client, 'posts_sent', 0)
                 # Current owned roster and all observed queues are already fresh.
                 # This uses the existing request/format budgets, with no extra
                 # discovery loop or change to context serialization.
@@ -725,12 +737,20 @@ class StrategicController:
                 discarded = sorted(order['unit_id'] for order in directive['tactical_overrides'])
                 directive['tactical_overrides'] = []
                 self.directive = copy.deepcopy(directive)
+                self._directive_id = uuid.uuid4().hex
                 self._last_decision = runtime._turn
                 refreshed_strategy = True
                 self._emit(runtime, 'strategy_execution', source='model',
                            reasons=['production_targets_satisfied'], phase='economy',
                            directive=directive, discarded_late_tactical_override_ids=discarded,
                            last_decision_turn=self._last_decision)
+                self._emit(runtime, 'decision_boundary',
+                           decision_id=refresh_decision_id,
+                           directive_id=self._directive_id,
+                           provider_requests=max(
+                               0, getattr(refresh_client, 'posts_sent', 0)
+                               - refresh_posts_before),
+                           source='model', phase='economy_refresh')
                 if self._growth is not None:
                     self._growth.refresh(curator.state, catalogs=curator.production)
                 policy = choose_production(curator.state, player_id=runtime.profile.player_id,

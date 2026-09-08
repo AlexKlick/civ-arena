@@ -154,12 +154,13 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
     per agent; a boundary without an agent id (legacy/hand-built) joins
     the turn's agent. Boundary FIELDS are read through _boundary_view
     (#2): production audits nest them in strategy_payload_json."""
-    boundaries: dict[tuple[int, str], dict[str, Any]] = {}
+    boundaries: dict[tuple[int, str], list[dict[str, Any]]] = {}
     ledger_gaps = 0
     for e in events:
         if e["kind"] == "HEARTBEAT" and e.get("audit") == "decision_boundary":
-            boundaries[(int(e["turn"]), str(e.get("agent_id")))] = \
-                _boundary_view(e)
+            boundaries.setdefault(
+                (int(e["turn"]), str(e.get("agent_id"))),
+                []).append(_boundary_view(e))
         elif e["kind"] == "HEARTBEAT" \
                 and e.get("audit") == "ledger_write_failed":
             ledger_gaps += 1
@@ -205,15 +206,27 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                     if e["kind"] == "TOOL_RESULT" and _agents(e)
                     and e.get("status") == "accepted"
                     and (e.get("mutations") or e.get("receipts"))]
-        boundary = boundaries.get((turn, agent_id)) \
-            or boundaries.get((turn, "None"))
+        # a turn may carry SEVERAL decisions (CAP-R1 #4: the economy-
+        # refresh path accepts a replacement directive with its own
+        # boundary) — in event order; the LAST is the operative identity,
+        # costs join across ALL of the turn's decision ids
+        segment_boundaries = sorted(
+            boundaries.get((turn, agent_id), [])
+            + boundaries.get((turn, "None"), []),
+            key=lambda b: b.get("seq") or 0)
+        boundary = segment_boundaries[-1] if segment_boundaries else None
+        decision_ids = [b["decision_id"] for b in segment_boundaries
+                        if b.get("decision_id")]
         decision_id = boundary.get("decision_id") if boundary else None
         rows = [r for r in cost_rows
-                if decision_id is not None
-                and r.get("decision_id") == decision_id
+                if decision_ids
+                and r.get("decision_id") in decision_ids
                 and (r.get("agent_id") is None
                      or str(r.get("agent_id")) == agent_id)] \
             if not pre_ledger else []
+        segment_flags = quality.copy()
+        if len(segment_boundaries) > 1:
+            segment_flags.append("boundary_superseded_within_turn")
         request_costs = None
         if rows:
             tokens_in = [r["input_tokens"] for r in rows
@@ -244,8 +257,12 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             "split_group": _split_group(summary),
             "decision_id": decision_id,
             "directive_id": boundary.get("directive_id") if boundary else None,
-            "provider_requests": boundary.get("provider_requests")
-            if boundary else None,
+            # the turn's TOTAL request count across its decisions (the
+            # economy refresh makes a second provider call)
+            "provider_requests": sum(
+                b.get("provider_requests") or 0
+                for b in segment_boundaries) if segment_boundaries else None,
+            "decisions_in_turn": len(segment_boundaries),
             "decision_source": boundary.get("source") if boundary else None,
             "logical_request_ids": sorted({
                 r["logical_request_id"] for r in rows
@@ -259,7 +276,7 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             if isinstance(final_turn, int) else None,
             "censoring": "run_aborted" if aborted else None,
             "visibility_class": "ordinary_player_information",
-            "quality_flags": quality.copy(),
+            "quality_flags": segment_flags,
             "source_manifest_ref": {"artifact": "summary.json"},
         })
     return samples
