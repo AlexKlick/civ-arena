@@ -131,29 +131,76 @@ local function first_city(p)
   if p == nil then return nil end
   local found = nil
   pcall(function()
-    if p.GetCities == nil then return end
     local cs = p:GetCities()
-    if cs == nil or cs.Members == nil then return end
-    local seen = 0
     for _, c in cs:Members() do
-      seen = seen + 1
-      if seen > 4 then break end
-      if found == nil then found = c end
+      found = c
+      break
     end
   end)
   return found
 end
 
-local city_anchor, minor_city = nil, nil
-city_anchor = first_city(p0_anchor)
-if city_anchor == nil then
-  for _, p in ipairs(enum_list) do
-    city_anchor = first_city(p)
-    if city_anchor ~= nil then break end
+-- City anchors, mirroring cities_read()'s LIVE-PROVEN enumeration exactly
+-- (PlayerManager.GetAliveMajors()/GetAlive() then p:GetCities():Members();
+-- the 2026-09-08 live run found no city through the Game.GetPlayers()
+-- route, so PlayerManager is primary and each route records what it saw).
+local function scan_cities(list, tag, cap)
+  local first_any, first_minor, n = nil, nil, 0
+  if list == nil then
+    row("city.enum." .. tag, "missing", "")
+    return nil, nil
   end
+  for _, p in ipairs(list) do
+    if n >= cap then break end
+    n = n + 1
+    local pid, maj, barb = -1, "?", "?"
+    pcall(function() pid = p:GetID() end)
+    pcall(function()
+      if p.IsMajor ~= nil then maj = tostring(p:IsMajor()) end
+      if p.IsBarbarian ~= nil then barb = tostring(p:IsBarbarian()) end
+    end)
+    local c, cnt = nil, 0
+    pcall(function()
+      local cs = p:GetCities()
+      local seen = 0
+      for _i2, cc in cs:Members() do
+        seen = seen + 1
+        if seen > 4 then break end
+        if c == nil then c = cc end
+      end
+      cnt = seen
+    end)
+    row("city.enum." .. tag, "enum", "pid=" .. tostring(pid) .. ",major=" .. maj
+      .. ",barb=" .. barb .. ",cities=" .. tostring(cnt))
+    if first_any == nil and c ~= nil then first_any = c end
+    if first_minor == nil and c ~= nil and maj == "false" and barb == "false" then
+      first_minor = c
+    end
+  end
+  row("city.enum." .. tag .. ".count", "enum", tostring(n))
+  return first_any, first_minor
 end
+
+local pm_majors, pm_alive = nil, nil
+pcall(function() pm_majors = PlayerManager.GetAliveMajors() end)
+pcall(function() pm_alive = PlayerManager.GetAlive() end)
+local city_a, minor_a = scan_cities(pm_majors, "majors", 12)
+local city_b, minor_b = scan_cities(pm_alive, "alive", 12)
+local city_c = nil
+for _, p in ipairs(enum_list) do
+  local c = first_city(p)
+  if c ~= nil then city_c = c break end
+end
+row("city.enum.players", "enum", tostring(city_c ~= nil))
+
+local city_anchor = city_a or city_b or city_c
+local minor_city = minor_b or minor_a
 if minor_anchor == nil then minor_anchor = first_nonmajor end
-minor_city = first_city(minor_anchor)
+row("city.anchor.route", "enum",
+  city_a ~= nil and "playermanager.majors"
+  or city_b ~= nil and "playermanager.alive"
+  or city_c ~= nil and "gameplayers-scan"
+  or "missing")
 
 -- ------------------------------------------------------------ global tables
 
@@ -162,6 +209,7 @@ local ui = g("ui.table", function() return UI end)
 local map = g("map.table", function() return Map end)
 local gameinfo = g("gameinfo.table", function() return GameInfo end)
 local pcs = g("playerconfigurations.table", function() return PlayerConfigurations end)
+g("playermanager.table", function() return PlayerManager end)
 if CivilizationLevelTypes == nil then
   row("civilizationleveltypes.table", "missing", "")
 else
@@ -199,18 +247,23 @@ end
 
 -- ------------------------------------------------------------------- plots
 
-local plot_center, plot_neighbor, known_plot = nil, nil, nil
-if city_anchor ~= nil and map ~= nil then
-  local cx, cy = nil, nil
+local plot_center, plot_neighbor = nil, nil
+plot_center = m("city.getplot", city_anchor, "GetPlot",
+  function() return city_anchor:GetPlot() end)
+local cx, cy = nil, nil
+if city_anchor ~= nil then
   pcall(function() cx = city_anchor:GetX() cy = city_anchor:GetY() end)
-  if cx ~= nil and cy ~= nil then
-    pcall(function() plot_center = map.GetPlot(cx, cy) end)
+end
+row("city.xy", "enum", "x=" .. tostring(cx) .. ",y=" .. tostring(cy))
+if plot_center == nil and map ~= nil and cx ~= nil and cy ~= nil then
+  -- visible_map_read's live-proven route
+  pcall(function() plot_center = map.GetPlot(cx, cy) end)
+end
+if plot_neighbor == nil and map ~= nil and cx ~= nil and cy ~= nil then
+  pcall(function() plot_neighbor = map.GetNeighborPlot(cx, cy, 2) end)
+  if plot_neighbor == nil then
     pcall(function() plot_neighbor = map.GetPlot(cx + 1, cy) end)
   end
-end
-known_plot = plot_center
-if known_plot == nil and map ~= nil then
-  pcall(function() known_plot = map.GetPlotByIndex(0) end)
 end
 
 local function plot_battery(suffix, plot)
@@ -247,12 +300,23 @@ if pv_table == nil then
 else
   call("pv.p0", function() pv0 = pv_table[0] return pv0 end)
 end
-if known_plot == nil then
-  row("pv.p0.isvisible", "missing", "no-known-plot")
-  row("pv.p0.isrevealed", "missing", "no-known-plot")
+-- IsVisible/IsRevealed on the CITY-CENTRE plot and its NEIGHBOUR (not the
+-- map-corner fallback plot).
+if plot_center == nil then
+  row("pv.p0.isvisible", "missing", "no-city-centre-plot")
+  row("pv.p0.isrevealed", "missing", "no-city-centre-plot")
 else
-  m("pv.p0.isvisible", pv0, "IsVisible", function() return pv0:IsVisible(known_plot) end)
-  m("pv.p0.isrevealed", pv0, "IsRevealed", function() return pv0:IsRevealed(known_plot) end)
+  m("pv.p0.isvisible", pv0, "IsVisible", function() return pv0:IsVisible(plot_center) end)
+  m("pv.p0.isrevealed", pv0, "IsRevealed", function() return pv0:IsRevealed(plot_center) end)
+end
+if plot_neighbor == nil then
+  row("pv.p0.isvisible.neighbor", "missing", "no-neighbour-plot")
+  row("pv.p0.isrevealed.neighbor", "missing", "no-neighbour-plot")
+else
+  m("pv.p0.isvisible.neighbor", pv0, "IsVisible",
+    function() return pv0:IsVisible(plot_neighbor) end)
+  m("pv.p0.isrevealed.neighbor", pv0, "IsRevealed",
+    function() return pv0:IsRevealed(plot_neighbor) end)
 end
 
 -- ------------------------------------------------------------- Plot matrix
@@ -287,6 +351,18 @@ local function player_battery(prefix, p)
   m(prefix .. ".treasury.getfaith", tr, "GetFaith", function() return tr:GetFaith() end)
   m(prefix .. ".treasury.getgoldfromdiplomacy", tr, "GetGoldFromDiplomacy",
     function() return tr:GetGoldFromDiplomacy() end)
+  -- second-pass yield candidates (2026-09-08 live run: the first-pass
+  -- getters came back missing on GameCore; only GetGoldBalance works)
+  m(prefix .. ".treasury.getgoldyield", tr, "GetGoldYield",
+    function() return tr:GetGoldYield() end)
+  m(prefix .. ".treasury.getscienceyield", tr, "GetScienceYield",
+    function() return tr:GetScienceYield() end)
+  m(prefix .. ".treasury.getfaithyield", tr, "GetFaithYield",
+    function() return tr:GetFaithYield() end)
+  m(prefix .. ".treasury.gettotalmaintenance", tr, "GetTotalMaintenance",
+    function() return tr:GetTotalMaintenance() end)
+  m(prefix .. ".treasury.getmaintenance", tr, "GetMaintenance",
+    function() return tr:GetMaintenance() end)
 
   local cu = nil
   m(prefix .. ".getculture", p, "GetCulture", function() cu = p:GetCulture() return cu end)
@@ -332,6 +408,11 @@ local function player_battery(prefix, p)
     function() inf = p:GetInfluence() return inf end)
   m(prefix .. ".influence.getsuzerain", inf, "GetSuzerain",
     function() return inf:GetSuzerain() end)
+
+  local rel = nil
+  m(prefix .. ".getreligion", p, "GetReligion", function() rel = p:GetReligion() return rel end)
+  m(prefix .. ".religion.getfaithyield", rel, "GetFaithYield",
+    function() return rel:GetFaithYield() end)
 
   local cfg = nil
   if pcs == nil then

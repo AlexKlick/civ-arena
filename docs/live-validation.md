@@ -1196,3 +1196,22 @@ probe also runs clean against a bare texlua VM with no globals at all
 on the runner and harness. Live results are blocked until the coordinator
 points the runner at a parked game (first run: babysit for PROBE_END and
 compare the two contexts' missing-vs-present tables).
+
+Post-run fix (same day): the first live probe run found NO city through the
+`Game.GetPlayers()` route (every city/plot row missing), so the probe now
+mirrors `cities_read()`'s live-proven enumeration exactly —
+`PlayerManager.GetAliveMajors()` / `GetAlive()` then `p:GetCities():Members()`
+— with per-route `city.enum.*` diagnostic rows and a `city.anchor.route`
+row naming the winning route; plots anchor on `city:GetPlot()` (fallback
+`Map.GetPlot(x, y)`) with the neighbour via `Map.GetNeighborPlot(x, y, 2)`
+(fallback `+1` offset); PlayersVisibility probes moved onto the city-centre
+plot and its neighbour (no corner-plot fallback); second-pass yield
+candidates added (treasury GetGoldYield/GetScienceYield/GetFaithYield/
+GetTotalMaintenance/GetMaintenance, player:GetReligion():GetFaithYield)
+after the first-pass getters came back missing on GameCore. Live-confirmed
+so far from the first run: PlayersVisibility[0]:IsVisible/IsRevealed exist
+on GameCore (booleans), Map.GetPlotCount 2280 / GetGridSize 60,38,
+treasury GetGoldBalance works (GetGold/GetScience/GetCulture/GetFaith/
+GetGoldFromDiplomacy missing on GameCore), GetCultureYield works,
+GetCulturalProgress/GetCostNextCivic InGame-only (returned 0),
+UI.GetPlayerColors InGame-only returning two ints (ABGR).
