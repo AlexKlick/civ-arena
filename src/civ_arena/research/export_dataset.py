@@ -191,8 +191,9 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
 
     samples: list[dict[str, Any]] = []
     for turn, agent_id in segments:
-        def _agents(e: dict[str, Any]) -> bool:
-            return e.get("turn") == turn and str(e.get("agent_id")) == agent_id
+        def _agents(e: dict[str, Any], *, _t: int = turn,
+                    _a: str = agent_id) -> bool:
+            return e.get("turn") == _t and str(e.get("agent_id")) == _a
 
         obs = [_ref(e["seq"]) for e in events
                if e["kind"] == "TOOL_RESULT" and _agents(e)
