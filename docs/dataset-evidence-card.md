@@ -32,8 +32,14 @@ copied into a sample** — observations, actions and receipts are carried as
 
 ## 2. Decision grain (controlled_decision)
 
-One sample **per boundary**, not per turn — a turn whose economy-refresh path
-accepts a replacement directive exports two samples. Windows carry two starts:
+Samples are keyed by `(turn, agent_id)` segment, and within each segment there is
+one sample **per boundary occurrence** — not one per turn. So a segment whose
+economy-refresh path accepted a replacement directive exports two samples; a
+segment with no boundary at all (a legacy pre-boundary run) still exports one
+sample, with null identity and the `pre_boundary_run` flag. Because a boundary
+recorded without an `agent_id` is fanned out into every agent's segment for that
+turn, **one such source boundary can produce more than one sample**. Windows
+carry two starts:
 
 - **observations** span the wide window `(previous boundary, next boundary)`,
   because production emits the boundary *after* refresh and decide, so a
@@ -46,8 +52,9 @@ accepts a replacement directive exports two samples. Windows carry two starts:
 of a `(turn, agent)` keeps the stable `segment_id`; superseded ones carry an
 `@<decision_id>~<seq>` suffix so a reused id cannot mint duplicate ids.
 
-Hotseat turns are keyed `(turn, agent_id)`: two agents in one turn export as two
-samples, each with only its own observations, actions, receipts and boundary.
+Hotseat turns carry two agents, so one turn exports at least one sample per
+agent — more if either agent's segment holds several boundary occurrences — each
+with only its own observations, actions, receipts and boundary.
 
 ## 3. Gaps are flags, never repairs
 
@@ -100,7 +107,7 @@ zero"; a recorded `0` is preserved as data.
 
 | Flag | Meaning |
 |---|---|
-| `turn_label_mismatch` | the round lost its DEACT to the 64-entry ring wrap and was closed by the next turn's END; both labels are carried, never reconciled |
+| `turn_label_mismatch` | the interval's start and end turn labels are unequal — **including an absent start**, where the missing label cannot match. Both labels are carried and never reconciled. A round that lost its DEACT to the 64-entry ring wrap and was closed by the next turn's END is one cause, not the definition. |
 | `orphan_end_without_start` | an END with no open start |
 | `gap_inferred_round` | the round's start was inferred from a capture gap, not observed |
 | `interval_open_at_export` | the final round was interrupted; the end is `null`, never faked |
@@ -149,8 +156,10 @@ mod version, and the mod gate refuses anything below 0.4.0.
 - Imitating a human spectate subject's actions, or attributing intent/reasoning
   to them — declared ineligible on every interval.
 - Treating `request_costs` totals as complete when `usage_complete` is false, or
-  as covering a decision whose sample carries `costs_partial`,
-  `costs_attempts_missing` or `ledger_write_gaps`.
+  as covering a decision whose sample carries `costs_partial` or
+  `costs_attempts_missing`. (`ledger_write_gaps` alone does **not** disqualify a
+  coverage claim — a failed `spend` or `wire` sink cannot cost a cost row. Defer
+  to `usage_complete`, which already accounts for cost-sink failures.)
 - Treating a `pre_ledger_run` or `pre_boundary_run` sample as if identity or
   costs merely happened to be zero.
 - Mixing samples across `split_group` when constructing train/eval splits:
