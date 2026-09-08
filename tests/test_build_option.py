@@ -1,0 +1,150 @@
+"""Closed-loop develop-city option: interrupt, censor, resolve; advisory only."""
+import copy
+
+from civ_arena.agents.build_option import (
+    MAX_ADVISORY_CITIES,
+    DevelopmentOptionMonitor,
+    barbarians_near_owned_cities,
+)
+from civ_arena.agents.economic_forecast import build_forecast
+
+
+def city(cid="c0:1", queue=None, owner=0, coord="0,0"):
+    return {"city_id": cid, "owner": owner, "coord": coord,
+            "production_queue": [] if queue is None else queue,
+            "population": 3}
+
+
+def unit(uid="u0:1", owner=0, kind="SCOUT", coord="0,0", barbarian=False):
+    return {"unit_id": uid, "owner_id": owner, "type": kind, "coord": coord,
+            "is_barbarian": barbarian}
+
+
+def forecast(item="MONUMENT", turns=3, turn=10, cid="c0:1"):
+    return build_forecast(turn=turn, city_id=cid, item_id=item,
+                          row={"item_id": item, "kind": "building",
+                               "cost": 25, "turns": turns})
+
+
+def events_by_kind(events):
+    return {event["event"]: event for event in events}
+
+
+def test_pending_build_on_time_resolves_nothing():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    assert monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])],
+                           units=[unit()]) == []
+    assert monitor.observe(turn=12, cities=[city(queue=["MONUMENT"])],
+                           units=[unit()]) == []
+
+
+def test_completion_records_outcome_and_clears_pending():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    events = monitor.observe(turn=13, cities=[city(queue=[])], units=[unit()])
+    outcome = events_by_kind(events)["completed"]
+    assert outcome["verdict"] == "in_estimated_window"
+    assert monitor.advisory(turn=13, cities=[city(queue=[])], production={},
+                            preferences=[])["recent_outcomes"] == [outcome]
+    assert monitor.observe(turn=14, cities=[city(queue=[])], units=[unit()]) == []
+
+
+def test_threat_interrupt_censors_before_completion_and_survives_it():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    raider = unit("u9:1", owner=1, kind="WARRIOR", coord="2,0", barbarian=True)
+    frozen = copy.deepcopy(monitor._pending["c0:1"]["forecast"])
+    events = monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])],
+                             units=[unit(), raider])
+    censor = events_by_kind(events)["threat_censored"]
+    assert censor["threat_unit_ids"] == ["u9:1"]
+    assert monitor._pending["c0:1"]["forecast"] == frozen  # forecast never edited
+    events = monitor.observe(turn=13, cities=[city(queue=[])], units=[unit(), raider])
+    completed = events_by_kind(events)["completed"]
+    assert completed["censored"] == "threat_interrupt"
+    assert completed["censored_turn"] == 11
+
+
+def test_defender_build_is_not_censored():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast(item="WARRIOR", turns=2))
+    raider = unit("u9:1", owner=1, kind="WARRIOR", coord="2,0", barbarian=True)
+    events = monitor.observe(turn=11, cities=[city(queue=["WARRIOR"])],
+                             units=[unit(), raider])
+    assert events == []
+    events = monitor.observe(turn=12, cities=[city(queue=[])], units=[unit(), raider])
+    assert events_by_kind(events)["completed"].get("censored") is None
+
+
+def test_threat_outside_radius_does_not_censor():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    distant = unit("u9:1", owner=1, kind="WARRIOR", coord="9,9", barbarian=True)
+    assert monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])],
+                           units=[unit(), distant]) == []
+
+
+def test_queue_change_invalidates_option():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    events = monitor.observe(turn=12, cities=[city(queue=["WARRIOR"])], units=[unit()])
+    assert events_by_kind(events)["invalidated_queue_changed"]["item_id"] == "MONUMENT"
+    assert monitor.advisory(turn=12, cities=[city(queue=["WARRIOR"])], production={},
+                            preferences=[])["pending"] == []
+
+
+def test_overdue_reported_once_while_still_pending():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())  # estimated completion turn 13
+    assert monitor.observe(turn=14, cities=[city(queue=["MONUMENT"])],
+                           units=[unit()])[0]["event"] == "overdue_pending"
+    assert monitor.observe(turn=15, cities=[city(queue=["MONUMENT"])],
+                           units=[unit()]) == []
+    assert "c0:1" in monitor._pending
+
+
+def test_different_reissue_supersedes_pending_plan():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    monitor.register(forecast(item="GRANARY", turn=11))
+    outcomes = monitor.advisory(turn=11, cities=[city()], production={},
+                                preferences=[])["recent_outcomes"]
+    assert outcomes[0]["event"] == "invalidated_superseded"
+    assert monitor._pending["c0:1"]["forecast"]["item_id"] == "GRANARY"
+
+
+def test_lost_city_invalidates():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    events = monitor.observe(turn=11, cities=[], units=[unit()])
+    assert events_by_kind(events)["invalidated_city_unobserved"]
+    assert monitor._pending == {}
+
+
+def test_barbarian_detection_uses_production_policy_observable():
+    raider = unit("u9:1", owner=1, kind="WARRIOR", coord="2,0", barbarian=True)
+    far_raider = unit("u9:2", owner=1, kind="WARRIOR", coord="9,9", barbarian=True)
+    foreign_army = unit("u8:1", owner=2, kind="WARRIOR", coord="1,0", barbarian=False)
+    own = unit()
+    assert barbarians_near_owned_cities(
+        [raider, far_raider, foreign_army, own], [city()], player_id=0) == ["u9:1"]
+
+
+def test_advisory_shape_bounded_and_non_executive():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    cities = [city(f"c0:{i}") for i in range(1, 5)]
+    production = {f"c0:{i}": [{"item_id": "MONUMENT", "kind": "building",
+                               "cost": 25, "turns": 3}] for i in range(1, 5)}
+    block = monitor.advisory(turn=12, cities=cities, production=production,
+                             preferences=["MONUMENT"])
+    assert block["authority"] == "advisory_only_executor_unchanged"
+    assert block["basis"]
+    assert len(block["city_plans"]) == MAX_ADVISORY_CITIES
+    assert set(block["city_plans"]) == {"c0:1", "c0:2"}
+    assert block["pending"][0]["item_id"] == "MONUMENT"
+    assert "execute" not in str(block) and "tool_call" not in str(block)
+    queued = city("c0:9", queue=["WALLS"])
+    assert monitor.advisory(turn=12, cities=[*cities, queued], production=production,
+                            preferences=[])["city_plans"].keys() == {"c0:1", "c0:2"}
