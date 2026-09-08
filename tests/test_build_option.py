@@ -124,6 +124,22 @@ def test_completion_date_slippage_censors_once():
     assert completed[0]["censored_turn"] == 11
 
 
+def test_completed_item_is_not_rate_censored_by_its_own_fresh_row():
+    """R3 regression: a repeatable item's fresh catalog row estimates a NEW
+    build; read after completion it must not rate-censor the build it just
+    finished reporting as complete."""
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast(item="WARRIOR", turns=2, turn=10))  # completes turn 12
+    events = monitor.observe(
+        turn=12, cities=[city(queue=[])], units=[unit()],
+        catalogs={"c0:1": [{"item_id": "WARRIOR", "kind": "unit",
+                            "cost": 30, "turns": 2}]})
+    completed = events_by_kind(events)["completed"]
+    assert completed["verdict"] == "in_estimated_window"
+    assert completed.get("censored") is None
+    assert "rate_estimate_changed" not in events_by_kind(events)
+
+
 def test_zero_or_absent_turns_row_never_censors():
     monitor = DevelopmentOptionMonitor(0)
     monitor.register(forecast(turns=3, turn=10))
