@@ -22,7 +22,7 @@ def decision_snapshot(curator: ContextCurator, turn: int) -> dict:
                    for row in curator.own('get_cities')},
         'contacts': sorted(row['unit_id'] for row in curator.state['get_units']
                            if row not in owned_units),
-        'you': curator.state['get_overview'].get('you', {}),
+        'you': curator.you(),
         'known_tiles': sorted(curator.state['get_visible_map']['tiles']),
     }
     return copy.deepcopy(snapshot)

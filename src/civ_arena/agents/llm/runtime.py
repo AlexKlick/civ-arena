@@ -156,8 +156,11 @@ class LLMAgentRuntime:
             if self.paced_turns:
                 messages[0]["content"] = messages[0]["content"].replace(
                     "Observe with your tools", "Use the supplied controller context")
-                curator = ContextCurator(facade, self.profile.player_id,
-                                         self.llm.max_result_chars, memory)
+                curator = ContextCurator(
+                    facade, self.profile.player_id, self.llm.max_result_chars,
+                    memory,
+                    own_economy_context=getattr(self.llm, "own_economy_context",
+                                                False))
                 await curator.refresh()
                 opening: list[dict[str, Any]] = []
                 replace_context(messages, opening, curator.render())
@@ -218,7 +221,9 @@ class LLMAgentRuntime:
 
     # ------------------------------------------------------------ helpers
     async def _turn_briefing(self, facade: Any) -> str:
-        curator = ContextCurator(facade, self.profile.player_id, self.llm.max_result_chars)
+        curator = ContextCurator(
+            facade, self.profile.player_id, self.llm.max_result_chars,
+            own_economy_context=getattr(self.llm, "own_economy_context", False))
         await curator.refresh()
         return curator.render()
 

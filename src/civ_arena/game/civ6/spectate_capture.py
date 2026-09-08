@@ -177,7 +177,16 @@ class SpectatorCensus:
 
     async def snapshot(self) -> dict[str, Any]:
         """One census read, digest-bracketed. One retry on drift; a still-
-        moving board is reported ``consistent=False`` (never fabricated)."""
+        moving board is reported ``consistent=False`` (never fabricated).
+
+        M4 (§4b): at ``snapshot_scope == "full"`` the snapshot gains an
+        ADDITIVE ``world`` key — roster + owned tiles through the READ
+        transport ONLY (palette needs the write transport and the
+        spectate phase never writes), once per round (here, never per
+        poll), bracketed by its OWN digest pair with a
+        ``world.digest_consistent`` flag. A failing world read degrades to
+        a world doc carrying the error class — the census itself never
+        fails on the world block."""
         started = time.monotonic()
         for attempt in (1, 2):
             if attempt == 2:
@@ -204,6 +213,17 @@ class SpectatorCensus:
                                    player_id=self._spec.human_seat))
                 doc["units"] = _compact_units(units)
                 doc["cities"] = _compact_cities(cities)
+                world_before = await self._adapter.refresh_digest()
+                try:
+                    from civ_arena.game.civ6 import world_capture
+                    world = await world_capture.spectate_world(
+                        self._adapter, turn=int(overview.get("turn") or 0))
+                except Exception as exc:  # noqa: BLE001 — additive, never fatal
+                    world = {"schema": 1, "after_seat": -1, "error":
+                             type(exc).__name__}
+                world_after = await self._adapter.refresh_digest()
+                world["digest_consistent"] = world_before == world_after
+                doc["world"] = world
             after = await self._adapter.refresh_digest()
             if units is not None:
                 for u in units:
@@ -225,12 +245,24 @@ class SpectatorCensus:
         return self._capped(doc)
 
     def _capped(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Bound the event payload; digests/counts always survive."""
+        """Bound the event payload; digests/counts always survive. M4: the
+        ``world`` block drops FIRST (before units/cities), recorded as
+        ``truncated.world: true`` — the spectator territory layer is the
+        most regenerable part of the payload."""
         if len(json.dumps(doc, sort_keys=True).encode()) <= MAX_SNAPSHOT_BYTES:
             return doc
+        if "world" in doc:
+            doc.pop("world", None)
+            doc["truncated"] = {"world": True}
+            if len(json.dumps(doc, sort_keys=True).encode()) <= MAX_SNAPSHOT_BYTES:
+                return doc
         doc.pop("units", None)
         doc.pop("cities", None)
-        doc["truncated"] = True
+        truncated = doc.setdefault("truncated", {})
+        if isinstance(truncated, dict):
+            truncated["census"] = True
+        else:
+            doc["truncated"] = True  # legacy marker shape (pre-M4 docs)
         if len(json.dumps(doc, sort_keys=True).encode()) > MAX_SNAPSHOT_BYTES:
             doc.pop("overview", None)
         return doc
@@ -257,11 +289,29 @@ class SpectateTransport:
 
     ``census`` counts what actually went out: per-op sent counts, the
     lifecycle count, and ``rejected`` (blocked attempts). The summary's
-    command_census is derived from this, not from a literal."""
+    command_census is derived from this, not from a literal.
+
+    M4 (§4b): ``read_raw`` additionally admits the two SPECW world reads
+    as EXACT full-command matches (see ``_allowed_world_reads``) — a
+    one-character drift in the world Lua re-tightens the allowlist by
+    construction (CAP-R1 finding 5's fix direction). The legacy
+    ambient-window entries keep their original PREFIX matching, untouched."""
 
     _ALLOWED_READ_RAW = ("Puppeteer.BeginAmbientWindow",
                          "Puppeteer.EndAmbientWindow",
                          "Puppeteer.DumpAmbient")
+
+    @staticmethod
+    def _allowed_world_reads() -> frozenset[str]:
+        """M4 §4b: the two GameCore SPECW reads the spectator world needs,
+        allowed as EXACT full-command matches (CAP-R1 finding 5's fix
+        direction: equality, not prefix — a one-character edit to the
+        world Lua re-tightens the allowlist by construction). Computed
+        lazily: world_capture imports this module for
+        MAX_SNAPSHOT_BYTES, so a module-level import would cycle."""
+        from civ_arena.game.civ6 import world_capture
+        return frozenset((world_capture.roster_read(),
+                          world_capture.owned_tiles_read()))
 
     def __init__(self, adapter: Any) -> None:
         self._adapter = adapter
@@ -302,11 +352,13 @@ class SpectateTransport:
         return await self._adapter.observe(req)
 
     async def read_raw(self, lua: str) -> list[str]:
-        if not lua.startswith(self._ALLOWED_READ_RAW):
+        if not (lua.startswith(self._ALLOWED_READ_RAW)
+                or lua in self._allowed_world_reads()):
             self.census["rejected"] += 1
             raise RecorderCapabilityError(
                 f"spectator read_raw is restricted to the ambient-window "
-                f"recorder commands, refusing: {lua[:80]!r}")
+                f"recorder commands and the exact SPECW world reads, "
+                f"refusing: {lua[:80]!r}")
         self.census["recorder_commands"] += 1
         return await self._adapter.read_raw(lua)
 

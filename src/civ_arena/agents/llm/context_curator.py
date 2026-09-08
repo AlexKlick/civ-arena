@@ -43,11 +43,22 @@ def selected(row: dict, fields: tuple[str, ...]) -> dict:
 
 
 class ContextCurator:
+    # The five legacy `you` keys — the default curated context. The M4
+    # economy keys (yields/era/civics) join ONLY under
+    # own_economy_context, within the same budget arithmetic.
+    OWN_ECONOMY_KEYS = ('science', 'culture', 'faith', 'gold_per_turn', 'upkeep',
+                        'era', 'progressing_civic', 'civic_progress', 'civic_cost',
+                        'civics')
+
     def __init__(self, facade: Any, player_id: int, budget: int, memory: str = '', *,
-                 research_building_briefing: bool = False):
+                 research_building_briefing: bool = False,
+                 own_economy_context: bool = False):
         if type(research_building_briefing) is not bool:
             raise ValueError('research briefing opt-in must be boolean')
+        if type(own_economy_context) is not bool:
+            raise ValueError('own economy opt-in must be boolean')
         self.research_building_briefing = research_building_briefing
+        self.own_economy_context = own_economy_context
         self.facade, self.player_id, self.budget = facade, player_id, budget
         self.state: dict[str, Any] = {'get_strategy': memory}
         self.dirty = {'get_visible_map', 'get_units', 'get_cities', 'get_overview'}
@@ -60,6 +71,18 @@ class ContextCurator:
         self.revision = 0
         self.focus: str | None = None
         self.last_render_audit: dict | None = None
+
+    def you(self) -> dict:
+        """The curated `you`: the FIVE legacy keys by default — byte-stable
+        model packets regardless of the wider OVX|2 read surface — plus
+        the economy keys when own_economy_context opted in (M4)."""
+        overview_you = self.state.get('get_overview', {}).get('you', {})
+        if not self.own_economy_context:
+            return selected(overview_you, ('player_id', 'civ_name', 'gold',
+                                           'researched', 'researching'))
+        return {**selected(overview_you, ('player_id', 'civ_name', 'gold',
+                                          'researched', 'researching')),
+                **selected(overview_you, self.OWN_ECONOMY_KEYS)}
 
     async def read(self, name: str, **args) -> Any:
         result = await getattr(self.facade, name)(**args)
@@ -276,7 +299,7 @@ class ContextCurator:
                                          for x in units if x not in mine_u],
                'visible_foreign_cities': [selected(x, city_fields)
                                           for x in cities if x not in mine_c],
-               'you': overview.get('you', {}), 'public': overview.get('public', {}),
+               'you': self.you(), 'public': overview.get('public', {}),
                'research_options': self.state.get('get_available_research', []),
                'option_sources': self.choice_status(),
                'production_options': {cid: [selected(x, production_fields)

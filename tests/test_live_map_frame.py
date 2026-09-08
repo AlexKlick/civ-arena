@@ -56,6 +56,71 @@ def test_terrain_vocabulary_preserves_water_hills_and_legacy_rows(engine, expect
     assert result["unknown_terrain"] == unknown
 
 
+def test_v4_seat_resource_hidden_without_prereq_tech(tmp_path):
+    """The v4 wire tech-gates resources exactly like the game's own UI
+    mirror (GameInfo.Resources[idx].PrereqTech + techs:HasTech): a
+    resource whose prereq the seat lacks reads '-' (observed none from
+    the seat's viewpoint), a revealed one rides by name, and an unknown
+    resource row reads '?' (unread -> absent)."""
+    executable = shutil.which("texlua")
+    if executable is None:
+        pytest.skip("texlua unavailable for executable v4 fixture")
+    fixture = """
+if REVEALED == nil then REVEALED = false end
+Game = {GetCurrentGameTurn=function() return 4 end}
+GameInfo = {
+  Terrains={[7]={TerrainType='TERRAIN_GRASS'}},
+  Features={[3]={FeatureType='FEATURE_FOREST'}},
+  Resources={[11]={ResourceType='RESOURCE_IRON', PrereqTech=4},
+             [12]={ResourceType='RESOURCE_WHEAT', PrereqTech=-1},
+             [13]={}},
+}
+Players = {[0]={GetTechs=function() return {
+  HasTech=function(_, t) return t == 4 and REVEALED end} end}}
+PlayersVisibility = {[0]={IsVisible=function() return true end}}
+Map = {GetPlot=function(x, y)
+  local plot = {GetTerrainType=function() return 7 end,
+   GetOwner=function() return -1 end,
+   GetFeatureType=function() return -1 end,
+   GetResourceType=function()
+     if x == 0 then return 11 elseif x == 1 then return 12
+     elseif x == 2 then return 13 else return -1 end
+   end,
+   GetImprovementType=function() return -1 end,
+   GetDistrictType=function() return -1 end,
+   IsRiver=function() return false end,
+   GetAppeal=function() return 0 end}
+  return plot
+end}
+"""
+    path = tmp_path / "v4.lua"
+    path.write_text(fixture + lua_translator.visible_map_read(
+        0, [(0, 0), (1, 0), (2, 0), (3, 0)]))
+    result = subprocess.run([executable, str(path)], capture_output=True,
+                            text=True, timeout=5, check=True)
+    rows = [row for row in result.stdout.splitlines()
+            if row.startswith("TILEROW|")]
+    assert len(rows) == 4
+    hidden, wheat, secret, bare = (response_parser.parse_visible_map(
+        ["VMAP|4", "TURN|4", *rows])["tiles"][f"{q},0"] for q in range(4))
+    assert hidden["resource"] == "", "unresearched iron reads '-' (none)"
+    assert wheat["resource"] == "RESOURCE_WHEAT"  # no prereq: revealed
+    assert "resource" not in secret, "nameless resource row reads ?"
+    assert bare["resource"] == ""                 # observed none: '-'
+    assert hidden["engine_visible"] is True       # PV table route answered
+    assert hidden["river"] is False
+    # PrereqTech indexes the tech table: researching tech 4 reveals iron
+    path.write_text("REVEALED = true\n" + fixture + lua_translator.visible_map_read(
+        0, [(0, 0)]))
+    result = subprocess.run([executable, str(path)], capture_output=True,
+                            text=True, timeout=5, check=True)
+    revealed = response_parser.parse_visible_map([
+        row for row in result.stdout.splitlines()
+        if row.startswith(("VMAP|", "TURN|", "TILEROW|"))
+    ])["tiles"]["0,0"]
+    assert revealed["resource"] == "RESOURCE_IRON"
+
+
 # Actual Map.GetPlotDistance observations, each distance == 1, retained in
 # runs/sixty-round-development-20260905/hex-row-frame-probe.log. These fixed
 # engine coordinates independently pin the transform, unlike a round-trip.
