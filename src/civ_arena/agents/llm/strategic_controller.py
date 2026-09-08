@@ -15,6 +15,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from civ_arena.agents.build_option import DevelopmentOptionMonitor
+from civ_arena.agents.economic_forecast import build_forecast, compare_alternatives
 from civ_arena.agents.growth_policy import GrowthPolicy
 from civ_arena.agents.initial_capital import InitialCapitalPlan
 from civ_arena.agents.llm.client import ModelUnavailable
@@ -153,7 +155,9 @@ class StrategicController:
     audit: Callable[[dict], None] | None = None
     opening_units_frozen: bool = False
     growth_autopilot: bool = False
+    economic_forecast: bool = False
     _growth: GrowthPolicy | None = field(default=None, init=False)
+    _forecast: DevelopmentOptionMonitor | None = field(default=None, init=False)
     _settlement: SettlementExecutor | None = field(default=None, init=False)
     _capital: InitialCapitalPlan | None = field(default=None, init=False)
     recovery_policy: RecoveryPolicy = field(default_factory=RecoveryPolicy)
@@ -177,6 +181,8 @@ class StrategicController:
             raise ValueError('strategic controller requires match_id')
         if type(self.growth_autopilot) is not bool:
             raise ValueError('growth_autopilot must be an explicit boolean')
+        if type(self.economic_forecast) is not bool:
+            raise ValueError('economic_forecast must be an explicit boolean')
         if type(self.opening_units_frozen) is not bool:
             raise ValueError('opening_units_frozen must be an explicit boolean')
         if type(self.cadence) is not int or not 1 <= self.cadence <= 60:
@@ -252,6 +258,11 @@ class StrategicController:
                                      runtime.llm.max_result_chars,
                                      research_building_briefing=runtime.llm.research_building_briefing,
                                      own_economy_context=runtime.llm.own_economy_context)
+            if self.economic_forecast and self._forecast is None:
+                self._forecast = DevelopmentOptionMonitor(runtime.profile.player_id)
+            if self._forecast is not None and (
+                    self._forecast.player_id != runtime.profile.player_id):
+                raise MatchAborted('forecast monitor player identity changed')
             await curator.refresh(include_options=False)
             frozen_ids = ({u['unit_id'] for u in curator.own('get_units')}
                           if self.opening_units_frozen else set())
@@ -546,6 +557,14 @@ class StrategicController:
             metadata['growth'] = self._growth.summary()
             metadata['growth']['execution'] = self._settlement.summary()
             metadata['growth']['initial_capital'] = self._capital.summary()
+        if self._forecast is not None:
+            # S3 advisory: prior forecasts, their observed fates, and bounded
+            # catalog-level plans. Advisory only — the production policy and
+            # executor below are unchanged by this block.
+            metadata['economic_forecast'] = self._forecast.advisory(
+                turn=runtime._turn, cities=curator.own('get_cities'),
+                production=curator.production,
+                preferences=(self.directive or {}).get('production_preferences', []))
         schema = {'name': 'submit_directive',
                   'description': 'Submit one strategy; tactical overrides expire this turn.',
                   'input_schema': copy.deepcopy(DIRECTIVE_SCHEMA) if adaptive else DIRECTIVE_SCHEMA}
@@ -686,6 +705,13 @@ class StrategicController:
                         available[0] if available else None)
 
         await curator.refresh()
+        if self._forecast is not None:
+            # Resolve pending options BEFORE any economy action this turn so an
+            # interrupt is visible before the next primitive effect.
+            for event in self._forecast.observe(turn=runtime._turn,
+                                                cities=curator.own('get_cities'),
+                                                units=curator.state['get_units']):
+                self._emit(runtime, 'strategy_forecast_outcome', source='autopilot', **event)
         if not curator.state['get_overview'].get('you', {}).get('researching'):
             tech = pick(curator.state.get('get_available_research', []), 'tech_id',
                         directive['research_preferences'])
@@ -767,6 +793,23 @@ class StrategicController:
                     raise MatchAborted(f'no eligible supported production for {cid}; '
                                        'current options and placement constraints exhausted')
                 raise MatchAborted(f'no eligible production within unit targets for {cid}')
+            forecast = None
+            if self._forecast is not None:
+                # Pre-action S3 records: issued before the production attempt,
+                # never edited afterwards. Comparison mirrors the deterministic
+                # cascade over the policy's own bounded candidate set.
+                catalog = curator.production.get(cid, [])
+                row = next((entry for entry in catalog
+                            if entry.get('item_id') == item), {})
+                threats = policy.get('nearby_confirmed_barbarians', [])
+                forecast = build_forecast(turn=runtime._turn, city_id=cid, item_id=item,
+                                          row=row, threats=threats)
+                comparison = compare_alternatives(
+                    turn=runtime._turn, city_id=cid, candidates=policy['candidates'],
+                    catalog=catalog, preferences=directive['production_preferences'],
+                    threats=threats)
+                self._emit(runtime, 'strategy_forecast', source='autopilot', city_id=cid,
+                           forecast=forecast, comparison=comparison)
             args = production_args(policy, curator.production.get(cid, []), curator.state,
                                    player_id=runtime.profile.player_id, city_id=cid)
             result = await curator.execute('set_city_production', args)
@@ -781,6 +824,8 @@ class StrategicController:
                 raise MatchAborted(f'productive production rejected for {cid}; no automatic retry')
             if result['status'] == 'accepted':
                 reservations[cid] = item
+                if self._forecast is not None and forecast is not None:
+                    self._forecast.register(forecast)
                 if self._growth is not None:
                     founder_reserved = self._growth.reserve_founder_production(
                         curator.state, cid, item,
