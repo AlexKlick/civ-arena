@@ -215,6 +215,14 @@ class VisibilityPolicy:
         # M4 (contract §6): the OVX|2 economy keys pass through for SELF
         # ONLY — never to public/other players; the CONTEXT layer gates
         # whether the model ever sees them (LLMSpec.own_economy_context).
+        # Amendment 3 item 3: this projection is the model-bound surface
+        # (the curator passes its `you()` projection through here). The
+        # opt-in flag is propagated via the curator's selection; this
+        # layer keeps emitting the keys when present in `p` so an
+        # opted-in caller still gets the full economy. The curator's
+        # cache-time gate is the byte-identical default guarantee; if
+        # a caller bypasses the curator and calls _own_player directly,
+        # the keys only reach the model if `p` already carries them.
         for key in ("science", "culture", "faith", "gold_per_turn", "upkeep",
                     "era", "progressing_civic", "civic_progress", "civic_cost"):
             if key in p:

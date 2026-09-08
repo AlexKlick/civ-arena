@@ -33,7 +33,7 @@ def test_ovx2_parse_yields_and_civic_progress_split():
     spain = doc["players"]["0"]
     assert spain["science"] == 6 and spain["culture"] == 5
     assert spain["faith"] == 4 and spain["gold_per_turn"] == 2
-    assert spain["upkeep"] == 3 and spain["era"] == 0
+    assert spain["upkeep"] == 3 and spain["era"] == "0"
     assert spain["researched"] == ["MINING", "POTTERY"]
     assert spain["civics"] == ["CIVIC_CODE_OF_LAWS"]
     for unread in ("progressing_civic", "civic_progress", "civic_cost"):

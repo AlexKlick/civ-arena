@@ -400,3 +400,96 @@ def test_validate_spectate_accepts_snapshots_with_and_without_world():
         problems = structural_problems(records, summary=None,
                                        allow_open_prefix=True)
         assert not any("world" in problem for problem in problems), problems
+
+
+# -- mandatory producer/consumer alignment integration test (Amendment 3 item 2)
+#
+# This test is the REGRESSION AUTHORITY for the P0 defect class Codex r1
+# found: producer worlds and viewer validator disagree on at least seven
+# keys (level always-absent vs required, era int vs string, researching
+# None, absent flags, digest_consistent allowed, truncated.cities
+# allowed, owned_tiles_columns optional). The test exercises the REAL
+# capture() output over FakeMod(minors=True) — not a hand-built fixture —
+# through validate_world AND through both downstream consumers
+# (minimap.build spectator route + dashboard_compare.spectator_world_summary).
+# Any future divergence between producer key names and consumer validator
+# rules surfaces here as a clear failure pointing to the mismatched field.
+
+
+async def test_capture_validate_both_consumers_round_trip():
+    from civ_arena import dashboard_compare, minimap
+    from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
+    from civ_arena.game.civ6.firetuner import FireTunerAdapter
+
+    server = FakeTunerServer(mod=FakeMod(minors=True))
+    port = await server.start()
+    adapter = FireTunerAdapter("127.0.0.1", port)
+    try:
+        await adapter.setup({})
+        # Real capture (not a fixture): every field comes through the
+        # FakeMod dispatch + parsers + package() path.
+        world = await wc.capture(adapter, turn=2, after_seat=0,
+                                 include_palette=True)
+
+        # Consumer #1: validate_world. This is where Codex r1 found
+        # the P0 — the closed key sets must match what the producer
+        # actually emits today.
+        validated = minimap.validate_world(world)
+        # M4 producer always emits palette_confirmed=false; viewer
+        # trusts engine palette ints ONLY when true (Amendment 3 item 9).
+        assert validated.get("palette_confirmed") is False
+        # The byte cap may not have dropped anything in this small run;
+        # but the doc must be well-formed and the truncation record
+        # must at least carry {tiles, world} = bool keys.
+        assert isinstance(validated["truncated"]["tiles"], bool)
+        assert isinstance(validated["truncated"]["world"], bool)
+
+        # Consumer #2: minimap.build on the spectator route. Wrap the
+        # world in a minimal event log and prove the bundle carries it.
+        events = [
+            {"seq": 0, "kind": "MATCH_START", "turn": 0,
+             "match_id": "m", "game_instance_id": "gi",
+             "phase_player_id": -1, "player_id": None,
+             "visibility_scope": "referee",
+             "ts": "2026-09-08T00:00:00+00:00",
+             "config": {"agents": [[0, 0]]}},
+            {"seq": 1, "kind": "HEARTBEAT", "turn": 2,
+             "match_id": "m", "game_instance_id": "gi",
+             "phase_player_id": -1, "player_id": None,
+             "agent_id": None, "visibility_scope": "spectator",
+             "audit": "spectator_world", "after_seat": 0,
+             "world": validated,
+             "ts": "2026-09-08T00:00:01+00:00"},
+        ]
+        bundle = minimap.build([], events, spectator=True)
+        assert bundle.get("world", {}).get("schema") == 1
+        # The roster must include the city-state kind and the
+        # producer's level-absent path must not be silently dropped.
+        kinds = {row.get("kind") for row in bundle["world"]["roster"]}
+        assert "city_state" in kinds
+        for row in bundle["world"]["roster"]:
+            assert "level" not in row, "roster level must be absent (Amendment 1)"
+
+        # Consumer #3: dashboard_compare.spectator_world_summary.
+        # It must read the same audit and emit a per-player summary
+        # whose latest-≤-cutoff rule applies.
+        warnings: list = []
+        summary = dashboard_compare.spectator_world_summary(
+            events, warnings, _NoopRedactor())
+        assert summary is not None
+        assert summary["records"], "summary must include the captured audit"
+        latest = summary["records"][-1]
+        assert latest["turn"] == 2 and latest["after_seat"] == 0
+    finally:
+        await adapter.teardown()
+        await server.stop()
+
+
+class _NoopRedactor:
+    """The minimal redactor shape dashboard_compare expects."""
+
+    def text(self, value):
+        return value
+
+    def sensitive(self, key):
+        return False
