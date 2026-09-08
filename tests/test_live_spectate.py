@@ -374,20 +374,28 @@ async def test_multiple_turn_boundaries_in_one_poll_do_not_forge_historical_snap
 
 async def test_sparse_player_ids_and_unconfigured_actor_classes_have_coverage_status(
         tmp_path) -> None:
-    """The OVERVIEW read discovers the REAL roster — sparse ids beyond the
-    configured set (a city-state at pid 63) get explicit coverage status;
-    the configured set is a claim, the board is the truth."""
-    mod = _spectate_mod()
+    """The mod's all-players ROSTER read discovers the REAL board — sparse
+    ids beyond the configured set get CLASS-AWARE coverage status (a
+    city-state at pid 63 is a minor; a sparse major at pid 7 is reported
+    as an unconfigured MAJOR). The configured set is a claim; the board
+    is the truth (CAP-R1 #8: OVX-shaped reads enumerate alive majors
+    only, which made minors undiscoverable)."""
+    mod = _spectate_mod(minor_seats=[63])
+    mod.players[7] = {"gold": 0, "researching": "", "researched": []}
     mod.players[63] = {"gold": 0, "researching": "", "researched": []}
     rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=1)
     assert rc == 0
     roster = next(e for e in events if e.get("audit") == "roster_discovery")
-    assert roster["discovered"] == [0, 1, 63]
+    assert roster["discovered"] == [0, 1, 7, 63]
     assert roster["observed"] == [0, 1]
-    assert roster["unconfigured_discovered"] == [63]
-    assert roster["actor_classes"]["63"] == "minor_or_unconfigured"
+    assert roster["unconfigured_discovered"] == [7, 63]
+    assert roster["unconfigured_majors"] == [7]
+    assert roster["minors"] == [63]
+    assert roster["actor_classes"]["63"] == "minor"
+    assert roster["actor_classes"]["7"] == "unconfigured_major"
     assert roster["actor_classes"]["0"] == "observed_major"
-    assert summary["roster"]["unconfigured_discovered"] == [63]
+    assert summary["roster"]["unconfigured_majors"] == [7]
+    assert summary["roster"]["minors"] == [63]
 
 
 async def test_bootstrap_and_teardown_are_inside_spectator_command_audit(

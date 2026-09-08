@@ -432,10 +432,11 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
-        if doc["mod_version"] != "0.3.10":
+        if doc["mod_version"] != "0.4.0":
             raise RuntimeError(
-                "PuppeteerMod 0.3.10 required for guarded handoff, owner-qualified IDs "
-                "checked restore completion, and silent native lease hooks")
+                "PuppeteerMod 0.4.0 required for guarded handoff, owner-qualified IDs "
+                "checked restore completion, silent native lease hooks, per-player "
+                "ambient windows, and the all-players roster")
         if doc.get("supports_guarded_handoff") is not True:
             raise RuntimeError("PuppeteerMod guarded_handoff capability required")
         if doc.get("supports_reward_receipts") is not True:

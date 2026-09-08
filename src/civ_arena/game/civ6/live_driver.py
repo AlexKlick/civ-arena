@@ -1133,7 +1133,15 @@ async def phase_spectate(
         return rows
 
     await transport.setup({})
-    await transport.inject_mod(mod_lua)
+    caps = await transport.inject_mod(mod_lua)
+    # CAP-R1 #1/#8: fail CLOSED against a mod that would corrupt the data
+    # — per-player ambient windows and the all-players roster are REQUIRED
+    # (an older mod answers false; the handshake parses fail-closed).
+    if not caps.get("supports_ambient_windows") \
+            or not caps.get("supports_roster"):
+        raise RuntimeError(
+            "PuppeteerMod per-player ambient windows + roster required "
+            f"for spectate (mod >= 0.4.0): {caps}")
     await driver.match_start()
     audit("run_identity", identity=driver.capture_launch_identity(mod_lua),
           fake=adapter._simulate is not None)  # noqa: SLF001
@@ -1147,25 +1155,38 @@ async def phase_spectate(
             audit("engine_status", turn=engine_turn_at_attach,
                   turn_active=status.get("TURN_ACTIVE"),
                   attached_mid_turn=attached_mid_turn)
-            # F-08: roster DISCOVERY — the configured observed set is a
-            # claim; the board is the truth. Sparse/unconfigured ids
-            # (city-states, free cities) get explicit coverage status.
-            roster_doc = await transport.observe(
-                ObserveRequest(kind=ObserveKind.OVERVIEW, player_id=human))
-            discovered = sorted(int(p)
-                                for p in (roster_doc.get("players") or {}))
+            # F-08/CAP-R1 #8: roster DISCOVERY from the mod's all-players
+            # read — every OVX-shaped read enumerates alive MAJORS only,
+            # which made city-states undiscoverable. The configured set is
+            # a claim; the board is the truth. Classes now come WITH the
+            # discovery: minors are their own coverage class, and an
+            # unconfigured MAJOR is reported as such.
+            discovered_classes = await transport.roster()
+            discovered = sorted(discovered_classes)
             configured = list(sc.observed_players)
+            if human not in discovered_classes:
+                raise RuntimeError(
+                    f"human seat {human} is not on the board "
+                    f"(roster: {discovered_classes}) — refusing to record "
+                    "a game the phase cannot bound")
             roster = {
                 "configured": configured,
                 "discovered": discovered,
-                "observed": [p for p in configured if p in discovered],
+                "observed": [p for p in configured
+                             if p in discovered_classes],
                 "unconfigured_discovered":
                     [p for p in discovered if p not in configured],
                 "configured_missing":
-                    [p for p in configured if p not in discovered],
+                    [p for p in configured if p not in discovered_classes],
+                "unconfigured_majors":
+                    [p for p in discovered if p not in configured
+                     and discovered_classes[p] == "major"],
+                "minors": [p for p in discovered
+                           if discovered_classes[p] == "minor"],
                 "actor_classes": {
                     str(p): ("observed_major" if p in configured
-                             else "minor_or_unconfigured")
+                             else "minor" if discovered_classes[p] == "minor"
+                             else "unconfigured_major")
                     for p in discovered},
             }
             audit("roster_discovery", **roster)
@@ -1350,14 +1371,22 @@ async def phase_spectate(
     finally:
         # CAP-02: the honest outcome class for the summary (keys-only
         # addition — the loop body above is CAP-01's surface)
+        # CAP-R1 #9: teardown still runs FIRST (its lifecycle entry stays
+        # inside the census the summary reports) but a teardown FAULT can
+        # never discard the closeout — MATCH_END/summary always write, the
+        # fault is recorded in cleanup.status and names the failure.
+        cleanup_status = "disconnect_only_no_game_actions_no_leases"
+        try:
+            await transport.teardown()
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal here
+            cleanup_status = (f"teardown_error: {type(exc).__name__}: "
+                              f"{ui_control.redact(str(exc))[:200]}")
+            if failure is None:
+                failure = f"teardown failed: {type(exc).__name__}"
         outcome = ("completed" if clean and failure is None
                    else {"cancelled": "operator_stopped",
                          "match timeout": "timed_out"}.get(failure,
                                                            "interrupted"))
-        # teardown FIRST so its lifecycle entry is inside the census the
-        # summary reports (disconnect-only — no game action, safe before
-        # the summary writes)
-        await transport.teardown()
         summary = {
             "phase": "spectate", "operator": sc.operator,
             "observed_players": list(sc.observed_players),
@@ -1386,8 +1415,7 @@ async def phase_spectate(
                        "heartbeat_s": limits.heartbeat_s,
                        "turn_budget_s": sc.turn_budget_s},
             "identity": implementation_identity(spec, mod_lua),
-            "cleanup": {"status":
-                        "disconnect_only_no_game_actions_no_leases"},
+            "cleanup": {"status": cleanup_status},
             "elapsed_s": round(time.monotonic() - started, 3),
         }
         await driver.match_end(

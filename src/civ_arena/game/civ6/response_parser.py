@@ -74,6 +74,12 @@ def parse_handshake(lines: list[str]) -> dict[str, Any]:
         and parsed.get("SUPPORTS_GUARDED_HANDOFF") is True,
         "supports_command_diff": present
         and parsed.get("SUPPORTS_COMMAND_DIFF") is True,
+        # v0.4.0 spectate capabilities (CAP-R1 #1/#8): per-player ambient
+        # windows and the all-players roster — fail-closed like the rest
+        "supports_ambient_windows": present
+        and parsed.get("SUPPORTS_AMBIENT_WINDOWS") is True,
+        "supports_roster": present
+        and parsed.get("SUPPORTS_ROSTER") is True,
     }
 
 
