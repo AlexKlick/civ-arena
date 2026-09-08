@@ -10,6 +10,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -159,6 +160,9 @@ class StrategicController:
     _recovery: RecoveryTracker = field(init=False)
     _recovery_proposal: dict | None = field(default=None, init=False)
     directive: dict | None = field(default=None, init=False)
+    # CAP-03 (F-07): identity of the last ACCEPTED directive — quiet turns
+    # re-execute it procedurally and their decision_boundary audits cite it.
+    _directive_id: str | None = field(default=None, init=False)
     _last_turn: int = field(default=0, init=False)
     _last_decision: int = field(default=0, init=False)
     _previous: dict | None = field(default=None, init=False)
@@ -236,6 +240,13 @@ class StrategicController:
         # Poison until the entire turn, including closure and audit, succeeds.
         self._failed = True
         self._turn_strategy_requests = 0
+        # CAP-03 (F-07): one decision identity per turn — quiet procedural
+        # turns get one too, so zero-request turns stay in the cost join.
+        decision_id = uuid.uuid4().hex
+        client = runtime.client
+        if client is not None:
+            client.decision_id = decision_id
+        posts_before = getattr(client, 'posts_sent', 0)
         try:
             curator = ContextCurator(facade, runtime.profile.player_id,
                                      runtime.llm.max_result_chars,
@@ -280,6 +291,7 @@ class StrategicController:
                         raise MatchAborted('capital_unresolved: ' + self._capital.failure_reason)
                 directive = await self._decide(runtime, curator, reasons)
                 self.directive = copy.deepcopy(directive)
+                self._directive_id = uuid.uuid4().hex
                 self._last_decision = turn
             else:
                 directive = copy.deepcopy(self.directive)
@@ -288,6 +300,11 @@ class StrategicController:
                        seed=runtime.profile.seed, directive=directive,
                        persistence='fresh_only_v1', cadence=self.cadence,
                        opening_frozen_unit_ids=sorted(frozen_ids), recovery=recovery)
+            self._emit(runtime, 'decision_boundary', decision_id=decision_id,
+                       directive_id=self._directive_id,
+                       provider_requests=max(
+                           0, getattr(client, 'posts_sent', 0) - posts_before),
+                       source='model' if reasons else 'autopilot')
 
             async def refresh() -> dict:
                 # Scouting consumes map/entities only; refresh economy once afterwards.

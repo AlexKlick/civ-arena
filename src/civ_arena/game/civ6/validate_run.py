@@ -10,7 +10,21 @@ from civ_arena.session.legality import KNOWN_ACTION_TOOLS
 
 def validate(run_dir: Path, rounds: int = 30, *, require_live: bool = True) -> dict:
     records = [json.loads(line) for line in (run_dir / 'events.jsonl').read_text().splitlines()]
-    summary = json.loads((run_dir / 'summary.json').read_text())
+    summary_path = Path(run_dir) / 'summary.json'
+    summary = (json.loads(summary_path.read_text())
+               if summary_path.exists() else None)
+    if summary is not None and summary.get('phase') == 'spectate':
+        return validate_spectate(run_dir, rounds, records=records,
+                                 summary=summary, require_live=require_live)
+    if summary is None:
+        # CAP-02: a summary-less log can only be a running prefix. A
+        # spectate-shaped one audits as such; anything else keeps the
+        # legacy INCOMPLETE behavior (missing summary is not a run).
+        if any(r.get('kind') in ('SPECTATOR_SNAPSHOT', 'HUMAN_TURN_START',
+                                 'HUMAN_TURN_END') for r in records):
+            return validate_spectate(run_dir, rounds, records=records,
+                                     summary=None, require_live=require_live)
+        raise FileNotFoundError(str(summary_path))
     errors = []
     def require(condition, message):
         if not condition:
@@ -104,6 +118,138 @@ def validate(run_dir: Path, rounds: int = 30, *, require_live: bool = True) -> d
                 completed_seat_turns=len(rows), completed_rounds=summary.get('completed_rounds'),
                 structural_replay='event structure only; engine-state replay not proven',
                 movement_allowance=allowance)
+
+
+def validate_spectate(run_dir: Path, rounds: int = 30, *, records=None,
+                     summary=None, require_live: bool = True) -> dict:
+    """Spectate-mode audit (CAP-02): the shared structural core plus a
+    declared FULL profile of outcome/coverage checks. Outcome classes let
+    an interrupted or operator-stopped prefix validate honestly — an
+    unpaired final human-turn START is an observed open interval, not a
+    defect — while a completed run still has to be clean. Structure,
+    integrity, completion, and dataset eligibility are SEPARATE
+    decisions: decision_eligible requires completed + consistent
+    snapshots + closed final interval + no capture gaps. Nothing here
+    re-executes or compares state."""
+    from civ_arena.spectate_audit import (
+        OPEN_PREFIX_OUTCOMES,
+        check_manifest,
+        classify_outcome,
+        final_interval_state,
+        structural_problems,
+    )
+    if records is None:
+        records = [json.loads(line) for line in
+                   (run_dir / 'events.jsonl').read_text().splitlines()]
+    summary_path = Path(run_dir) / 'summary.json'
+    has_summary = summary is not None or summary_path.exists()
+    if summary is None:
+        summary = (json.loads(summary_path.read_text())
+                   if summary_path.exists() else {})
+    errors: list[str] = []
+    eligibility: list[str] = []
+
+    def require(condition, message):
+        if not condition:
+            errors.append(message)
+
+    outcome = classify_outcome(summary)
+    allow_open = outcome in OPEN_PREFIX_OUTCOMES
+    errors.extend(structural_problems(
+        records, summary=summary if has_summary else None,
+        allow_open_prefix=allow_open))
+    final_interval = final_interval_state(records)
+
+    ends = [r for r in records if r['kind'] == 'MATCH_END']
+    if has_summary:
+        require(bool(ends) and ends[-1].get('summary') == summary,
+                'event/summary equality')
+        require(summary.get('violations_total') == 0,
+                'zero watchdog violations')
+        if outcome == 'completed':
+            require(summary.get('clean') is True
+                    and summary.get('aborted') is None, 'clean outcome')
+            require(summary.get('cleanup', {}).get('status') ==
+                    'disconnect_only_no_game_actions_no_leases',
+                    'disconnect-only cleanup')
+            require(summary.get('completed_rounds') == rounds
+                    and summary.get('requested_rounds') == rounds,
+                    'round counts')
+        else:
+            # an honest non-completed record still has to declare its
+            # failure (running_prefix excepted: no summary at all)
+            if outcome != 'running_prefix':
+                require(bool(summary.get('failure_reason')
+                             or summary.get('aborted')),
+                        'failure reason recorded for non-completed outcome')
+            require(summary.get('completed_rounds') == rounds,
+                    'completed round count matches captured rounds')
+        census = summary.get('command_census', {})
+        require(census.get('game_writes') == 0, 'zero game writes')
+        require(census.get('status_polls', 0) >= rounds, 'polled every round')
+        require(isinstance(summary.get('operator'), str)
+                and summary.get('operator'), 'operator identity')
+        require(bool(summary.get('observed_players')), 'observed players')
+        identity = summary.get('identity') or {}
+        require(bool(identity.get('commit')) and bool(identity.get('mod_sha256')),
+                'implementation identity')
+        if require_live:
+            require(identity.get('dirty') is False, 'clean commit identity')
+            run_identity = [r for r in records if r.get('audit') == 'run_identity']
+            require(len(run_identity) == 1
+                    and run_identity[0]['identity'] == identity
+                    and run_identity[0].get('fake') is False,
+                    'identity audit / real engine run')
+        # retained-manifest integrity: a payload changed after closeout
+        # fails here even with untouched sequence numbers
+        errors.extend(check_manifest(Path(run_dir)))
+        # eligibility (does NOT fail the audit — it classifies dataset use)
+        if outcome != 'completed':
+            eligibility.append(f'outcome={outcome} — not decision-eligible '
+                               '(decision samples require completed runs)')
+        if final_interval == 'open':
+            eligibility.append('final interval open (unpaired trailing '
+                               'HUMAN_TURN_START observed)')
+        inconsistent = [s for s in records
+                        if s['kind'] == 'SPECTATOR_SNAPSHOT'
+                        and isinstance(s.get('digest'), dict)
+                        and s['digest'].get('consistent') is False]
+        for s in inconsistent:
+            eligibility.append(
+                f'snapshot at seq {s.get("seq")} consistent=false '
+                '(census observed board movement mid-read)')
+        if isinstance(summary.get('trace_gaps'), int) and summary['trace_gaps']:
+            eligibility.append(
+                f"trace_gaps={summary['trace_gaps']} — rounds lost to ring "
+                'wrap are absent from the record')
+        # a START->END turn span is the honest signature of a lost turn
+        # boundary: one interval covers two engine turns (observed live:
+        # ring-wrap gaps). Reported, never counted as a structural defect.
+        snaps = [r for r in records if r['kind'] == 'SPECTATOR_SNAPSHOT']
+        ends_ = [r for r in records if r['kind'] == 'HUMAN_TURN_END']
+        for i in range(min(len(snaps), len(ends_))):
+            if snaps[i].get('turn') != ends_[i].get('turn'):
+                eligibility.append(
+                    f"round {i + 1} spans turns {snaps[i].get('turn')}"
+                    f"->{ends_[i].get('turn')} — capture-gap signature "
+                    '(a lost turn boundary made one interval cover two turns)')
+    else:
+        eligibility.append('running prefix: no summary — sealed-prefix '
+                           'structural shape only')
+
+    decision_eligible = (not errors and outcome == 'completed'
+                         and final_interval == 'closed' and not eligibility)
+    return dict(status='FAIL' if errors else 'PASS', errors=errors,
+                profile='full', outcome=outcome,
+                final_interval=final_interval,
+                decision_eligible=decision_eligible,
+                eligibility_notes=eligibility,
+                completed_rounds=summary.get('completed_rounds'),
+                structural_replay='structural audit only; no driven tool '
+                                  'calls to re-execute, no state comparison',
+                reexecution_performed=False,
+                comparison_result='not_performed',
+                operator=summary.get('operator'))
 
 
 def main():

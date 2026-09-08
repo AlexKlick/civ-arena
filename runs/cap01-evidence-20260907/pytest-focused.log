@@ -1,0 +1,146 @@
+........................................................................ [ 72%]
+.........................FF                                              [100%]
+=================================== FAILURES ===================================
+_________________________ test_spectator_config_parses _________________________
+
+    def test_spectator_config_parses() -> None:
+        from civ_arena.config import load_config
+        spec = load_config(CONFIG)
+        assert spec.spectate is not None
+        assert spec.spectate.operator == "alexk"
+>       assert spec.spectate.observed_players == (0, 1)
+E       assert (0, 1, 2, 3, 4, 5, ...) == (0, 1)
+E         
+E         Left contains 5 more items, first extra item: 2
+E         Use -v to get more diff
+
+tests/test_spectate_rehearsal.py:25: AssertionError
+______________________ test_spectate_rehearsal_end_to_end ______________________
+
+tmp_path = PosixPath('/tmp/pytest-of-alexk/pytest-8914/test_spectate_rehearsal_end_to0')
+
+    def test_spectate_rehearsal_end_to_end(tmp_path):
+        runs_root = tmp_path / "runs"
+        cmd = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
+               str(CONFIG), "--phase", "spectate", "--fake",
+               "--turns", "3", "--runs-root", str(runs_root)]
+        proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
+                              timeout=300.0)
+>       assert proc.returncode == 0, proc.stderr + proc.stdout
+E       AssertionError: Unhandled exception in client_connected_cb
+E         transport: <_SelectorSocketTransport closed fd=9>
+E         Traceback (most recent call last):
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 1003, in _handle
+E             await self._handle_command(msg, writer)
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 1038, in _handle_command
+E             lines = self.mod.respond(code)
+E                     ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 832, in respond
+E             self._ambient_windows[pid] = self._snapshot(pid)
+E                                          ^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 245, in _snapshot
+E             "player": (self.players[pid]["gold"],
+E                        ~~~~~~~~~~~~^^^^^
+E         KeyError: 2
+E         Unhandled exception in client_connected_cb
+E         transport: <_SelectorSocketTransport closed fd=9>
+E         Traceback (most recent call last):
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 1003, in _handle
+E             await self._handle_command(msg, writer)
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 1038, in _handle_command
+E             lines = self.mod.respond(code)
+E                     ^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 832, in respond
+E             self._ambient_windows[pid] = self._snapshot(pid)
+E                                          ^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/fake_tuner_server.py", line 245, in _snapshot
+E             "player": (self.players[pid]["gold"],
+E                        ~~~~~~~~~~~~^^^^^
+E         KeyError: 2
+E         Traceback (most recent call last):
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/connection.py", line 152, in _execute_and_collect
+E             return await self._locked_execute(state_index, lua_code, timeout)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/connection.py", line 181, in _locked_execute
+E             msg = await tuner_client.recv_message_timeout(
+E                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/tuner_client.py", line 60, in recv_message_timeout
+E             return await asyncio.wait_for(recv_message(reader), timeout=timeout)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+E             return await fut
+E                    ^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/tuner_client.py", line 47, in recv_message
+E             header = await reader.readexactly(HEADER_SIZE)
+E                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/streams.py", line 750, in readexactly
+E             raise exceptions.IncompleteReadError(incomplete, n)
+E         asyncio.exceptions.IncompleteReadError: 0 bytes read on a total of 8 expected bytes
+E         
+E         During handling of the above exception, another exception occurred:
+E         
+E         Traceback (most recent call last):
+E           File "<frozen runpy>", line 198, in _run_module_as_main
+E           File "<frozen runpy>", line 88, in _run_code
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/live_driver.py", line 1709, in <module>
+E             main()
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/live_driver.py", line 1674, in main
+E             raise SystemExit(asyncio.run(run()))
+E                              ^^^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+E             return runner.run(main)
+E                    ^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+E             return self._loop.run_until_complete(task)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+E             return future.result()
+E                    ^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/live_driver.py", line 1662, in run
+E             return await _dispatch(spec, adapter, opts, mod_lua)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/live_driver.py", line 1698, in _dispatch
+E             return await phase_spectate(
+E                    ^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/live_driver.py", line 1119, in phase_spectate
+E             await open_window(pid)
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/live_driver.py", line 1069, in open_window
+E             await census.open_window(pid)
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/spectate_capture.py", line 162, in open_window
+E             await self._adapter.read_raw(lua_translator.begin_ambient_window(pid))
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/spectate_capture.py", line 311, in read_raw
+E             return await self._adapter.read_raw(lua)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/firetuner.py", line 365, in read_raw
+E             return await self._conn.execute_read(lua)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/connection.py", line 129, in execute_read
+E             return await self._execute_and_collect(self.gamecore_index, lua_code, timeout)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/connection.py", line 157, in _execute_and_collect
+E             return await self._locked_execute(state_index, lua_code, timeout)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/connection.py", line 181, in _locked_execute
+E             msg = await tuner_client.recv_message_timeout(
+E                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/tuner_client.py", line 60, in recv_message_timeout
+E             return await asyncio.wait_for(recv_message(reader), timeout=timeout)
+E                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+E             return await fut
+E                    ^^^^^^^^^
+E           File "/home/alexk/civ-arena-cap01-fidelity-20260907/src/civ_arena/game/civ6/vendor/tuner_client.py", line 47, in recv_message
+E             header = await reader.readexactly(HEADER_SIZE)
+E                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           File "/usr/lib/python3.12/asyncio/streams.py", line 750, in readexactly
+E             raise exceptions.IncompleteReadError(incomplete, n)
+E         asyncio.exceptions.IncompleteReadError: 0 bytes read on a total of 8 expected bytes
+E         
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/alexk/documents/civ-arena/.venv/bin/python', '-m', 'civ_arena.game.civ6.live_driver', '/...mpleteReadError(incomplete, n)\nasyncio.exceptions.IncompleteReadError: 0 bytes read on a total of 8 expected bytes\n').returncode
+
+tests/test_spectate_rehearsal.py:36: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_spectate_rehearsal.py::test_spectator_config_parses - asser...
+FAILED tests/test_spectate_rehearsal.py::test_spectate_rehearsal_end_to_end
+2 failed, 97 passed in 201.73s (0:03:21)

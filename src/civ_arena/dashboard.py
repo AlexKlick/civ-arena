@@ -385,6 +385,7 @@ class DashboardStore:
 def project_events(events, warnings, redactor):
     agents, turns, pending, completed = {}, {}, defaultdict(deque), []
     requests, violations, incomplete = {}, 0, False
+    spectator_snapshots = human_turns = 0
     has_completion_audit = any(e.get('audit') in ('completed_seat_turn', 'run_identity')
                                for e in events)
 
@@ -544,6 +545,10 @@ def project_events(events, warnings, redactor):
                 completed.append((turn['turn'], turn['player_id'], turn['agent_id']))
         elif kind == 'VIOLATION':
             violations += 1
+        elif kind == 'SPECTATOR_SNAPSHOT':
+            spectator_snapshots += 1
+        elif kind == 'HUMAN_TURN_END':
+            human_turns += 1
 
     complete_ids = set(completed)
     if len(complete_ids) != len(completed):
@@ -577,7 +582,8 @@ def project_events(events, warnings, redactor):
         warnings.append('Turn display limit reached; older turns omitted.')
     return {'agents': list(agents.values())[:16], 'turns': result_turns[-MAX_TURNS:],
             'metrics': {'completed_rounds': rounds, 'completed_seat_turns': len(complete_ids),
-                        'requests': sum(requests.values()), 'violations': violations},
+                        'requests': sum(requests.values()), 'violations': violations,
+                        'spectator_snapshots': spectator_snapshots, 'human_turns': human_turns},
             'research': compare['research'], 'timeline': compare['timeline'],
             'warnings': list(dict.fromkeys(warnings))[:40], '_incomplete': incomplete}
 

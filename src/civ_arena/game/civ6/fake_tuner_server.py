@@ -69,6 +69,8 @@ class FakeMod:
         auto_ambient: tuple | None = None,
         injected: bool = True,
         hotseat: list[int] | None = None,
+        spectate: dict | None = None,
+        ambient_diffs: bool = False,
     ) -> None:
         self.version = version
         self.has_status = has_status
@@ -79,6 +81,16 @@ class FakeMod:
         # M18 hotseat mode: the driven players hand the turn to each other
         # (release of the round's last player advances the game turn)
         self.hotseat = list(hotseat) if hotseat else []
+        # Spectator-capture mode: a POLL-DRIVEN engine timeline (the
+        # spectate driver only polls — Status, Trace, Digest, observes —
+        # so the fake advances the game on Status polls). Keys:
+        # human_seat, ai_seats, polls_per_human_turn, ai_effect (callable,
+        # optional), mutate_during_census (bool, optional).
+        self.spectate = spectate
+        self.ambient_diffs = ambient_diffs  # real Begin/End window diffs
+        self._ambient_windows: dict[int, dict[str, object]] = {}
+        self._spectate_polls = 0
+        self._spectate_started = False
         # engine effect that lands inside every ambient window:
         # (kind, entity_type, numeric_id, attr, before, after)
         self.auto_ambient = auto_ambient
@@ -111,6 +123,77 @@ class FakeMod:
         """Engine boundary exposed so tests can model native nonlocal actions."""
         self.local_player = player
 
+    # -- spectator-capture engine timeline -----------------------------------
+
+    def _spectate_poll_tick(self, source: str = "status") -> None:
+        """Advance the fake game on the configured poll types (CAP-01
+        adversarial timeline: ``advance_on`` defaults to ["status"], but
+        tests can make Trace or Digest polls advance the game so
+        interleavings the Status-only timeline cannot produce are
+        exercisable). First poll establishes the attach state —
+        mid-human-turn by default (its HOOK_ENTER in the ring as history),
+        or between-turns with ``attach_turn_active: False`` (stale ring
+        history stays for the driver's drain logic, no fresh ENTER)."""
+        if self.spectate is None:
+            return
+        advance_on = self.spectate.get("advance_on", ["status"])
+        if not self._spectate_started:
+            self._spectate_started = True
+            human = self.spectate["human_seat"]
+            self._switch_local_player(human)
+            if self.spectate.get("attach_turn_active", True):
+                self.turn_active = True
+                # attach-mid-turn: the hook fired before we attached
+                self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
+            return
+        if source not in advance_on:
+            return
+        self._spectate_polls += 1
+        if self._spectate_polls < int(self.spectate.get("polls_per_human_turn", 3)):
+            return
+        self._spectate_polls = 0
+        self._spectate_advance()
+
+    def _spectate_trace_append(self, entry: str) -> None:
+        """Append to the hook ring, honoring the optional ``trace_ring_cap``
+        knob — the REAL mod's ring is a bounded window (64 entries) that
+        evicts from the front; the cap lets tests reproduce wrap gaps."""
+        self.trace.append(entry)
+        cap = int(self.spectate.get("trace_ring_cap", 0)) if self.spectate else 0
+        if cap > 0 and len(self.trace) > cap:
+            self.trace = self.trace[-cap:]
+
+    def _spectate_advance(self) -> None:
+        human = self.spectate["human_seat"]
+        self.turn_active = False
+        self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
+        for ai in self.spectate.get("ai_seats", []):
+            self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{ai}")
+            self._spectate_ai_effect(ai)
+            self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{ai}")
+        self._advance_turn_effects()
+        self.turn += 1
+        # the engine refreshes every unit's movement at the new turn —
+        # without this the AI effect could only ever fire once
+        for unit in self.units.values():
+            unit["moves"] = 2
+        self.turn_active = True
+        self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
+
+    def _spectate_ai_effect(self, ai: int) -> None:
+        """The engine AI's turn action — a REAL mini-engine mutation so the
+        omniscient census, digest, and ambient windows all observe it."""
+        effect = self.spectate.get("ai_effect") if self.spectate else None
+        if callable(effect):
+            effect(self)
+            return
+        for uid in sorted(self.units):
+            u = self.units[uid]
+            if u["owner"] == ai and u["moves"] > 0:
+                u["x"] += 1
+                u["moves"] = 0
+                break
+
     def _production_hash(self, item: str) -> int:
         prefix = "UNIT_" if self.BUILDABLE.get(item, (0, "building"))[1] == "unit" \
             else "BUILDING_"
@@ -124,6 +207,15 @@ class FakeMod:
             0: {"gold": 100, "researching": "", "researched": []},
             1: {"gold": 100, "researching": "", "researched": []},
         }
+        # spectate mode may observe more seats than the 2-major mini
+        # engine models (the live config declares the game's full major
+        # set) — seed any extra observed seats so window snapshots and
+        # censuses work; default (non-spectate) fixtures stay unchanged.
+        if self.spectate:
+            for pid in ([self.spectate.get("human_seat", 0)]
+                        + list(self.spectate.get("ai_seats", []))):
+                self.players.setdefault(
+                    pid, {"gold": 100, "researching": "", "researched": []})
         self.units: dict[int, dict] = {
             # owner 0: a far settler (founds turn 1), a warrior (fortifies),
             # a near settler (marches), an archer (attack-path tests)
@@ -398,6 +490,10 @@ class FakeMod:
                                 + ";".join(sorted(p["researched"])))
             return rows + ["---END---"]
         if 'print("UNITS|1")' in code:
+            if self.spectate and self.spectate.get("mutate_during_census"):
+                # census-drift knob: the board moves between the digest
+                # bracket reads — exercises the consistency retry
+                self.state_nonce += 1
             rows = []
             for uid, u in sorted(self.units.items()):
                 q, r = _ax(u["x"], u["y"])
@@ -587,10 +683,12 @@ class FakeMod:
         if "Puppeteer.Status" in code:
             if not self.has_status:
                 return ["MOD_STATUS|unavailable"]
+            self._spectate_poll_tick("status")
             return self._status_rows()
         if "Puppeteer.Digest" in code:
             if not self.has_digest:
                 return ["MOD_DIGEST|unavailable"]
+            self._spectate_poll_tick("digest")
             return [self._digest()]
         if "NotificationManager.GetList" in code:
             if self.pending_blockers:
@@ -609,6 +707,7 @@ class FakeMod:
         if "Puppeteer.Trace" in code:
             # the mod v0.3.1 hook ring (minimal model: the turn-start /
             # lease / deactivate events the driver's targeting reads)
+            self._spectate_poll_tick("trace")
             return ["\n".join(self.trace)] if self.trace else ["---END---"]
         match = re.search(r"Puppeteer.BeginRewardCommand\(\d+, \d+, \d+, '([0-9a-f]{64})'", code)
         if match:
@@ -736,18 +835,31 @@ class FakeMod:
             return ["PUPPET_ACTIVE|false", "ENDTURN_SENT|0"]
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
-            return [f"AMBIENT_WINDOW|open|{m.group(1)}"]
+            pid = int(m.group(1))
+            if self.ambient_diffs:
+                # real window semantics: snapshot now, diff at End
+                self._ambient_windows[pid] = self._snapshot(pid)
+            return [f"AMBIENT_WINDOW|open|{pid}"]
         m = re.search(r"Puppeteer\.EndAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
-            # engine effects land inside the window (auto_ambient fixture):
-            # the window diff books them as DECLARED ambient rows
-            if self.auto_ambient is not None:
+            pid = int(m.group(1))
+            if self.ambient_diffs:
+                snap = self._ambient_windows.pop(pid, None)
+                if snap is not None:
+                    # same parity as the mod: window diffs are AMBIENT rows
+                    # (7-field LEDGER shape with the AMBIENT prefix)
+                    for row in self._diff(pid, snap):
+                        self.ambient_rows.append(
+                            "AMBIENT|" + row.split("|", 1)[1])
+            elif self.auto_ambient is not None:
+                # engine effects land inside the window (auto_ambient
+                # fixture): the window diff books them as DECLARED rows
                 kind, etype, num, attr, before, after = self.auto_ambient
                 prefix = "c" if etype == "city" else "u"
                 self.ambient_rows.append(
                     f"AMBIENT|{kind}|{etype}|{prefix}{m.group(1)}:{num}"
                     f"|{attr}|{before}|{after}")
-            return [f"AMBIENT_WINDOW|closed|{m.group(1)}"]
+            return [f"AMBIENT_WINDOW|closed|{pid}"]
 
         # -- Simulate.*: FAKE-ONLY (the live driver must never send these) --
         m = re.search(r"Simulate\.TurnStart\(\s*(\d+)\s*\)", code)

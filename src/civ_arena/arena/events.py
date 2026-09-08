@@ -21,6 +21,11 @@ EVENT_KINDS = frozenset({
     "MATCH_START", "LEASE_GRANT", "LEASE_RELEASE", "LEASE_EXPIRED", "AMBIENT",
     "TOOL_CALL", "TOOL_RESULT", "VIOLATION", "CHECKPOINT", "TURN_END",
     "MATCH_END", "HEARTBEAT", "UNAUTHORIZED_TOOL_CALL",
+    # Spectator-capture lane: a human plays the seat at the keyboard; the
+    # harness only observes. Ambient rows ride INSIDE these payloads (never
+    # as top-level AMBIENT events — replay compares those against a sim
+    # replay) and the kinds are outside the comparable strip by construction.
+    "SPECTATOR_SNAPSHOT", "HUMAN_TURN_START", "HUMAN_TURN_END",
 })
 
 NAMESPACE_FIELDS = (
