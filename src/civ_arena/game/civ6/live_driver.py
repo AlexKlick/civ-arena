@@ -40,7 +40,7 @@ from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import AgentSpec, MatchSpec, load_config
 from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
-from civ_arena.game.civ6 import lua_translator, response_parser, ui_control
+from civ_arena.game.civ6 import lua_translator, response_parser, ui_control, world_capture
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
 from civ_arena.game.civ6.spectate_capture import (
@@ -621,6 +621,9 @@ class HotseatLimits:
     recovery: float = 180
     sweeps: int = 8
     cleanup: float = 20
+    # M4: budget for one spectator_world capture (baseline + one per
+    # completed seat turn); additive — __post_init__ covers it.
+    spectator: float = 20.0
 
     def __post_init__(self):
         if any(v <= 0 for v in asdict(self).values()):
@@ -806,6 +809,36 @@ async def phase_dispatch_hotseat(
         driver._write("HEARTBEAT", turn=int((status or {}).get("TURN", 0)),
                       audit=event, **payload)
 
+    async def _spectator_capture(turn, after_seat):
+        """M4 §4a: one omniscient world audit through the EXISTING audit
+        machinery (NO new EVENT_KINDS) — a HEARTBEAT carrying
+        audit="spectator_world" with visibility_scope="spectator" so no
+        player-routed view can ever consume it. Every capture runs under
+        asyncio.timeout(limits.spectator) on the SAME connection (the
+        SPECW/OVX/CITIES reads go through adapter.read_raw/write_raw —
+        one GameConnection._lock, no second tuner client); ANY failure is
+        audited as spectator_world_failed with the message redacted and
+        the match continues — the audit must never kill the run."""
+        if not spec.spectator_capture:
+            return
+        try:
+            async with asyncio.timeout(limits.spectator):
+                world = await world_capture.capture(
+                    adapter, turn=turn, after_seat=after_seat,
+                    include_palette=True)
+            world["fog_audit"] = adapter.fog_audit_for(
+                after_seat if after_seat >= 0 else 0)
+            driver._write(  # noqa: SLF001
+                "HEARTBEAT", turn=turn, phase_player_id=-1, player_id=None,
+                agent_id=None, visibility_scope="spectator",
+                audit="spectator_world", after_seat=after_seat, world=world)
+        except Exception as exc:  # noqa: BLE001 — audited, never fatal
+            driver._write(  # noqa: SLF001
+                "HEARTBEAT", turn=turn, phase_player_id=-1, player_id=None,
+                agent_id=None, visibility_scope="spectator",
+                audit="spectator_world_failed", after_seat=after_seat,
+                error=ui_control.redact(f"{type(exc).__name__}: {exc}"))
+
     popups = PopupMonitor(adapter, controller, audit, timeout=limits.recovery,
                          attempts=limits.sweeps)
     recovery = RecoveryEpisode(limits, popups, audit, run_dir, popup_check=popups.check)
@@ -957,6 +990,9 @@ async def phase_dispatch_hotseat(
                 await adapter.read_raw(lua_translator.set_puppet(pid, True))
             await _attach_initial_hotseat_turn(adapter, ledger.order[0], audit)
             await adapter.refresh_digest()
+        # M4 §4a baseline: one spectator_world right after the
+        # initial-attach step (after_seat=-1 — no seat has completed yet).
+        await _spectator_capture(adapter._turn_mirror, -1)  # noqa: SLF001
         adapter.handoff_wait = wait_release
         adapter.handoff_start = start_handoff
         adapter.human_seats = tuple(ledger.order)
@@ -1007,6 +1043,7 @@ async def phase_dispatch_hotseat(
                             row["digest_changed"] and not (allowed or housekept))
                         ledger.append(row, lease)
                         audit("completed_seat_turn", row=row)
+                        await _spectator_capture(turn, agent.player_id)
                         print(f"hotseat turn {turn} p{seat_pid}: "
                               f"{len(ledger.rows)} completed", flush=True)
                         if row["unexpected"] or row["violations"]:
@@ -1695,6 +1732,8 @@ def main() -> None:
     opts = ap.parse_args()
     spec = load_config(opts.config)
     mod_lua = opts.mod_path.read_text(encoding="utf-8")
+    visible_map_context = (spec.live.visible_map_context
+                           if spec.live is not None else "gamecore")
 
     async def run() -> int:
         task = asyncio.current_task()
@@ -1720,7 +1759,8 @@ def main() -> None:
             port = await server.start()
             adapter = FireTunerAdapter(
                 "127.0.0.1", port,
-                simulate_hook=_fake_hook, poll_timeout_s=2.0)
+                simulate_hook=_fake_hook, poll_timeout_s=2.0,
+                visible_map_context=visible_map_context)
             try:
                 return await _dispatch(spec, adapter, opts, mod_lua)
             finally:
@@ -1731,7 +1771,8 @@ def main() -> None:
             opts.host, opts.port,
             conn=TapConnection(opts.host, opts.port, run_dir / "wire.jsonl"),
             end_phase_strategy=opts.strategy,
-            turn_wait_s=float(opts.engage_timeout))
+            turn_wait_s=float(opts.engage_timeout),
+            visible_map_context=visible_map_context)
         return await _dispatch(spec, adapter, opts, mod_lua)
 
     raise SystemExit(asyncio.run(run()))

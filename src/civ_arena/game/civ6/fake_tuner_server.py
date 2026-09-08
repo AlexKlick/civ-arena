@@ -71,6 +71,8 @@ class FakeMod:
         hotseat: list[int] | None = None,
         spectate: dict | None = None,
         ambient_diffs: bool = False,
+        minors: bool = False,
+        fail_spectator: bool = False,
     ) -> None:
         self.version = version
         self.has_status = has_status
@@ -78,6 +80,13 @@ class FakeMod:
         self.has_command_diff = has_command_diff
         self.supports_freeze = supports_freeze
         self.supports_ledger = supports_ledger
+        # M4: player 12 city-state (one city + one unit, IsMajor false,
+        # never in the OVX majors) — the default-off knob keeps every
+        # legacy fixture byte-identical.
+        self.minors = {12} if minors else set()
+        # M4: the SPECW world reads raise (rehearses the
+        # spectator_world_failed path — the match must continue).
+        self.fail_spectator = fail_spectator
         # M18 hotseat mode: the driven players hand the turn to each other
         # (release of the round's last player advances the game turn)
         self.hotseat = list(hotseat) if hotseat else []
@@ -235,6 +244,18 @@ class FakeMod:
                 "pop": 1, "queue": ""},
         }
         self.next_city_id = 2
+        # M4 minors: the city-state seat (roster row kind=city_state, one
+        # city + one unit) — its rows ride UNITS/CITIES/SPECW reads, never
+        # the OVX majors.
+        for pid in self.minors:
+            self.players.setdefault(
+                pid, {"gold": 20, "researching": "", "researched": []})
+            self.units[900 + pid] = {
+                "owner": pid, "type": "WARRIOR", "x": 8, "y": 8,
+                "moves": 2, "damage": 0, "fortified": False}
+            self.cities[90 + pid] = {
+                "owner": pid, "name": "CITYSTATE", "x": 8, "y": 8,
+                "pop": 2, "queue": ""}
 
     # -- the M17c targeted map read ----------------------------------------
 
@@ -479,10 +500,81 @@ class FakeMod:
         # game-level probes (the fake IS the whole game, mod included)
         if 'print("TS|1")' in code:
             return [f"TURN|{self.turn}", "LOCAL|0", "PUPPET_ACTIVE|false"]
+        # M4: the spectator world reads rehearse their FAILURE path too
+        if self.fail_spectator and 'print("SPECW|' in code:
+            return ["ERR:FAKE spectator world disabled"]
+        # -- M4 observes over the mini engine (new markers, new dispatch;
+        # every legacy marker's response bytes stay untouched) --
+        if 'print("OVX|2")' in code:
+            rows = [f"TURN|{self.turn}"]
+            for pid, p in sorted(self.players.items()):
+                if pid in self.minors:
+                    continue  # city-states never ride the majors read
+                rows.append(
+                    f"OVROW|{pid}|CIVILIZATION_FAKE{pid}|{p['gold']}"
+                    f"|{p['researching'] or '-'}"
+                    f"|{10 + pid}|{8 + pid}|{5 + pid}|{2 + pid}|{1 + pid}"
+                    f"|{pid}|CIVIC_FAKE|{7 + pid}|{60 + pid}")
+                if p["researched"]:
+                    rows.append("OVRESEARCHED|" + str(pid) + "|"
+                                + ";".join(sorted(p["researched"])))
+                rows.append(f"OVCIVICS|{pid}|CIVIC_FAKE")
+            rows.append("OVERA|ERA_FAKE")
+            return rows + ["---END---"]
+        if 'print("CITIES|2")' in code:
+            rows = []
+            for cid, c in sorted(self.cities.items()):
+                q, r = _ax(c["x"], c["y"])
+                major = "false" if c["owner"] in self.minors else "true"
+                capital = "true" if cid == 1 else "false"
+                buildings = "BUILDING_MONUMENT" if cid == 1 else "-"
+                districts = "DISTRICT_CITY_CENTER" if cid == 1 else "-"
+                prodturns = "10" if c["queue"] else "-1"
+                rows.append(
+                    f"CITYROW|c{c['owner']}:{cid}"
+                    f"|{c['owner']}|{c['name']}|{q}|{r}"
+                    f"|{c['pop']}|{c['queue'] or '-'}|{major}|{capital}"
+                    f"|200|200|{10 + cid}|{15 + cid}|3|5|{prodturns}"
+                    f"|{buildings}|{districts}")
+            return ["CITIES|2", *rows, "---END---"]
+        if 'print("SPECW|1|roster")' in code:
+            rows = []
+            for pid in sorted(self.players):
+                major = "false" if pid in self.minors else "true"
+                kind = "city_state" if pid in self.minors else "major"
+                rows.append(f"PLAYERROW|{pid}|CIVILIZATION_FAKE{pid}"
+                            f"|LEADER_FAKE{pid}|{major}|false|true"
+                            f"|?|{kind}|-1")
+            return ["SPECW|1|roster", *rows, "---END---"]
+        if 'print("SPECW|1|tiles")' in code:
+            owned: dict[tuple[int, int], int] = {}
+            centres = {_ax(c["x"], c["y"]) for c in self.cities.values()}
+            for c in sorted(self.cities.values(), key=lambda city: city["x"]):
+                cq, cr = _ax(c["x"], c["y"])
+                for dq, dr in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1),
+                               (1, -1), (-1, 1)):
+                    key = (cq + dq, cr + dr)
+                    owned.setdefault(key, c["owner"])
+            rows = []
+            for (q, r), owner in sorted(owned.items()):
+                terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
+                district = ("DISTRICT_CITY_CENTER" if (q, r) in centres
+                            else "-")
+                resource = "RESOURCE_IRON" if (q * 7 + r * 13) % 11 == 5 else "-"
+                rows.append(f"OWNEDROW|{q}|{r}|{owner}|{terrain}|-|{resource}"
+                            f"|-|{district}|false|-1")
+            return ["SPECW|1|tiles", "GRID|40|40|1600", *rows,
+                    f"TILES_END|{len(rows)}", "---END---"]
+        if 'print("SPECW|1|palette")' in code:
+            rows = [f"COLORROW|{pid}|{-1000000 - pid}|{-2000000 - pid}"
+                    for pid in sorted(self.players) if pid not in self.minors]
+            return ["SPECW|1|palette", *rows, "---END---"]
         # -- M14d observes over the mini engine --
         if 'print("OVX|1")' in code:
             rows = [f"TURN|{self.turn}"]
             for pid, p in sorted(self.players.items()):
+                if pid in self.minors:
+                    continue  # city-states never ride the majors read
                 rows.append(f"OVROW|{pid}|CIVILIZATION_FAKE{pid}|{p['gold']}"
                             f"|{p['researching'] or '-'}")
                 if p["researched"]:
@@ -509,11 +601,41 @@ class FakeMod:
         if 'print("CITIES|1")' in code:
             rows = []
             for cid, c in sorted(self.cities.items()):
+                if c["owner"] in self.minors:
+                    continue  # the lite read enumerates majors only
                 q, r = _ax(c["x"], c["y"])
                 rows.append(f"CITYROW|c{c['owner']}:{cid}"
                             f"|{c['owner']}|{c['name']}|{q}|{r}"
                             f"|{c['pop']}|{c['queue'] or '-'}")
             return ["CITIES|1", *rows, "---END---"]
+        if 'print("VMAP|4")' in code:
+            # M4 targeted read: same derived-visible coords as VMAP|3, but
+            # the 13-field row. Dynamic fields are deterministic so the
+            # parser/fog-audit paths rehearse non-trivial shapes; engvis
+            # disagrees on every 5th column (the audit must REPORT that).
+            coords = re.findall(r"\{(-?\d+),(-?\d+)\}", code)
+            rows = []
+            for x_s, y_s in coords:
+                q, r = _ax(int(x_s), int(y_s))
+                terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
+                owner = -1
+                city = ""
+                for cid, c in self.cities.items():
+                    cq, cr = _ax(c["x"], c["y"])
+                    if (cq, cr) == (q, r):
+                        owner = c["owner"]
+                        city = f"c{c['owner']}:{cid}"
+                feature = "FEATURE_FOREST" if (q * 5 + r * 3) % 9 == 2 else "-"
+                resource = "RESOURCE_IRON" if (q * 7 + r * 13) % 11 == 5 else "-"
+                improvement = "IMPROVEMENT_FARM" if (q * 3 + r) % 13 == 4 else "-"
+                district = "DISTRICT_CITY_CENTER" if city else "-"
+                river = "true" if (q + r) % 7 == 0 else "false"
+                appeal = str((q * 7 + r * 13) % 101)
+                engvis = "false" if q % 5 == 0 else "true"
+                rows.append(f"TILEROW|{q}|{r}|{terrain}|true|{owner}|{city}"
+                            f"|{feature}|{resource}|{improvement}|{district}"
+                            f"|{river}|{appeal}|{engvis}")
+            return ["VMAP|4", f"TURN|{self.turn}", *rows, "---END---"]
         if 'print("VMAP|3")' in code:
             # the targeted read: the adapter derived the visible set and
             # asks for exactly those axial coords (offset-encoded in the

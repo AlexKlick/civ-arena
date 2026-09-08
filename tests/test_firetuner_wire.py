@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from civ_arena.game.adapter import ObserveKind, ObserveRequest
@@ -108,6 +110,55 @@ async def test_parser_kv_and_rows():
                                 ["1", "CIVILIZATION_KOREA"]]
 
 
+async def test_parser_visible_map_13_field_rows_and_owner_rule():
+    """M4 VMAP|4: static keys (feature, river) ride EVERY row regardless
+    of the vis flag; dynamic keys (resource, improvement, district,
+    appeal, engine_visible) exist ONLY on `true` rows; '?' = unread ->
+    absent, '-' = observed none -> ''/False. Legacy 6-field rows parse
+    unchanged."""
+    from civ_arena.game.civ6.response_parser import parse_visible_map
+
+    parsed = parse_visible_map([
+        "VMAP|4", "TURN|3",
+        # visible: everything present; '-' resource = observed none
+        "TILEROW|1|0|TERRAIN_GRASS|true|0||FEATURE_FOREST|-|"
+        "IMPROVEMENT_FARM|-|true|12|true",
+        # not visible: static keys stay, dynamic keys ABSENT regardless
+        "TILEROW|2|0|TERRAIN_GRASS|false|-1||FEATURE_JUNGLE|RESOURCE_IRON|"
+        "-|-|false|7|false",
+        # unread accessors: '?' collapses to absent keys
+        "TILEROW|3|0|TERRAIN_GRASS|true|0||?|?|?|?|?|?|?",
+        "---END---"])
+    vis = parsed["tiles"]["1,0"]
+    assert vis["feature"] == "FEATURE_FOREST"
+    assert vis["resource"] == ""
+    assert vis["improvement"] == "IMPROVEMENT_FARM"
+    assert vis["district"] == ""
+    assert vis["river"] is True
+    assert vis["appeal"] == 12
+    assert vis["engine_visible"] is True
+    fog = parsed["tiles"]["2,0"]
+    assert fog["feature"] == "FEATURE_JUNGLE"
+    assert fog["river"] is False
+    for dynamic in ("resource", "improvement", "district", "appeal",
+                    "engine_visible", "owner", "city"):
+        assert dynamic not in fog, f"dynamic key {dynamic} leaked onto a fog row"
+    unread = parsed["tiles"]["3,0"]
+    for key in ("feature", "river", "resource", "improvement", "district",
+                "appeal", "engine_visible"):
+        assert key not in unread
+    # strict rejections
+    for bad in (["VMAP|4", "TURN|1",
+                 "TILEROW|1|0|GRASS|true|0||F|R|I|D|maybe|1|true"],   # bad river
+                ["VMAP|4", "TURN|1",
+                 "TILEROW|1|0|GRASS|true|0||F|R|I|D|true|1.5|true"],   # bad appeal
+                ["VMAP|4", "TURN|1",
+                 "TILEROW|1|0|GRASS|true|0||F|R|I|D|true|1|maybe"],    # bad engvis
+                ["VMAP|4", "TURN|1", "TILEROW|1|0|GRASS|true|0|x|"]):  # 7 fields
+        with pytest.raises(ValueError):
+            parse_visible_map(bad)
+
+
 async def test_parser_visible_map_mapping_and_failclosed():
     from civ_arena.game.civ6.response_parser import parse_visible_map
 
@@ -179,8 +230,36 @@ async def test_visible_map_feeds_visibility_cache():
         assert rem2, "the abandoned ring stays in memory"
         assert obs2 & rem2 == frozenset()
         assert obs2 | rem2 == frozenset(doc2["tiles"])
+        # M4 (widened pin): remembered rows keep their STATIC keys
+        # (terrain/native_terrain/feature/river) and NEVER carry dynamic
+        # keys or ownership — the pre-M4 pin was {terrain, native_terrain}
         for key in rem2:
-            assert set(doc2["tiles"][key]) == {"terrain", "native_terrain"}
+            assert set(doc2["tiles"][key]) <= {
+                "terrain", "native_terrain", "feature", "river"}
+            assert "owner" not in doc2["tiles"][key]
+            for dynamic in ("resource", "improvement", "district", "appeal",
+                            "engine_visible"):
+                assert dynamic not in doc2["tiles"][key]
+        # visible rows carry the re-validated dynamic keys
+        for key in obs2:
+            tile = doc2["tiles"][key]
+            assert "owner" in tile and "city" in tile
+        # M4 fog audit: the engine answered every requested coordinate
+        # (FakeMod engvis is 'false' on every 5th column — the derived
+        # visible set includes them, so those are REPORTED disagreements,
+        # never dropped)
+        audit = adapter.fog_audit_for(0)
+        assert audit["requested"] > 0
+        assert audit["engine_visible"] + audit["engine_not_visible"] \
+            + audit["unavailable"] == audit["requested"]
+        assert audit["engine_not_visible"] > 0, "fake board must disagree somewhere"
+        assert len(audit["disagree_coords"]) == min(
+            audit["engine_not_visible"], 64)
+        assert all(re.fullmatch(r"-?\d+,-?\d+", c)
+                   for c in audit["disagree_coords"])
+        assert adapter.fog_audit_for(1) == {
+            "requested": 0, "engine_visible": 0, "engine_not_visible": 0,
+            "unavailable": 0, "disagree_coords": []}
         # the second player has NOT observed: still the safe empty sets
         assert adapter.visibility_for(1) == (frozenset(), frozenset())
         await adapter.teardown()
@@ -243,3 +322,11 @@ async def test_adapter_gaps_point_at_live_validation_doc():
         await adapter.teardown()
 
     await with_server(STATUS_DIGEST_CANNED, check)
+
+
+def test_visible_map_context_ctor_validates():
+    for context in ("gamecore", "ingame"):
+        FireTunerAdapter("unused.invalid", 0, visible_map_context=context)
+    for bad in ("GameCore", "lua", "", "ingame "):
+        with pytest.raises(ValueError, match="visible_map_context"):
+            FireTunerAdapter("unused.invalid", 0, visible_map_context=bad)

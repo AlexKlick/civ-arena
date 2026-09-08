@@ -54,6 +54,10 @@ class LLMSpec:
     max_requests_per_match: int = 2000
     adaptive_context: AdaptiveContextSpec | None = None
     research_building_briefing: bool = False
+    # M4: opt-in richer `you` in the curated context (yields/era/civics).
+    # Deliberately WITHOUT research_building_briefing's adaptive-context
+    # coupling — this is an observation widening, not a briefing mode.
+    own_economy_context: bool = False
     # Spectator-capture lane: opt-in full wire transcript under
     # runs/<id>/llm-wire/<agent_id>.jsonl (headers never recorded; the
     # serialized record is swept through the client's redactor).
@@ -110,6 +114,9 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
     briefing = block.get('research_building_briefing', False)
     if type(briefing) is not bool or briefing and adaptive is None:
         raise ConfigError('research_building_briefing requires boolean opt-in and adaptive_context')
+    own_economy = block.get('own_economy_context', False)
+    if type(own_economy) is not bool:
+        raise ConfigError(f'{where}.llm: own_economy_context must be an explicit boolean')
     wire_log = block.get('wire_log', False)
     if type(wire_log) is not bool:
         raise ConfigError(f'{where}.llm: wire_log must be an explicit boolean')
@@ -119,7 +126,8 @@ def _parse_llm(block: Any, where: str) -> LLMSpec:
         max_result_chars=ints["max_result_chars"],
         request_timeout_s=float(timeout), max_retries=ints["max_retries"],
         max_requests_per_match=ints["max_requests_per_match"], adaptive_context=adaptive,
-        research_building_briefing=briefing, wire_log=wire_log,
+        research_building_briefing=briefing, own_economy_context=own_economy,
+        wire_log=wire_log,
     )
 
 
@@ -178,6 +186,36 @@ class SpectateSpec:
 
 SNAPSHOT_SCOPES = frozenset({"ambient", "census", "full"})
 _SAFE_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
+
+
+@dataclass(frozen=True)
+class LiveSpec:
+    """M4 knobs for the live (FireTuner) leg. ``visible_map_context``
+    selects which VM the targeted terrain read runs in: ``gamecore`` (the
+    default — engine visibility via the PlayersVisibility table route is
+    CONFIRMED there, Amendment 1.2) or ``ingame`` (opt-in experiment for
+    InGame-only tile fields; never a fog requirement)."""
+
+    visible_map_context: str = "gamecore"
+
+
+VISIBLE_MAP_CONTEXTS = frozenset({"gamecore", "ingame"})
+
+
+def _parse_live(block: Any) -> LiveSpec:
+    if not isinstance(block, dict):
+        raise ConfigError("live block must be a mapping")
+    unknown = set(block) - {"visible_map_context"}
+    if unknown:
+        raise ConfigError(
+            f"live block has unsupported keys {sorted(unknown)} — only "
+            "visible_map_context is known here")
+    context = block.get("visible_map_context", "gamecore")
+    if context not in VISIBLE_MAP_CONTEXTS:
+        raise ConfigError(
+            "live.visible_map_context must be exactly "
+            f"{sorted(VISIBLE_MAP_CONTEXTS)}, not {context!r}")
+    return LiveSpec(visible_map_context=context)
 
 
 def _parse_spectate(block: Any) -> SpectateSpec:
@@ -258,6 +296,12 @@ class MatchSpec:
     # block (which requires an empty agents roster and the firetuner
     # adapter).
     spectate: SpectateSpec | None = None
+    # M4 hotseat spectator_world audit: one omniscient world capture at
+    # baseline and after every completed seat turn, written to the event
+    # log with visibility_scope="spectator" (never enters model packets).
+    spectator_capture: bool = False
+    # M4 live-leg knobs (None => defaults; the adapter sees "gamecore").
+    live: LiveSpec | None = None
 
     def agent_for_player(self, player_id: int) -> AgentSpec:
         for agent in self.agents:
@@ -373,6 +417,17 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
                 "through the tuner; the simulator has no human to watch)")
     spectate = _parse_spectate(spectate_raw) if spectate_raw is not None else None
 
+    spectator_capture = match.get("spectator_capture", False)
+    if type(spectator_capture) is not bool:
+        raise ConfigError(
+            "match.spectator_capture must be an explicit boolean")
+    if spectator_capture and adapter != "firetuner":
+        raise ConfigError(
+            "match.spectator_capture requires adapter firetuner (the "
+            "spectator world is read through the live tuner)")
+    live_raw = doc.get("live")
+    live = _parse_live(live_raw) if live_raw is not None else None
+
     chaos: list[ChaosSpec] = []
     for i, entry in enumerate(doc.get("chaos", [])):
         chaos.append(ChaosSpec(
@@ -419,6 +474,7 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
         watchdog_mode=watchdog_mode, violation_limit=violation_limit,
         checkpoint_every=checkpoint_every, agents=agents, chaos=chaos,
         recall_runs=recall_runs, spectate=spectate,
+        spectator_capture=spectator_capture, live=live,
     )
 
 

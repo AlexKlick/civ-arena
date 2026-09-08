@@ -209,11 +209,17 @@ def parse_units(lines: list[str], *, qualified: bool = False) -> list[dict[str, 
 
 
 def parse_cities(lines: list[str], *, qualified: bool = False) -> list[dict[str, Any]]:
-    """CITYROW|cid|pid|name|q|r|population|queue -> the omniscient CITIES
-    doc. production_queue is a 0/1-length list (the sim's shape); the
-    placeholder hp/buckets/buildings keys exist because foreign-city
-    projection (post-M14c visibility) reads them — declared approximations
-    until a live accessor is verified."""
+    """CITYROW -> the omniscient CITIES doc. Legacy 7-field rows
+    (cid|pid|name|q|r|population|queue) and M4 18-field extended rows
+    (…|queue|major|capital|hp|maxhp|food|thr|surplus|grow|prodturns|
+    buildings|districts) both parse.
+
+    M4: the legacy PLACEHOLDER keys (hp/food_bucket/production_bucket/
+    buildings) are GONE — an unread key is absent, never a fabricated
+    value; hp+max_hp are both-or-neither with 0 <= hp <= max_hp <= 1e6.
+    production_queue is a 0/1-length list (the sim's shape); a `?` queue
+    (a minor whose build-queue accessor is pcall-guarded) leaves the key
+    absent."""
     out: list[dict[str, Any]] = []
     for line in _split_lines(lines):
         line = line.strip()
@@ -223,22 +229,55 @@ def parse_cities(lines: list[str], *, qualified: bool = False) -> list[dict[str,
         if prefix != "CITYROW":
             raise ValueError(f"non-city row in cities read: {line!r}")
         parts = rest.split("|")
-        if len(parts) != 7:
-            raise ValueError(f"malformed CITYROW (want 7 fields): {line!r}")
-        cid, pid, name, q, r, pop, queue = parts
-        out.append({
+        if len(parts) not in (7, 18):
+            raise ValueError(f"malformed CITYROW (want 7 or 18 fields): {line!r}")
+        cid, pid, name, q, r, pop, queue = parts[:7]
+        row: dict[str, Any] = {
             "city_id": entity_ids.observed(cid, _coerce_strict(pid), "c", qualified=qualified),
             "owner": _coerce_strict(pid),
             "name": name,
             "q": _coerce_strict(q),
             "r": _coerce_strict(r),
             "population": _coerce_strict(pop),
-            "production_queue": [] if queue == "-" else [queue],
-            "hp": 100,
-            "food_bucket": 0,
-            "production_bucket": 0,
-            "buildings": [],
-        })
+        }
+        if queue == "?":
+            pass  # unread (minor's pcall-guarded queue): key absent
+        else:
+            row["production_queue"] = [] if queue == "-" else [queue]
+        if len(parts) == 18:
+            (major, capital, hp, maxhp, food, thr, surplus, grow, prodturns,
+             buildings, districts) = parts[7:]
+            for key, token in (("is_major", major), ("is_capital", capital)):
+                if token == "?":
+                    continue  # unread (Amendment 1.5: unconfirmed accessors)
+                if token not in ("true", "false"):
+                    raise ValueError(f"non-boolean {key} flag: {line!r}")
+                row[key] = token == "true"
+            if hp != "?" or maxhp != "?":
+                if hp == "?" or maxhp == "?":
+                    raise ValueError(f"hp/max_hp must be both-or-neither: {line!r}")
+                hp_v, max_v = _coerce_strict(hp), _coerce_strict(maxhp)
+                if (type(hp_v) is not int or type(max_v) is not int
+                        or not 0 <= hp_v <= max_v <= 1_000_000):
+                    raise ValueError(f"city hp outside 0..max_hp<=1e6: {line!r}")
+                row["hp"], row["max_hp"] = hp_v, max_v
+            for key, token in (("food_bucket", food), ("food_threshold", thr),
+                               ("food_surplus", surplus), ("turns_to_growth", grow),
+                               ("turns_to_production", prodturns)):
+                if token != "?":
+                    value = _coerce_strict(token)
+                    if type(value) is not int:
+                        raise ValueError(f"non-canonical {key}: {line!r}")
+                    row[key] = value
+            for key, token in (("buildings", buildings), ("districts", districts)):
+                if token != "?":
+                    # the wire carries engine TypeNames; buildings strip the
+                    # BUILDING_ prefix to match the doctrine/sim vocabulary
+                    # (the same convention the queue read uses)
+                    names = [] if token == "-" else token.split(";")
+                    row[key] = ([n.removeprefix("BUILDING_") for n in names]
+                                if key == "buildings" else names)
+        out.append(row)
     if qualified and len({c["city_id"] for c in out}) != len(out):
         raise ValueError("duplicate city identity in observation")
     return sorted(out, key=lambda c: entity_ids.sort_key(c["city_id"]))
@@ -248,8 +287,17 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
     """OVX read -> the sim OVERVIEW shape the projection consumes: turn +
     players{str(pid): {player_id, civ_name, gold, researched, researching,
     alive}}. researched rides OVRESEARCHED|pid|A;B rows (';'-joined — a
-    tech name never contains one)."""
+    tech name never contains one).
+
+    M4: 13-field OVROW rows
+    (pid|civ|gold|res|sci|cul|fai|gpt|upkeep|era|civic|cprog|ccost) add
+    the per-player economy (yields, per-turn gold, upkeep, era) and civic
+    progress. ``?`` fields are UNREAD -> key absent (the civic-progress
+    triple is InGame-only; read-transport rows carry `?` there). An
+    ``OVERA|<name>`` row becomes doc ``game_era``; ``OVCIVICS|pid|A;B``
+    (researched civics, ';'-joined) must FOLLOW its player's OVROW."""
     turn: int | None = None
+    game_era: str | None = None
     rows: dict[int, dict[str, Any]] = {}
     for line in _split_lines(lines):
         line = line.strip()
@@ -258,12 +306,16 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
         prefix, _, rest = line.partition("|")
         if prefix == "TURN" and turn is None:
             turn = int(_coerce_strict(rest))
+        elif prefix == "OVERA" and game_era is None:
+            if not rest or rest == "?" or "|" in rest:
+                raise ValueError(f"malformed OVERA row: {line!r}")
+            game_era = rest
         elif prefix == "OVROW":
             parts = rest.split("|")
-            if len(parts) != 4:
-                raise ValueError(f"malformed OVROW (want 4 fields): {line!r}")
-            pid, civ, gold, res = parts
-            rows[int(pid)] = {
+            if len(parts) not in (4, 13):
+                raise ValueError(f"malformed OVROW (want 4 or 13 fields): {line!r}")
+            pid, civ, gold, res = parts[:4]
+            row: dict[str, Any] = {
                 "player_id": int(pid),
                 "civ_name": civ,
                 "gold": _coerce_strict(gold),
@@ -271,18 +323,42 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
                 "researching": None if res == "-" else res,
                 "alive": True,
             }
+            if len(parts) == 13:
+                sci, cul, fai, gpt, upkeep, era, civic, cprog, ccost = parts[4:]
+                for key, token in (("science", sci), ("culture", cul),
+                                   ("faith", fai), ("gold_per_turn", gpt),
+                                   ("upkeep", upkeep), ("era", era),
+                                   ("civic_progress", cprog),
+                                   ("civic_cost", ccost)):
+                    if token != "?":
+                        value = _coerce_strict(token)
+                        if type(value) is not int:
+                            raise ValueError(f"non-canonical {key}: {line!r}")
+                        row[key] = value
+                if civic != "?":
+                    row["progressing_civic"] = None if civic == "-" else civic
+            rows[int(pid)] = row
         elif prefix == "OVRESEARCHED":
             pid_s, _, names = rest.partition("|")
             player = rows.get(int(pid_s))
             if player is None:
                 raise ValueError(f"OVRESEARCHED for unknown player: {line!r}")
             player["researched"] = names.split(";") if names else []
+        elif prefix == "OVCIVICS":
+            pid_s, _, names = rest.partition("|")
+            player = rows.get(int(pid_s))
+            if player is None:
+                raise ValueError(f"OVCIVICS before its OVROW: {line!r}")
+            player["civics"] = names.split(";") if names else []
         else:
             raise ValueError(f"non-overview row in overview read: {line!r}")
     if turn is None:
         raise ValueError(f"no TURN row in overview read: {lines!r}")
-    return {"turn": turn,
-            "players": {str(pid): doc for pid, doc in sorted(rows.items())}}
+    doc: dict[str, Any] = {"turn": turn,
+                           "players": {str(pid): doc for pid, doc in sorted(rows.items())}}
+    if game_era is not None:
+        doc["game_era"] = game_era
+    return doc
 
 
 def parse_available_research(lines: list[str]) -> list[dict[str, Any]]:
@@ -406,11 +482,19 @@ _TERRAIN_MAP: dict[str, str] = {
 
 
 def parse_visible_map(lines: list[str]) -> dict[str, Any]:
-    """VMAP|2 read -> the sim visible-map doc plus the visibility split the
-    adapter caches. TILEROW|q|r|terrain|visible|owner|city; the Lua reads
-    owner/city ONLY for currently-visible plots, so the doc never carries
-    fog ownership (the leak-safe side of the projection contract — the
-    projection gates again on the visible set, double-gated by design).
+    """VMAP read -> the sim visible-map doc plus the visibility split the
+    adapter caches. Legacy 6-field TILEROW|q|r|terrain|visible|owner|city
+    and M4 13-field rows (…|city|feature|resource|improvement|district|
+    river|appeal|engvis) both parse: the Lua reads owner/city ONLY for
+    currently-visible plots, so the doc never carries fog ownership (the
+    leak-safe side of the projection contract — the projection gates again
+    on the visible set, double-gated by design).
+
+    M4 field scopes (the owner rule): the STATIC keys (`feature`, `river`)
+    are set regardless of the visibility flag — a remembered tile keeps
+    them like its terrain; the DYNAMIC keys (`resource`, `improvement`,
+    `district`, `appeal`, `engine_visible`) exist ONLY on `true` rows.
+    ``?`` = unread -> key absent; ``-`` = observed none -> ''/False.
 
     Returns {turn, tiles, visible, unknown_terrain}: tiles is keyed by the
     sim tile_key; ``visible`` is the frozenset of currently-seen keys (the
@@ -431,9 +515,9 @@ def parse_visible_map(lines: list[str]) -> dict[str, Any]:
         if prefix != "TILEROW":
             raise ValueError(f"non-tile row in map read: {line!r}")
         parts = rest.split("|")
-        if len(parts) != 6:
-            raise ValueError(f"malformed TILEROW (want 6 fields): {line!r}")
-        q, r, terrain, vis_flag, owner, city = parts
+        if len(parts) not in (6, 13):
+            raise ValueError(f"malformed TILEROW (want 6 or 13 fields): {line!r}")
+        q, r, terrain, vis_flag, owner, city = parts[:6]
         key = f"{_coerce_strict(q)},{_coerce_strict(r)}"
         sim_terrain = _TERRAIN_MAP.get(terrain.removeprefix("TERRAIN_"))
         if sim_terrain is None:
@@ -447,6 +531,32 @@ def parse_visible_map(lines: list[str]) -> dict[str, Any]:
             entry["city"] = city
         elif vis_flag != "false":
             raise ValueError(f"non-boolean visibility flag: {line!r}")
+        if len(parts) == 13:
+            _feature, _resource, _improvement, _district, river, appeal, engvis \
+                = parts[6:]
+            # static keys ride every 13-field row
+            if _feature != "?":
+                entry["feature"] = "" if _feature == "-" else _feature
+            if river in ("true", "false"):
+                entry["river"] = river == "true"
+            elif river != "?":
+                raise ValueError(f"non-boolean river flag: {line!r}")
+            # dynamic keys only on currently-visible rows
+            if vis_flag == "true":
+                for token, doc_key in ((_resource, "resource"),
+                                       (_improvement, "improvement"),
+                                       (_district, "district")):
+                    if token != "?":
+                        entry[doc_key] = "" if token == "-" else token
+                if appeal != "?":
+                    value = _coerce_strict(appeal)
+                    if type(value) is not int:
+                        raise ValueError(f"non-canonical appeal: {line!r}")
+                    entry["appeal"] = value
+                if engvis in ("true", "false"):
+                    entry["engine_visible"] = engvis == "true"
+                elif engvis != "?":
+                    raise ValueError(f"non-boolean engine visibility: {line!r}")
         if key in tiles:
             raise ValueError(f"duplicate tile row for {key}")
         tiles[key] = entry
