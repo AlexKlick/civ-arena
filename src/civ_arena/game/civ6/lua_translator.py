@@ -122,8 +122,18 @@ for pid, p in pairs(Players) do
         pcall(function()
             local e = p:GetEra()
             if type(e) == "number" then
-                era = tostring(math.floor(e))
-                if maxEra == nil or e > maxEra then maxEra = math.floor(e) end
+                -- Amendment 3 item 2: the wire carries the era NAME
+                -- STRING (resolved via GameInfo.Eras), not the raw int.
+                -- The OVERA row's game-era path does the same lookup
+                -- for maxEra; replicate it per player.
+                local idx = math.floor(e)
+                if GameInfo.Eras ~= nil and GameInfo.Eras[idx] ~= nil
+                        and GameInfo.Eras[idx].EraType ~= nil then
+                    era = GameInfo.Eras[idx].EraType
+                else
+                    era = tostring(idx)
+                end
+                if maxEra == nil or e > maxEra then maxEra = idx end
             end
         end)
         local civic, cprog, ccost = "?", "?", "?"
@@ -289,48 +299,70 @@ for _, p in ipairs(PlayerManager.GetAlive()) do
         if name == nil or name == "" then name = "c" .. city:GetID() end
         name = string.gsub(name, "|", "-")
         name = string.gsub(name, "%c", " ")
-        local bq = city:GetBuildQueue()
         local queue = "?"
-        if bq == nil or bq.GetCurrentProductionTypeHash == nil then
-            if major == "true" then
+        -- Amendment 3 item 6: the ENTIRE minor build-queue read is
+        -- pcall-wrapped; majors keep the fail-loud contract — a missing
+        -- queue/hash on a major still raises so the test suite catches
+        -- it, not a silently-unread row.
+        local bq = nil
+        local bq_ok = false
+        if major == "true" then
+            -- majors: no swallow. Original fail-loud contract.
+            bq = city:GetBuildQueue()
+            if bq == nil or bq.GetCurrentProductionTypeHash == nil then
                 error("city production queue unavailable")
             end
-        else
             local h = bq:GetCurrentProductionTypeHash()
             if type(h) ~= "number" then
-                if major == "true" then
-                    error("city production hash unavailable")
+                error("city production hash unavailable")
+            end
+            bq_ok = true
+        else
+            -- minors: every accessor below is pcall-wrapped. A nil
+            -- accessor or a non-numeric hash leaves queue = "?".
+            pcall(function()
+                local q = city:GetBuildQueue()
+                if q ~= nil and q.GetCurrentProductionTypeHash ~= nil then
+                    local h = q:GetCurrentProductionTypeHash()
+                    if type(h) == "number" then
+                        bq = q
+                        bq_ok = true
+                    end
                 end
-            else
+            end)
+        end
+        if bq_ok then
+            local h = bq:GetCurrentProductionTypeHash()
+            if h == 0 then
                 queue = "-"
-                if h ~= 0 then
-                    for row in GameInfo.Units() do
-                        if row.Hash == h then queue = row.UnitType break end
+            else
+                local resolved = "-"
+                for row in GameInfo.Units() do
+                    if row.Hash == h then resolved = row.UnitType break end
+                end
+                if resolved == "-" then
+                    for row in GameInfo.Buildings() do
+                        if row.Hash == h then resolved = row.BuildingType break end
                     end
-                    if queue == "-" then
-                        for row in GameInfo.Buildings() do
-                            if row.Hash == h then queue = row.BuildingType break end
-                        end
+                end
+                if string.match(resolved, '^UNIT_DISTRICT_')
+                    or string.match(resolved, '^UNIT_PROJECT_')
+                    or string.match(resolved, '^BUILDING_DISTRICT_')
+                    or string.match(resolved, '^BUILDING_PROJECT_') then
+                    error('legacy queue collides with reserved productive namespace')
+                end
+                if queue == "-" and GameInfo.Districts ~= nil then
+                    for row in GameInfo.Districts() do
+                        if row.Hash == h then queue = row.DistrictType break end
                     end
-                    if string.match(queue, '^UNIT_DISTRICT_')
-                        or string.match(queue, '^UNIT_PROJECT_')
-                        or string.match(queue, '^BUILDING_DISTRICT_')
-                        or string.match(queue, '^BUILDING_PROJECT_') then
-                        error('legacy queue collides with reserved productive namespace')
+                end
+                if queue == "-" and GameInfo.Projects ~= nil then
+                    for row in GameInfo.Projects() do
+                        if row.Hash == h then queue = row.ProjectType break end
                     end
-                    if queue == "-" and GameInfo.Districts ~= nil then
-                        for row in GameInfo.Districts() do
-                            if row.Hash == h then queue = row.DistrictType break end
-                        end
-                    end
-                    if queue == "-" and GameInfo.Projects ~= nil then
-                        for row in GameInfo.Projects() do
-                            if row.Hash == h then queue = row.ProjectType break end
-                        end
-                    end
-                    if queue == "-" then
-                        queue = "UNKNOWN_PRODUCTION_" .. tostring(h)
-                    end
+                end
+                if queue == "-" then
+                    queue = "UNKNOWN_PRODUCTION_" .. tostring(h)
                 end
                 if string.sub(queue, 1, 5) == "UNIT_" then
                     queue = string.sub(queue, 6)

@@ -163,7 +163,7 @@ async def test_curated_render_hp_delta_is_the_only_optin_change():
     doc = json.loads(rendered[len(CONTEXT_MARKER):])
     # opt-in: the economy keys flow for SELF, within the same budget
     assert doc["you"]["gold"] == 120
-    assert doc["you"]["science"] == 6 and doc["you"]["era"] == 0
+    assert doc["you"]["science"] == 6 and doc["you"]["era"] == "0"
     assert doc["you"]["civics"] == ["CIVIC_CODE_OF_LAWS"]
     # the read-transport civic-progress triple stayed unread (absent)
     for unread in ("progressing_civic", "civic_progress", "civic_cost"):

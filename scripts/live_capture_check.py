@@ -36,10 +36,18 @@ from civ_arena.game.civ6 import (  # noqa: E402
 from civ_arena.game.civ6.vendor.connection import GameConnection  # noqa: E402
 
 
-def _fallbacks(rows: list[dict]) -> dict[str, int]:
+def _fallbacks(rows: list[dict], expected: frozenset[str] = frozenset()) -> dict[str, int]:
     """Per-key unread counts ('?' collapses to an ABSENT key in the
-    parsers, so absence IS the honest '?'-fallback metric)."""
-    keys = sorted({key for row in rows for key in row})
+    parsers, so absence IS the honest '?'-fallback metric). Amendment 3
+    item 11: counts include every field in the EXPECTED inventory (the
+    CITIES|2 18-field set, the OVX|2 13-field set), so an empty city
+    surface prints 18/18 unread rather than zero — distinguishing an
+    empty inventory from all-fields-unread."""
+    if not rows:
+        # Amendment 3 item 11: an empty surface is distinct from "every
+        # field unread" — return the expected inventory at N/N.
+        return {key: 0 for key in sorted(expected)}
+    keys = sorted({key for row in rows for key in row} | set(expected))
     return {key: sum(1 for row in rows if key not in row) for key in keys}
 
 
@@ -78,7 +86,11 @@ async def main(host: str, port: int) -> None:
         if not extended:
             print("  city surface empty — parked-game trap (Amendment 1.5):"
                   " cities enumerate only on a driver-attached game")
-        for key, missing in _fallbacks(extended).items():
+        for key, missing in _fallbacks(extended,
+                expected=frozenset(("name", "population", "is_capital", "is_major",
+                                    "hp", "max_hp", "food", "thr", "surplus",
+                                    "grow", "prodturns", "buildings", "districts",
+                                    "production_queue"))).items():
             if missing:
                 print(f"    {key}: unread(absent) on {missing}/{len(extended)}")
         # CITIES|1 lite for comparison

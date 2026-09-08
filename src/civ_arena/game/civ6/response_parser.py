@@ -283,6 +283,15 @@ def parse_cities(lines: list[str], *, qualified: bool = False) -> list[dict[str,
     return sorted(out, key=lambda c: entity_ids.sort_key(c["city_id"]))
 
 
+def _era_name(idx: int) -> str:
+    """Amendment 3 item 2: the world doc carries era as a NAME STRING,
+    never an int. The wire from the live probe resolves through
+    ``GameInfo.Eras[idx].EraType``; rehearsal / FakeMod emit the raw
+    int — normalize here at parse time so the validator sees a string
+    regardless of transport. The fallback is still a string."""
+    return str(int(idx))
+
+
 def parse_overview(lines: list[str]) -> dict[str, Any]:
     """OVX read -> the sim OVERVIEW shape the projection consumes: turn +
     players{str(pid): {player_id, civ_name, gold, researched, researching,
@@ -327,7 +336,7 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
                 sci, cul, fai, gpt, upkeep, era, civic, cprog, ccost = parts[4:]
                 for key, token in (("science", sci), ("culture", cul),
                                    ("faith", fai), ("gold_per_turn", gpt),
-                                   ("upkeep", upkeep), ("era", era),
+                                   ("upkeep", upkeep),
                                    ("civic_progress", cprog),
                                    ("civic_cost", ccost)):
                     if token != "?":
@@ -335,6 +344,16 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
                         if type(value) is not int:
                             raise ValueError(f"non-canonical {key}: {line!r}")
                         row[key] = value
+                # Amendment 3 item 2: per-player era is a NAME STRING
+                # at parse time (the live probe resolves via
+                # GameInfo.Eras; FakeMod / rehearsal emit the raw int).
+                # `?` keeps the field absent; an int resolves to a string
+                # name (or its stringified fallback).
+                if era != "?":
+                    era_value = _coerce_strict(era)
+                    if type(era_value) is not int:
+                        raise ValueError(f"non-canonical era: {line!r}")
+                    row["era"] = _era_name(era_value)
                 if civic != "?":
                     row["progressing_civic"] = None if civic == "-" else civic
             rows[int(pid)] = row
