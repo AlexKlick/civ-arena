@@ -79,3 +79,10 @@ spectator-capture lane's `5d5221b`). Packet: CAR-CAPTURE-FIDELITY-002
 
 `runs/cap03-evidence-20260907/`: per-step focused/affected logs, the
 real-run smoke, full pytest + ruff logs (counts in the lane summary).
+
+Correction (integration pass): the lane-head commit message says "full
+gate green" — the summary above is the accurate record: 2013 passed /
+2 failed / 1 skipped, exit 1. Both failures are the inherited
+5d5221b stale-rehearsal class (real-config 7 majors vs 2-major fake
+seeding), not lane defects; fixed on this integration branch via
+CAP-02's rehearsal-assertion update + fake seat-seeding.
