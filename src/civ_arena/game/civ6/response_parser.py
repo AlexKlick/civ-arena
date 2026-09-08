@@ -353,22 +353,23 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
                         if type(value) is not int:
                             raise ValueError(f"non-canonical {key}: {line!r}")
                         row[key] = value
-                # Amendment 3 item 2 (Codex r2 finding 2): per-player
-                # era is a NAME STRING at parse time. The wire may
-                # carry either a name string (the live probe path:
-                # lua_translator resolves via GameInfo.Eras) or a
-                # canonical int (FakeMod / rehearsal). `_era_name`
-                # accepts both forms and normalizes to a string. The
-                # `?` token keeps the field absent.
+                # Amendment 3 item 2 (Codex r2 finding 2; Codex r3
+                # finding 3): per-player era is a NAME STRING at parse
+                # time. The wire may carry either a name string (the
+                # live probe path: lua_translator resolves via
+                # GameInfo.Eras) or a canonical int (FakeMod /
+                # rehearsal). Two well-formed paths, NOT a fallback
+                # for arbitrary strings: malformed tokens like "1.5",
+                # "+7", "nan", or arbitrary "x" must still raise —
+                # the previous fallback accepted them as era names.
                 if era != "?":
-                    # Try int first (FakeMod / rehearsal emit numeric
-                    # eras). If that fails, treat the token as a name
-                    # string (the live probe path). Either path is
-                    # well-formed; only an unparseable token raises.
-                    try:
-                        era_value = _coerce_strict(era)
-                    except ValueError:
+                    if _PLAIN_INT.match(era):
+                        era_value = int(era)
+                    elif re.match(r"^[A-Za-z][A-Za-z0-9_]*$", era):
                         era_value = era
+                    else:
+                        raise ValueError(
+                            f"non-canonical era token: {line!r}")
                     row["era"] = _era_name(era_value)
                 if civic != "?":
                     row["progressing_civic"] = None if civic == "-" else civic

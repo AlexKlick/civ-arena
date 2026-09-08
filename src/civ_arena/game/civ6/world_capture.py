@@ -351,15 +351,15 @@ def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
             if truncated_seen:
                 raise ValueError(
                     f"duplicate TILES_TRUNCATED in tiles read: {line!r}")
-            # Codex r2 finding 6: TILES_TRUNCATED must come AFTER GRID
-            # AND after the OWNEDROW rows it counts. The wire order
-            # is GRID → OWNEDROW* → optional TILES_TRUNCATED → TILES_END.
+            # Codex r2 finding 6 / Codex r3 finding 6: TILES_TRUNCATED
+            # must come AFTER GRID (the wire order is GRID ->
+            # OWNEDROW* -> optional TILES_TRUNCATED -> TILES_END).
+            # Zero OWNEDROWs is contract-valid (the `*` quantifier in
+            # OWNEDROW*), so we don't require rows here — only the
+            # GRID-before-TRUNCATED ordering.
             if not grid_seen:
                 raise ValueError(
                     f"TILES_TRUNCATED before GRID in tiles read: {line!r}")
-            if not rows:
-                raise ValueError(
-                    f"TILES_TRUNCATED before any OWNEDROW in tiles read: {line!r}")
             truncated_seen = True
             value = response_parser._coerce_strict(rest)  # noqa: SLF001
             if type(value) is not int or value < 0:
