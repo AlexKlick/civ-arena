@@ -365,7 +365,13 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
                 if era != "?":
                     if _PLAIN_INT.match(era):
                         era_value = int(era)
-                    elif re.match(r"^[A-Za-z][A-Za-z0-9_]*$", era):
+                    # Codex r3 finding 3 / Codex r4 finding 1: era-name
+                    # strings MUST begin with `ERA_` (the civ6 catalog
+                    # convention). A generic identifier grammar would
+                    # accept 'nan' and 'x' as valid — the strict prefix
+                    # rejects those AND every other arbitrary token,
+                    # while still accepting 'ERA_ANCIENT'.
+                    elif re.match(r"^ERA_[A-Za-z0-9_]+$", era):
                         era_value = era
                     else:
                         raise ValueError(

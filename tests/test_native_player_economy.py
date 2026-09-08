@@ -62,15 +62,16 @@ def test_parse_overview_accepts_era_name_string_from_live_probe():
     doc = response_parser.parse_overview(lines)
     assert doc["players"]["0"]["era"] == "ERA_ANCIENT"
     assert doc["game_era"] == "ERA_ANCIENT"
-    # malformed tokens must still raise (Codex r3 finding 3)
-    with pytest.raises(ValueError):
-        response_parser.parse_overview([
-            'OVX|2', 'TURN|1',
-            'OVROW|0|C|F|0|0|0|0|0|0|1.5|-|-', '---END---'])
-    with pytest.raises(ValueError):
-        response_parser.parse_overview([
-            'OVX|2', 'TURN|1',
-            'OVROW|0|C|F|0|0|0|0|0|0|+7|-|-', '---END---'])
+    # malformed tokens must still raise (Codex r3 finding 3;
+    # Codex r4 finding 2: fixtures must carry a full 13-field
+    # OVROW so the era branch is reached, not the field-count
+    # check; and the strict ERA_ prefix rejects arbitrary
+    # identifiers like 'x' and reserved words like 'nan').
+    for bad in ("1.5", "+7", "nan", "x"):
+        with pytest.raises(ValueError):
+            response_parser.parse_overview([
+                'OVX|2', 'TURN|1',
+                f'OVROW|0|C|F|0|0|0|0|0|0|{bad}|-|7|60', '---END---'])
 
 
 def test_ovx2_ordering_and_strictness():
