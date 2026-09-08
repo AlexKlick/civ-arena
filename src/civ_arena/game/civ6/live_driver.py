@@ -182,6 +182,10 @@ class LiveDriver:
                 "roll back)")
         self.log = EventLog(run_dir / "events.jsonl")
         self._ended = False
+        # CAP-02 (F-06): frozen once at capture time; the summary reports
+        # it as launch_identity with the closeout identity SEPARATELY — a
+        # later commit must never rewrite what launched the run.
+        self.launch_identity: dict[str, Any] | None = None
         self.telemetry = TelemetryRegistry()
         self.referee = Referee(
             adapter, VisibilityPolicy(), self.log, self.telemetry,
@@ -224,6 +228,15 @@ class LiveDriver:
             initial_state_hash=self.cached_hash(),
         )
 
+    def capture_launch_identity(self, mod_lua: str) -> dict[str, Any]:
+        """Freeze the launch identity ONCE (CAP-02 / F-06). The
+        run_identity audit event records it immutably at attach; the
+        summary carries it as launch_identity, with the repo state at
+        match_end recorded separately as closeout_identity."""
+        if self.launch_identity is None:
+            self.launch_identity = implementation_identity(self.spec, mod_lua)
+        return self.launch_identity
+
     async def match_end(self, final_turn: int, extra: dict[str, Any]) -> None:
         # Arena.run envelope parity (Codex P2-6): replay reads
         # final_state_hash and _strip walks these fields — a live log must
@@ -232,6 +245,13 @@ class LiveDriver:
         # members, so projection tolerates the empty civ table).
         if self._ended:
             raise RuntimeError("MATCH_END already recorded")
+        extra = dict(extra)
+        # CAP-02 (F-06): a phase's end-of-run `identity` becomes the
+        # closeout identity. The FROZEN launch identity is reported
+        # separately; the legacy `identity` key aliases launch (falling
+        # back to closeout when no capture happened) so existing
+        # consumers keep working unchanged.
+        closeout_identity = extra.pop("identity", None)
         summary = {
             "match_id": self.spec.match_id,
             "game_instance_id": self.game_instance_id,
@@ -241,6 +261,10 @@ class LiveDriver:
             "final_state_hash": self.cached_hash(),
             "telemetry": self.telemetry.snapshot(),
             "scores": {},
+            "launch_identity": self.launch_identity,
+            "closeout_identity": closeout_identity,
+            "identity": (self.launch_identity if self.launch_identity is not None
+                         else closeout_identity),
             **extra,
         }
         self._write("MATCH_END", turn=final_turn, summary=summary)
@@ -248,6 +272,22 @@ class LiveDriver:
         (self.run_dir / "summary.json").write_text(
             json.dumps(summary, sort_keys=True))
         self.log.close()
+        # CAP-02: completed-manifest trust root — expected per-kind counts
+        # + byte length + digest over the sealed records, retained for
+        # tamper detection. Proves properties of the SUPPLIED records
+        # only; it is NOT proof that the engine emitted nothing we failed
+        # to observe. Absent manifest (older runs) simply validates
+        # without this check.
+        try:
+            from civ_arena.spectate_audit import build_manifest
+            raw = (self.run_dir / "events.jsonl").read_bytes()
+            records = [json.loads(line) for line in
+                       raw.decode("utf-8").splitlines() if line.strip()]
+            (self.run_dir / "manifest.json").write_text(json.dumps(
+                build_manifest(records, raw), sort_keys=True))
+        except (OSError, ValueError) as exc:
+            print(f"manifest write skipped (validators will run without "
+                  f"it): {type(exc).__name__}", flush=True)
 
 
 MOD_DEFAULT = (Path(__file__).resolve().parents[4] / "mods" / "PuppeteerMod"
@@ -873,7 +913,7 @@ async def phase_dispatch_hotseat(
     try:
         # MATCH_START exists even when construction, provider auth, or setup fails.
         await driver.match_start()
-        identity = implementation_identity(spec, mod_lua)
+        identity = driver.capture_launch_identity(mod_lua)
         audit("run_identity", identity=identity, limits=asdict(limits),
               fake=adapter._simulate is not None,
               llm_turn_pacing="visible_briefing_v1" if pace_llm_turns else "standard",
@@ -1095,7 +1135,7 @@ async def phase_spectate(
     await transport.setup({})
     await transport.inject_mod(mod_lua)
     await driver.match_start()
-    audit("run_identity", identity=implementation_identity(spec, mod_lua),
+    audit("run_identity", identity=driver.capture_launch_identity(mod_lua),
           fake=adapter._simulate is not None)  # noqa: SLF001
     audit("spectate_config", **asdict(sc))
     try:
@@ -1308,6 +1348,12 @@ async def phase_spectate(
         failure = f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        # CAP-02: the honest outcome class for the summary (keys-only
+        # addition — the loop body above is CAP-01's surface)
+        outcome = ("completed" if clean and failure is None
+                   else {"cancelled": "operator_stopped",
+                         "match timeout": "timed_out"}.get(failure,
+                                                           "interrupted"))
         # teardown FIRST so its lifecycle entry is inside the census the
         # summary reports (disconnect-only — no game action, safe before
         # the summary writes)
@@ -1320,6 +1366,7 @@ async def phase_spectate(
             "human_turn_budget_s": sc.turn_budget_s,
             "per_round": per_round,
             "completed_rounds": len(per_round), "requested_rounds": turns,
+            "outcome": outcome,
             "clean": clean and failure is None,
             "aborted": failure, "failure_reason": failure,
             "failure_stage": None if failure is None else "spectate",

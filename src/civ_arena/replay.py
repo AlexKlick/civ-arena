@@ -168,10 +168,23 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
             "to replay into it (the wipe would delete the trust root)")
     # A spectate run has ZERO driven tool calls (a human played the seat;
     # the harness only observed) — re-executing through an Arena would
-    # fabricate a synthetic sim match. Return a structural certificate
+    # fabricate a synthetic sim match. Return the structural audit
     # before any Arena construction.
     if _is_spectate_run(run_dir):
         return _spectate_certificate(run_dir)
+    # CAP-02 no-synthetic-fallback: a spectate-SHAPED log (spectate round
+    # kinds present) whose summary is missing or malformed would fall
+    # through to an Arena replay here — zero TOOL_CALLs would run a
+    # fabricated synthetic match against it. Refuse loudly instead.
+    pre_records = _load_records(Path(run_dir) / "events.jsonl")
+    spectate_shaped = any(
+        rec.get("kind") in ("SPECTATOR_SNAPSHOT", "HUMAN_TURN_START",
+                            "HUMAN_TURN_END")
+        for rec in pre_records)
+    if spectate_shaped:
+        raise ValueError(
+            f"{run_dir}: spectate-shaped log (spectate round kinds present) "
+            "with a missing or malformed summary — refusing synthetic replay")
     # a replay dir is a DERIVED artifact, never a trust root: a stale one
     # from an earlier replay would have the Arena APPEND a second match
     # into the same events.jsonl (observed 2026-09-03: 388+308 'identical'
@@ -293,45 +306,45 @@ _SPECTATE_FORBIDDEN_KINDS = frozenset({
 
 
 def _spectate_certificate(run_dir: Path) -> dict[str, Any]:
-    """Structural certificate for a spectate run: there is nothing to
-    re-execute (no driven tool calls), so the certificate asserts the
-    envelope invariants instead — seq contiguity, MATCH_START first /
-    MATCH_END last, no action kinds, and strict HUMAN_TURN_START/END
-    alternation. A tampered log fails here, loudly."""
+    """Structural audit for a spectate run, on the ONE shared core
+    (civ_arena.spectate_audit) — the same rule set the run validator
+    applies, declared as profile='structural'. There is nothing to
+    re-execute (zero driven tool calls): the result says so explicitly
+    and never claims a comparison. Open-prefix outcomes
+    (operator-stopped / interrupted / crashed / running prefix)
+    tolerate one trailing unpaired human-turn START — an observed open
+    interval, never a fabricated completion. A tampered log fails here,
+    loudly."""
+    from civ_arena.spectate_audit import (
+        OPEN_PREFIX_OUTCOMES,
+        SPECTATE_FORBIDDEN_KINDS,  # noqa: F401  (re-exported for callers)
+        classify_outcome,
+        final_interval_state,
+        structural_problems,
+    )
     records = _load_records(Path(run_dir) / "events.jsonl")
-    problems: list[str] = []
-    if not records:
-        problems.append("empty event log")
-    else:
-        if records[0]["kind"] != "MATCH_START":
-            problems.append("first record is not MATCH_START")
-        if records[-1]["kind"] != "MATCH_END":
-            problems.append("last record is not MATCH_END")
-        seqs = [rec.get("seq") for rec in records]
-        if seqs != list(range(len(records))):
-            problems.append("seq is not contiguous from 0 (tampered or torn log)")
-    for rec in records:
-        if rec.get("kind") in _SPECTATE_FORBIDDEN_KINDS:
-            problems.append(
-                f"{rec.get('kind')} at seq {rec.get('seq')} — a spectator "
-                "never acts")
-            break
-    boundaries = [rec for rec in records
-                  if rec.get("kind") in ("HUMAN_TURN_START", "HUMAN_TURN_END")]
-    expected = ["HUMAN_TURN_START", "HUMAN_TURN_END"] * (
-        len(boundaries) // 2)
-    if [rec["kind"] for rec in boundaries] != expected:
-        problems.append(
-            "HUMAN_TURN_START/HUMAN_TURN_END do not strictly alternate")
     summary = json.loads((Path(run_dir) / "summary.json").read_text()) \
         if (Path(run_dir) / "summary.json").exists() else {}
-    if isinstance(summary.get("completed_rounds"), int) \
-            and summary["completed_rounds"] != len(boundaries) // 2:
-        problems.append(
-            f"summary completed_rounds={summary['completed_rounds']} "
-            f"but the log carries {len(boundaries) // 2} human turns")
+    outcome = classify_outcome(summary)
+    problems = structural_problems(
+        records, summary=summary,
+        allow_open_prefix=outcome in OPEN_PREFIX_OUTCOMES)
     return {
         "summary": summary,
+        # truthful outcome fields (CAP-02 / F-05)
+        "audit_valid": not problems,
+        "profile": "structural",
+        "outcome": outcome,
+        "final_interval": final_interval_state(records),
+        "capture_complete_for_declared_scope": None,
+        "reexecution_performed": False,
+        "comparison_result": "not_performed",
+        "schema_note": (
+            "structural audit only — no re-execution and no state "
+            "comparison were performed; legacy keys identical/"
+            "replayed_events are retained for compatibility and derive "
+            "from audit_valid, not from any replay"),
+        # legacy keys (documented, derived — never silent reinterpretation)
         "identical": not problems,
         "problems": problems,
         "mode": "spectate",
@@ -395,12 +408,21 @@ async def _main_async(argv: list[str] | None = None) -> int:
     replay_dir = opts.replay_dir or (opts.run_dir.parent / f"{opts.run_dir.name}-replay")
     result = await replay_run(opts.run_dir, spec, replay_dir, live=opts.live)
     if result.get("mode") == "spectate":
-        if result["identical"]:
-            print(f"SPECTATE run — no driven tool calls to re-execute; "
-                  f"structural certificate over {result['live_events']} events: OK")
+        # truthful language: this is a STRUCTURAL AUDIT of the supplied
+        # records — no re-execution, no state comparison, ever (CAP-02)
+        if result["audit_valid"]:
+            print(f"SPECTATE run — structural audit OK "
+                  f"(profile={result['profile']}, "
+                  f"outcome={result['outcome']}, "
+                  f"final_interval={result['final_interval']}, "
+                  f"{result['live_events']} events; re-execution not "
+                  f"performed, comparison not performed)")
             return 0
-        print(f"SPECTATE run — structural certificate FAILED over "
-              f"{result['live_events']} events:")
+        print(f"SPECTATE run — structural audit FAILED "
+              f"(profile={result['profile']}, "
+              f"outcome={result['outcome']}) over "
+              f"{result['live_events']} events "
+              f"(re-execution not performed, comparison not performed):")
         for problem in result["problems"]:
             print("  ", problem)
         return 4

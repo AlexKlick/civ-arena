@@ -22,7 +22,8 @@ def test_spectator_config_parses() -> None:
     spec = load_config(CONFIG)
     assert spec.spectate is not None
     assert spec.spectate.operator == "alexk"
-    assert spec.spectate.observed_players == (0, 1)
+    # updated by 5d5221b to the operator's live 7-major game (was (0, 1))
+    assert spec.spectate.observed_players == (0, 1, 2, 3, 4, 5, 6)
     assert spec.agents == []
 
 
@@ -86,4 +87,7 @@ def test_spectate_rehearsal_end_to_end(tmp_path):
         cwd=REPO, capture_output=True, text=True, timeout=120.0)
     assert proc.returncode == 4, proc.stdout + proc.stderr
     assert "SPECTATE" in proc.stdout
-    assert "structural certificate FAILED" in proc.stdout  # tampered above
+    # CAP-02: the CLI speaks structural-audit language, never replay
+    assert "structural audit FAILED" in proc.stdout  # tampered above
+    assert "replayed" not in proc.stdout.lower()
+    assert "re-execution" in proc.stdout

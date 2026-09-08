@@ -207,6 +207,15 @@ class FakeMod:
             0: {"gold": 100, "researching": "", "researched": []},
             1: {"gold": 100, "researching": "", "researched": []},
         }
+        # spectate mode may observe more seats than the 2-major mini
+        # engine models (the live config declares the game's full major
+        # set) — seed any extra observed seats so window snapshots and
+        # censuses work; default (non-spectate) fixtures stay unchanged.
+        if self.spectate:
+            for pid in ([self.spectate.get("human_seat", 0)]
+                        + list(self.spectate.get("ai_seats", []))):
+                self.players.setdefault(
+                    pid, {"gold": 100, "researching": "", "researched": []})
         self.units: dict[int, dict] = {
             # owner 0: a far settler (founds turn 1), a warrior (fortifies),
             # a near settler (marches), an archer (attack-path tests)
