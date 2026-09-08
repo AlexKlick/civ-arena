@@ -5,6 +5,24 @@ Model: gpt-6-astra, effort high, 6m59s. 13 findings (6 P1, 7 P2).
 additionally verified against the pilot's recorded data.** Remediation
 ticket: CAP-R1 (this branch).
 
+## Dispositions (CAP-R1, 2026-09-08 — all 13 FIXED)
+
+| # | Fix (commit) |
+|---|---|
+| 1 | Mod 0.4.0 per-player `ambient_snapshots` table + rebase/closed_stale receipts; handshake advertises `supports_ambient_windows`; phase refuses a mod lacking it (079cba7) |
+| 2 | Exporter `_boundary_view` merges `strategy_payload_json` — production nested audits join (d04e9db) |
+| 3 | Samples keyed `(turn, agent_id)`, refs/boundaries filtered per agent, multi-agent segment ids (d04e9db) |
+| 4 | Refresh path: fresh decision id on the client BEFORE its provider call, new directive id, `economy_refresh` boundary; exporter aggregates a turn's boundaries (f422185) |
+| 5 | Transport exact-`fullmatch` allowlist (byte-exact, compound Lua refused pre-dispatch) (079cba7) |
+| 6 | START claims need hook batch-last AND census-atomic; END needs the ring still parked on the DEACT after the digest read (ef90087) |
+| 7 | Empty-ring mid-turn attach SYNTHESIZES the attach round (partial, null cursor, audited) — next turn never mislabeled (ef90087) |
+| 8 | Mod `Puppeteer.Roster()` enumerates ALL players with classes; discovery class-aware (minor vs unconfigured_major), human seat must exist (079cba7) |
+| 9 | Teardown guarded: fault recorded in cleanup.status + failure, MATCH_END/summary always write (079cba7) |
+| 10 | Structural core refuses self-contradictory digest brackets both directions; cap02 fixture made honest (d04e9db) |
+| 11 | Validator eligibility consumes capture_gap audits + gap_inferred rounds; exporter carries real cursors + both gap channels (d04e9db) |
+| 12 | Manifest digests every consumed input (summary.json, llm_costs.jsonl) (d04e9db) |
+| 13 | Client sweeps the serialized attempt record at FIRE time with the key actually sent (f422185) |
+
 ## P1 — verified
 
 1. **Shared ambient snapshot corrupts all windowed ambient data.**
@@ -89,3 +107,11 @@ ticket: CAP-R1 (this branch).
 - Finding 1 retroactively explains the pilot's small human-window row
   counts (cross-player diffs book only where positions happen to
   differ) — the "sane-looking" rows were p6-before/p0-after composites.
+- **Real-data smoke (post-R1 exporter):** the driven 1v1 run
+  `minimax100-20260907T183425Z` exports **75** controlled_decision
+  samples where cap03's exporter produced 38 — the turn-keyed join was
+  MERGING both hotseat agents (#3 confirmed on real data, now
+  separated). The closed pilot exports 66 intervals with honest null
+  cursors/gap channels (it predates those fields — backward
+  compatible, never fabricated). Logs:
+  `runs/cap-r1-evidence-20260907/`.
