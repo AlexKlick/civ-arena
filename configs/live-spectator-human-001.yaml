@@ -14,6 +14,11 @@ spectate:
   observed_players: [0, 1, 2, 3, 4, 5, 6]
   snapshot_scope: full      # ambient | census | full
   turn_budget_s: 3600.0     # AUDIT-ONLY: an overrun is recorded, never acted on
-  poll_s: 2.0
+  # 0.5 s polls (was 2.0): the mod's 64-entry hook ring holds ~4 rounds
+  # at 7 majors; 2 s polls LOST rounds when the human played fast bursts
+  # (the 2026-09-07 pilot lost turns 21/23/27/35). Faster polls trade
+  # poll volume for gap resistance; residual wraps still surface as
+  # capture_gap audits + gap_inferred rounds (never fabricated).
+  poll_s: 0.5
   heartbeat_s: 60.0
 agents: []                  # a spectate run rosters no driven agents
