@@ -55,7 +55,10 @@ def _write_run(run_dir: Path, rounds: int = 2, *, outcome=None,
                      {"turn": turn, "operator": "alexk"}))
         rows.append(("SPECTATOR_SNAPSHOT", {
             "round": turn, "turn": turn, "phase": "turn_start",
-            "digest": {"before": "aaa", "after": "bbb",
+            # an HONEST bracket: the census computes consistent as
+            # before == after (CAP-R1 #10 — the old fixture's
+            # before!=after + consistent=true was self-contradictory)
+            "digest": {"before": "aaa", "after": "aaa",
                        "consistent": True}}))
         rows.append(("HUMAN_TURN_END",
                      {"turn": turn, "operator": "alexk", "duration_s": 5.0,
@@ -346,3 +349,31 @@ def test_legacy_dirty_launch_remains_honestly_classified(tmp_path):
     # derived assessment only — the original is byte-identical
     after = hashlib.sha256((REAL_RUN / "events.jsonl").read_bytes()).hexdigest()
     assert before == after
+
+
+# -- CAP-R1 #10: self-contradictory digest brackets fail structurally ----------
+
+
+def test_contradictory_digest_bracket_fails_both_directions(tmp_path):
+    """The census COMPUTES consistent as before == after. A bracket whose
+    flag contradicts its own values is a tampered/corrupt record — the
+    structural core must refuse it as evidence, whichever way it lies."""
+    from civ_arena.game.civ6.validate_run import validate
+    for consistent, before, after in ((True, "aaa", "bbb"),
+                                      (False, "aaa", "aaa")):
+        def contradict(rows, c=consistent, b=before, a=after):
+            out = []
+            for kind, fields in rows:
+                if kind == "SPECTATOR_SNAPSHOT" and fields.get("turn") == 1:
+                    fields = {**fields, "digest": {
+                        "before": b, "after": a, "consistent": c}}
+                out.append((kind, fields))
+            return out
+
+        run_dir = _write_run(tmp_path / f"cd-{consistent}", rounds=2,
+                             outcome="completed",
+                             mutate=contradict)
+        result = validate(run_dir, rounds=2, require_live=False)
+        assert result["status"] == "FAIL", (consistent, before, after)
+        assert any("self-contradictory digest bracket" in e
+                   for e in result["errors"])

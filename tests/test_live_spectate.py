@@ -367,27 +367,41 @@ async def test_multiple_turn_boundaries_in_one_poll_do_not_forge_historical_snap
     assert ends[0]["state_at_boundary"] is False
     assert ends[0]["window_start_cursor"] == starts[0]["source_cursor"]
     assert ends[0]["window_end_cursor"] == ends[0]["source_cursor"]
-    # a batch's LAST boundary may claim boundary state
-    assert any(s["state_at_boundary"] is True
+    # CAP-R1 #6: a batch's LAST boundary may claim state only WITH the
+    # census-atomic + ring-parked corroboration. In THIS racing timeline
+    # (the engine advances on every trace read — including the
+    # corroboration reads themselves) the engine always moves past the
+    # boundary before the reads complete, so EVERY claim demotes. The
+    # positive claim is pinned in the parkable timeline
+    # (test_end_state_at_boundary_holds_when_ring_parked_on_deact).
+    assert all(s["state_at_boundary"] is False
                for s in starts if s["boundary"] == "hook_observed")
 
 
 async def test_sparse_player_ids_and_unconfigured_actor_classes_have_coverage_status(
         tmp_path) -> None:
-    """The OVERVIEW read discovers the REAL roster — sparse ids beyond the
-    configured set (a city-state at pid 63) get explicit coverage status;
-    the configured set is a claim, the board is the truth."""
-    mod = _spectate_mod()
+    """The mod's all-players ROSTER read discovers the REAL board — sparse
+    ids beyond the configured set get CLASS-AWARE coverage status (a
+    city-state at pid 63 is a minor; a sparse major at pid 7 is reported
+    as an unconfigured MAJOR). The configured set is a claim; the board
+    is the truth (CAP-R1 #8: OVX-shaped reads enumerate alive majors
+    only, which made minors undiscoverable)."""
+    mod = _spectate_mod(minor_seats=[63])
+    mod.players[7] = {"gold": 0, "researching": "", "researched": []}
     mod.players[63] = {"gold": 0, "researching": "", "researched": []}
     rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=1)
     assert rc == 0
     roster = next(e for e in events if e.get("audit") == "roster_discovery")
-    assert roster["discovered"] == [0, 1, 63]
+    assert roster["discovered"] == [0, 1, 7, 63]
     assert roster["observed"] == [0, 1]
-    assert roster["unconfigured_discovered"] == [63]
-    assert roster["actor_classes"]["63"] == "minor_or_unconfigured"
+    assert roster["unconfigured_discovered"] == [7, 63]
+    assert roster["unconfigured_majors"] == [7]
+    assert roster["minors"] == [63]
+    assert roster["actor_classes"]["63"] == "minor"
+    assert roster["actor_classes"]["7"] == "unconfigured_major"
     assert roster["actor_classes"]["0"] == "observed_major"
-    assert summary["roster"]["unconfigured_discovered"] == [63]
+    assert summary["roster"]["unconfigured_majors"] == [7]
+    assert summary["roster"]["minors"] == [63]
 
 
 async def test_bootstrap_and_teardown_are_inside_spectator_command_audit(
@@ -426,3 +440,78 @@ async def test_trace_ring_wrap_declares_gap_and_gap_inferred_round(
     assert gap_audits and all("ring_size" in a for a in gap_audits)
     assert summary["trace_gaps"] >= 1
     assert summary["trace_generations"] >= 0  # epoch resets counted apart
+
+
+# -- CAP-R1 #7/#6: fresh-attach synthesis + boundary-state corroboration -----
+
+
+async def test_fresh_attach_with_empty_ring_synthesizes_attach_round(
+        tmp_path) -> None:
+    """#7: a freshly injected recorder mid-human-turn has NO ENTER in the
+    ring — the in-flight turn still gets its (partial) attach round with
+    an honest null cursor, and the NEXT turn is a plain turn_start,
+    never mislabeled attach."""
+    mod = _spectate_mod(attach_seed_enter=False)
+    rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=2)
+    assert rc == 0
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    assert len(starts) == 2
+    assert starts[0]["boundary"] == "attach"
+    assert starts[0]["window"] == "attach"
+    assert starts[0]["state_at_boundary"] is False
+    assert starts[0]["source_cursor"] is None
+    assert starts[1]["boundary"] == "hook_observed"
+    assert starts[1]["window"] == "turn_start"
+    assert starts[1]["source_cursor"] is not None
+    synth = [e for e in events
+             if e.get("audit") == "attach_round_synthesized"]
+    assert synth and synth[0]["turn"] == starts[0]["turn"]
+    assert summary["completed_rounds"] == 2
+    ends = [e for e in events if e["kind"] == "HUMAN_TURN_END"]
+    assert len(ends) == 2  # alternation holds through the synthesized round
+
+
+async def test_start_state_at_boundary_requires_atomic_census(
+        tmp_path) -> None:
+    """#6: the hook may be the batch's last entry, but if the board moved
+    during the census reads (digest bracket broke), the round does NOT
+    claim boundary state — read-time state is not boundary state."""
+    mod = _spectate_mod(mutate_during_census=True)
+    rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=1)
+    assert rc == 0
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    snaps = [e for e in events if e["kind"] == "SPECTATOR_SNAPSHOT"]
+    assert starts and snaps
+    assert snaps[0]["atomic"] is False  # the census honestly saw drift
+    assert starts[0]["state_at_boundary"] is False
+
+
+async def test_end_state_at_boundary_holds_when_ring_parked_on_deact(
+        tmp_path) -> None:
+    """#6 positive: the DEACT is the batch's last entry AND the ring is
+    still parked on it after the digest read — the END may claim boundary
+    state (the fake's deact_only_advance models the real engine's gap
+    between the human DEACT and the AI turns). The same timeline parks a
+    fresh ENTER batch-last with an atomic census, so the round-2 START
+    claims boundary state too."""
+    mod = _spectate_mod(polls=1, deact_only_advance=True)
+    rc, events, summary, _ = await run_spectate(tmp_path, mod, turns=2)
+    assert rc == 0
+    ends = [e for e in events if e["kind"] == "HUMAN_TURN_END"]
+    starts = [e for e in events if e["kind"] == "HUMAN_TURN_START"]
+    assert ends[0]["state_at_boundary"] is True
+    observed = [s for s in starts if s["boundary"] == "hook_observed"]
+    assert observed and observed[0]["state_at_boundary"] is True
+
+
+async def test_end_state_at_boundary_demotes_when_engine_advances_first(
+        tmp_path) -> None:
+    """#6 negative: with the engine advancing on TRACE reads, entries
+    appear between the DEACT observation and the digest read — the digest
+    is post-boundary state and the claim demotes to False."""
+    mod = _spectate_mod(polls=1, advance_on=["trace"])
+    rc, events, summary, _ = await run_spectate(
+        tmp_path, mod, turns=1, poll_s=0.01)
+    assert rc == 0
+    ends = [e for e in events if e["kind"] == "HUMAN_TURN_END"]
+    assert ends and ends[0]["state_at_boundary"] is False

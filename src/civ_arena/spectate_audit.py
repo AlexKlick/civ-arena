@@ -157,6 +157,24 @@ def structural_problems(records: list[dict[str, Any]], *,
                 f"SPECTATOR_SNAPSHOT at seq {s.get('seq')} lacks a complete "
                 "digest bracket (before/after/consistent)")
             break
+        # CAP-R1 #10: the census COMPUTES consistent as before == after — a
+        # bracket that contradicts itself is a tampered or corrupt record,
+        # whatever the flag says (trusting the flag alone let
+        # {before: aaa, after: bbb, consistent: true} pass as evidence)
+        if digest.get("consistent") is True \
+                and digest["before"] != digest["after"]:
+            problems.append(
+                f"SPECTATOR_SNAPSHOT at seq {s.get('seq')} declares "
+                "consistent=true with before != after — self-contradictory "
+                "digest bracket (tampered or corrupt record)")
+            break
+        if digest.get("consistent") is False \
+                and digest["before"] == digest["after"]:
+            problems.append(
+                f"SPECTATOR_SNAPSHOT at seq {s.get('seq')} declares "
+                "consistent=false with before == after — self-contradictory "
+                "digest bracket (tampered or corrupt record)")
+            break
     if isinstance(summary, dict) \
             and isinstance(summary.get("completed_rounds"), int) \
             and summary["completed_rounds"] != len(human_ends):

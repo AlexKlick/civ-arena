@@ -24,6 +24,7 @@ free by construction).
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +34,22 @@ from civ_arena.game.civ6 import lua_translator
 
 # a snapshot event is bounded; the digest/counts always survive truncation
 MAX_SNAPSHOT_BYTES = 256 * 1024
+
+
+def parse_roster_rows(lines: list[str]) -> dict[int, str]:
+    """ROSTER|<playerID>|<major|minor> rows -> {playerID: class}. An
+    empty roster (ROSTER|none) is empty — discovery reports it, the
+    caller never invents seats."""
+    roster: dict[int, str] = {}
+    for raw in lines:
+        parts = raw.strip().split("|")
+        if len(parts) == 3 and parts[0] == "ROSTER" and parts[2] in (
+                "major", "minor"):
+            try:
+                roster[int(parts[1])] = parts[2]
+            except ValueError:
+                continue
+    return roster
 
 
 @dataclass(frozen=True)
@@ -294,12 +311,17 @@ class SpectateTransport:
     M4 (§4b): ``read_raw`` additionally admits the two SPECW world reads
     as EXACT full-command matches (see ``_allowed_world_reads``) — a
     one-character drift in the world Lua re-tightens the allowlist by
-    construction (CAP-R1 finding 5's fix direction). The legacy
-    ambient-window entries keep their original PREFIX matching, untouched."""
+    construction.
 
-    _ALLOWED_READ_RAW = ("Puppeteer.BeginAmbientWindow",
-                         "Puppeteer.EndAmbientWindow",
-                         "Puppeteer.DumpAmbient")
+    CAP-R1 #5: recorder commands EXACT-MATCH the three single-call forms —
+    the old ``startswith`` check admitted compound Lua (an allowed call
+    followed by ``;`` and a mutation). Any trailing/extra content, extra
+    or negative arguments, or interior whitespace is refused."""
+
+    # exactly one recorder call, nothing before or after (fullmatch)
+    _RECORDER_CALL = re.compile(
+        r"Puppeteer\.(?:BeginAmbientWindow|EndAmbientWindow)\(\d+\)"
+        r"|Puppeteer\.(?:DumpAmbient|Roster)\(\)")
 
     @staticmethod
     def _allowed_world_reads() -> frozenset[str]:
@@ -352,15 +374,28 @@ class SpectateTransport:
         return await self._adapter.observe(req)
 
     async def read_raw(self, lua: str) -> list[str]:
-        if not (lua.startswith(self._ALLOWED_READ_RAW)
-                or lua in self._allowed_world_reads()):
+        # byte-exact (no strip): the caller generates these strings — any
+        # deviation, even whitespace, is a bug signal worth refusing.
+        # CAP-R1 #5: recorder commands fullmatch the single-call regex
+        # (no prefix check anywhere). M4 §4b: the two SPECW world reads
+        # join as EXACT full-command equality. Both paths exact — a
+        # one-character drift in either Lua re-tightens by construction.
+        if (self._RECORDER_CALL.fullmatch(lua) is None
+                and lua not in self._allowed_world_reads()):
             self.census["rejected"] += 1
             raise RecorderCapabilityError(
-                f"spectator read_raw is restricted to the ambient-window "
-                f"recorder commands and the exact SPECW world reads, "
+                f"spectator read_raw is restricted to the exact ambient-"
+                f"window recorder calls and the exact SPECW world reads, "
                 f"refusing: {lua[:80]!r}")
         self.census["recorder_commands"] += 1
         return await self._adapter.read_raw(lua)
+
+    async def roster(self) -> dict[int, str]:
+        """The mod v0.4.0 all-players roster: {playerID: 'major'|'minor'}.
+        Discovery's source of truth — every other read enumerates alive
+        majors only (CAP-R1 #8: city-states were invisible)."""
+        lines = await self.read_raw(lua_translator.roster())
+        return parse_roster_rows(lines)
 
     # -- everything else is refused BEFORE dispatch --------------------------
     def __getattr__(self, name: str) -> Any:

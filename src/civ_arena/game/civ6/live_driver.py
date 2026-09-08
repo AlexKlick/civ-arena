@@ -1191,7 +1191,15 @@ async def phase_spectate(
         return rows
 
     await transport.setup({})
-    await transport.inject_mod(mod_lua)
+    caps = await transport.inject_mod(mod_lua)
+    # CAP-R1 #1/#8: fail CLOSED against a mod that would corrupt the data
+    # — per-player ambient windows and the all-players roster are REQUIRED
+    # (an older mod answers false; the handshake parses fail-closed).
+    if not caps.get("supports_ambient_windows") \
+            or not caps.get("supports_roster"):
+        raise RuntimeError(
+            "PuppeteerMod per-player ambient windows + roster required "
+            f"for spectate (mod >= 0.4.0): {caps}")
     await driver.match_start()
     audit("run_identity", identity=driver.capture_launch_identity(mod_lua),
           fake=adapter._simulate is not None)  # noqa: SLF001
@@ -1205,25 +1213,38 @@ async def phase_spectate(
             audit("engine_status", turn=engine_turn_at_attach,
                   turn_active=status.get("TURN_ACTIVE"),
                   attached_mid_turn=attached_mid_turn)
-            # F-08: roster DISCOVERY — the configured observed set is a
-            # claim; the board is the truth. Sparse/unconfigured ids
-            # (city-states, free cities) get explicit coverage status.
-            roster_doc = await transport.observe(
-                ObserveRequest(kind=ObserveKind.OVERVIEW, player_id=human))
-            discovered = sorted(int(p)
-                                for p in (roster_doc.get("players") or {}))
+            # F-08/CAP-R1 #8: roster DISCOVERY from the mod's all-players
+            # read — every OVX-shaped read enumerates alive MAJORS only,
+            # which made city-states undiscoverable. The configured set is
+            # a claim; the board is the truth. Classes now come WITH the
+            # discovery: minors are their own coverage class, and an
+            # unconfigured MAJOR is reported as such.
+            discovered_classes = await transport.roster()
+            discovered = sorted(discovered_classes)
             configured = list(sc.observed_players)
+            if human not in discovered_classes:
+                raise RuntimeError(
+                    f"human seat {human} is not on the board "
+                    f"(roster: {discovered_classes}) — refusing to record "
+                    "a game the phase cannot bound")
             roster = {
                 "configured": configured,
                 "discovered": discovered,
-                "observed": [p for p in configured if p in discovered],
+                "observed": [p for p in configured
+                             if p in discovered_classes],
                 "unconfigured_discovered":
                     [p for p in discovered if p not in configured],
                 "configured_missing":
-                    [p for p in configured if p not in discovered],
+                    [p for p in configured if p not in discovered_classes],
+                "unconfigured_majors":
+                    [p for p in discovered if p not in configured
+                     and discovered_classes[p] == "major"],
+                "minors": [p for p in discovered
+                           if discovered_classes[p] == "minor"],
                 "actor_classes": {
                     str(p): ("observed_major" if p in configured
-                             else "minor_or_unconfigured")
+                             else "minor" if discovered_classes[p] == "minor"
+                             else "unconfigured_major")
                     for p in discovered},
             }
             audit("roster_discovery", **roster)
@@ -1237,6 +1258,64 @@ async def phase_spectate(
             history_drained = False
             last_heartbeat = time.monotonic()
             turn_started = time.monotonic()
+            round_boundary = "attach"
+
+            async def open_round(entry_turn: int, boundary: str,
+                                 source_cursor: str | None,
+                                 hook_is_batch_last: bool) -> None:
+                """Open a capture round: close the AI windows (their deltas
+                since they last opened), census, ensure the HUMAN window is
+                open, write START + SNAPSHOT. F-01/CAP-R1 #6: the round
+                claims boundary state ONLY when the hook was the batch's
+                LAST entry AND directly observed AND the census bracket
+                held (``atomic``) — the board moving during the reads
+                demotes the claim even then. Attach and gap-inferred
+                rounds NEVER claim boundary state."""
+                nonlocal round_no, human_turn, ai_manifests, snapshot, \
+                    active, overrun_flagged, turn_started, \
+                    window_start_cursor, round_boundary
+                round_no += 1
+                human_turn = entry_turn
+                round_boundary = boundary
+                ai_manifests = {}
+                for ai in ai_players:
+                    if ai in windows_open:
+                        ai_manifests[str(ai)] = await close_window(ai)
+                    await open_window(ai)
+                snapshot = await census.snapshot()
+                state_at_boundary = (hook_is_batch_last
+                                     and boundary == "hook_observed"
+                                     and snapshot.get("atomic") is True)
+                driver._write(  # noqa: SLF001
+                    "HUMAN_TURN_START", turn=entry_turn,
+                    phase_player_id=human, player_id=None,
+                    agent_id=None, visibility_scope="spectator",
+                    operator=sc.operator,
+                    window="attach" if boundary == "attach"
+                    else "turn_start",
+                    boundary=boundary,
+                    observed_at=utcnow(),
+                    source_cursor=source_cursor,
+                    state_at_boundary=state_at_boundary,
+                    turn_active_corroborated=(
+                        status.get("TURN_ACTIVE") is True))
+                driver._write(  # noqa: SLF001
+                    "SPECTATOR_SNAPSHOT", turn=entry_turn,
+                    phase_player_id=human, player_id=None,
+                    agent_id=None, visibility_scope="spectator",
+                    round=round_no, phase="turn_start",
+                    boundary=boundary,
+                    observed_at=utcnow(),
+                    source_cursor=source_cursor,
+                    state_at_boundary=state_at_boundary,
+                    ambient=ai_manifests, **snapshot)
+                if human not in windows_open:
+                    await open_window(human)
+                window_start_cursor = source_cursor
+                active = True
+                overrun_flagged = False
+                turn_started = time.monotonic()
+
             while not clean:
                 new, gap = watch.new_entries(trace)
                 if gap:
@@ -1248,15 +1327,33 @@ async def phase_spectate(
                 if not history_drained:
                     # the FIRST read sees ring HISTORY. Attached mid-human-
                     # turn: keep only the current turn's entries (the
-                    # human's ENTER is real and unprocessed). Attached
-                    # between/AI turns: every history entry is stale (the
-                    # human's next turn has not started) — drop it all and
-                    # wait for the next fresh HOOK_ENTER.
+                    # human's ENTER is real and unprocessed) — and if the
+                    # ring is FRESH (a just-injected recorder, or a wrap
+                    # took the ENTER), CAP-R1 #7: synthesize the attach
+                    # round for the in-flight turn NOW (a PARTIAL interval,
+                    # boundary="attach", source_cursor=None — never an
+                    # invented historical hook). Attached between/AI turns:
+                    # every history entry is stale — drop it all and wait
+                    # for the next fresh HOOK_ENTER.
                     history_drained = True
                     if attached_mid_turn:
                         new = [e for e in new
                                if (TurnWatch.parse(e) or (-1, "", -1))[0]
                                == engine_turn_at_attach]
+                        has_attach_enter = any(
+                            TurnWatch.parse(e) == (engine_turn_at_attach,
+                                                   "HOOK_ENTER", human)
+                            for e in new)
+                        if not has_attach_enter:
+                            await open_round(engine_turn_at_attach,
+                                             "attach", None, False)
+                            audit("attach_round_synthesized",
+                                  turn=engine_turn_at_attach,
+                                  note="ring had no ENTER for the "
+                                  "in-flight turn (fresh recorder or "
+                                  "wrap) — partial interval, never "
+                                  "invented history")
+                            new = []
                     else:
                         if new:
                             audit("attach_history_discarded",
@@ -1269,14 +1366,13 @@ async def phase_spectate(
                     entry_turn, event, pid = parsed
                     is_last_boundary = index == len(new) - 1
                     if pid == human and event == "HOOK_ENTER" and not active:
-                        # -- round start: close the AI windows (their
-                        # deltas since they last opened), census, snapshot,
-                        # ensure the HUMAN window is open, START.
-                        # F-01: the reads happen at READ TIME; the round
-                        # claims boundary state ONLY when its hook is the
-                        # last boundary in the batch AND the boundary is a
-                        # directly observed hook (never for attach or
-                        # gap-inferred rounds).
+                        # -- round start (see open_round). The attach label
+                        # belongs to the turn that was ALREADY in flight at
+                        # attach — whether its ENTER survived in the ring
+                        # (round_no still 0 when it arrives) or was
+                        # synthesized (round_no already 1, so the NEXT
+                        # turn is hook_observed, never mislabeled attach).
+                        # A wrap makes the round gap-inferred.
                         if attached_mid_turn and round_no == 0:
                             boundary = "attach"
                         elif gap_pending:
@@ -1284,52 +1380,27 @@ async def phase_spectate(
                         else:
                             boundary = "hook_observed"
                         gap_pending = False
-                        round_no += 1
-                        human_turn = entry_turn
-                        ai_manifests = {}
-                        for ai in ai_players:
-                            if ai in windows_open:
-                                ai_manifests[str(ai)] = await close_window(ai)
-                            await open_window(ai)
-                        snapshot = await census.snapshot()
-                        state_at_boundary = (is_last_boundary
-                                             and boundary == "hook_observed")
-                        driver._write(  # noqa: SLF001
-                            "HUMAN_TURN_START", turn=entry_turn,
-                            phase_player_id=human, player_id=None,
-                            agent_id=None, visibility_scope="spectator",
-                            operator=sc.operator,
-                            window="attach" if boundary == "attach"
-                            else "turn_start",
-                            boundary=boundary,
-                            observed_at=utcnow(),
-                            source_cursor=entry,
-                            state_at_boundary=state_at_boundary,
-                            turn_active_corroborated=(
-                                status.get("TURN_ACTIVE") is True))
-                        driver._write(  # noqa: SLF001
-                            "SPECTATOR_SNAPSHOT", turn=entry_turn,
-                            phase_player_id=human, player_id=None,
-                            agent_id=None, visibility_scope="spectator",
-                            round=round_no, phase="turn_start",
-                            boundary=boundary,
-                            observed_at=utcnow(),
-                            source_cursor=entry,
-                            state_at_boundary=state_at_boundary,
-                            ambient=ai_manifests, **snapshot)
-                        if human not in windows_open:
-                            await open_window(human)
-                        window_start_cursor = entry
-                        active = True
-                        overrun_flagged = False
-                        turn_started = time.monotonic()
+                        await open_round(entry_turn, boundary, entry,
+                                         is_last_boundary)
                     elif pid == human and event == "HOOK_DEACT" and active:
                         # -- round end: close the human window (their
-                        # in-turn delta), digest, END, reopen AI windows
+                        # in-turn delta), digest, END, reopen AI windows.
+                        # CAP-R1 #6: the END claims boundary state ONLY if
+                        # the DEACT was the batch's last entry AND the ring
+                        # is STILL parked on it after the digest read —
+                        # anything newer (an AI hook firing between the
+                        # boundary and the reads) means the digest saw
+                        # post-boundary state, and the claim demotes.
                         human_rows = await close_window(
                             human, actor_class="human_seat")
                         duration = time.monotonic() - turn_started
                         digest_after = await transport.refresh_digest()
+                        corroborate = [ln for ln in
+                                       await transport.read_trace()
+                                       if ln.strip()]
+                        end_state_at_boundary = (
+                            is_last_boundary and bool(corroborate)
+                            and corroborate[-1] == entry)
                         overrun = duration > sc.turn_budget_s
                         driver._write(  # noqa: SLF001
                             "HUMAN_TURN_END", turn=entry_turn,
@@ -1341,7 +1412,7 @@ async def phase_spectate(
                             digest_after=digest_after, overrun=overrun,
                             observed_at=utcnow(),
                             source_cursor=entry,
-                            state_at_boundary=is_last_boundary,
+                            state_at_boundary=end_state_at_boundary,
                             window_start_cursor=window_start_cursor,
                             window_end_cursor=entry)
                         for ai in ai_players:
@@ -1349,8 +1420,8 @@ async def phase_spectate(
                                 await open_window(ai)
                         per_round.append({
                             "round": round_no, "turn": entry_turn,
-                            "boundary": boundary,
-                            "state_at_boundary": state_at_boundary,
+                            "boundary": round_boundary,
+                            "state_at_boundary": end_state_at_boundary,
                             "human_duration_s": round(duration, 3),
                             "human_ambient_rows": len(human_rows),
                             "ai_ambient_rows": {k: len(v) for k, v in
@@ -1408,14 +1479,22 @@ async def phase_spectate(
     finally:
         # CAP-02: the honest outcome class for the summary (keys-only
         # addition — the loop body above is CAP-01's surface)
+        # CAP-R1 #9: teardown still runs FIRST (its lifecycle entry stays
+        # inside the census the summary reports) but a teardown FAULT can
+        # never discard the closeout — MATCH_END/summary always write, the
+        # fault is recorded in cleanup.status and names the failure.
+        cleanup_status = "disconnect_only_no_game_actions_no_leases"
+        try:
+            await transport.teardown()
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal here
+            cleanup_status = (f"teardown_error: {type(exc).__name__}: "
+                              f"{ui_control.redact(str(exc))[:200]}")
+            if failure is None:
+                failure = f"teardown failed: {type(exc).__name__}"
         outcome = ("completed" if clean and failure is None
                    else {"cancelled": "operator_stopped",
                          "match timeout": "timed_out"}.get(failure,
                                                            "interrupted"))
-        # teardown FIRST so its lifecycle entry is inside the census the
-        # summary reports (disconnect-only — no game action, safe before
-        # the summary writes)
-        await transport.teardown()
         summary = {
             "phase": "spectate", "operator": sc.operator,
             "observed_players": list(sc.observed_players),
@@ -1444,8 +1523,7 @@ async def phase_spectate(
                        "heartbeat_s": limits.heartbeat_s,
                        "turn_budget_s": sc.turn_budget_s},
             "identity": implementation_identity(spec, mod_lua),
-            "cleanup": {"status":
-                        "disconnect_only_no_game_actions_no_leases"},
+            "cleanup": {"status": cleanup_status},
             "elapsed_s": round(time.monotonic() - started, 3),
         }
         await driver.match_end(

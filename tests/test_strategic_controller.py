@@ -535,9 +535,28 @@ async def test_exhausted_production_refresh_updates_targets_and_discards_late_ta
     late = next(row for row in records if row.get("phase") == "economy")
     assert late["reasons"] == ["production_targets_satisfied"]
     assert late["discarded_late_tactical_override_ids"] == ["u0:1"]
+    # CAP-R1 #4: the replacement decision carries its OWN boundary — a
+    # fresh decision id ON THE CLIENT during its provider call (ledger
+    # rows join the replacement), a fresh directive id, an honest request
+    # count, and quiet turns afterwards cite the RUNNING directive
+    boundaries = [r for r in records
+                  if r["audit"] == "decision_boundary" and r["turn"] == 1]
+    assert len(boundaries) == 2
+    turn_start, refresh = boundaries
+    assert turn_start["decision_id"] != refresh["decision_id"]
+    assert refresh["phase"] == "economy_refresh"
+    assert refresh["source"] == "model"
+    assert refresh["provider_requests"] == 1
+    assert turn_start["provider_requests"] == 1
+    assert turn_start["directive_id"] != refresh["directive_id"]
+    assert controller._directive_id == refresh["directive_id"]
+    assert model.decision_id == refresh["decision_id"]
     await advance(controller, runtime, facade, 2)
     assert model.posts_sent == 2
     assert scout.await_args.kwargs["directive"]["tactical_overrides"] == []
+    quiet = [r for r in records
+             if r["audit"] == "decision_boundary" and r["turn"] == 2]
+    assert quiet and quiet[0]["directive_id"] == refresh["directive_id"]
 
 
 async def test_repeated_target_exhaustion_stops_after_one_refresh_without_closure(setup):

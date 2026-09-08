@@ -60,12 +60,14 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.10",
+        version: str = "0.4.0",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
         supports_freeze: bool = True,
         supports_ledger: bool = True,
+        supports_ambient_windows: bool = True,
+        supports_roster: bool = True,
         auto_ambient: tuple | None = None,
         injected: bool = True,
         hotseat: list[int] | None = None,
@@ -80,6 +82,10 @@ class FakeMod:
         self.has_command_diff = has_command_diff
         self.supports_freeze = supports_freeze
         self.supports_ledger = supports_ledger
+        # v0.4.0 spectate capabilities — False models an older mod so the
+        # phase's fail-closed gate is exercisable
+        self.supports_ambient_windows = supports_ambient_windows
+        self.supports_roster = supports_roster
         # M4: player 12 city-state (one city + one unit, IsMajor false,
         # never in the OVX majors) — the default-off knob keeps every
         # legacy fixture byte-identical.
@@ -100,6 +106,7 @@ class FakeMod:
         self._ambient_windows: dict[int, dict[str, object]] = {}
         self._spectate_polls = 0
         self._spectate_started = False
+        self._advance_pending = False  # deact_only_advance split state
         # engine effect that lands inside every ambient window:
         # (kind, entity_type, numeric_id, attr, before, after)
         self.auto_ambient = auto_ambient
@@ -152,8 +159,13 @@ class FakeMod:
             self._switch_local_player(human)
             if self.spectate.get("attach_turn_active", True):
                 self.turn_active = True
-                # attach-mid-turn: the hook fired before we attached
-                self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
+                # attach-mid-turn: the hook fired before we attached —
+                # UNLESS attach_seed_enter is False, which models a ring
+                # whose history predates the recorder (fresh injection or
+                # a wrap took the ENTER): nothing to keep
+                if self.spectate.get("attach_seed_enter", True):
+                    self._spectate_trace_append(
+                        f"{self.turn}|HOOK_ENTER|{human}")
             return
         if source not in advance_on:
             return
@@ -174,6 +186,18 @@ class FakeMod:
 
     def _spectate_advance(self) -> None:
         human = self.spectate["human_seat"]
+        # deact_only_advance: split the round boundary from the AI turns —
+        # the human DEACT lands alone and the ring PARKS on it (a window
+        # the live engine genuinely has: AI turns take seconds); the AI
+        # hooks + next ENTER arrive on the following advance. Exercises
+        # the END boundary-state corroboration both ways.
+        if self.spectate.get("deact_only_advance") \
+                and not self._advance_pending:
+            self._advance_pending = True
+            self.turn_active = False
+            self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
+            return
+        self._advance_pending = False
         self.turn_active = False
         self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
         for ai in self.spectate.get("ai_seats", []):
@@ -712,6 +736,9 @@ class FakeMod:
                 "SUPPORTS_GUARDED_HANDOFF|true",
                 "SUPPORTS_REWARD_RECEIPTS|true",
                 f"SUPPORTS_COMMAND_DIFF|{str(self.has_command_diff).lower()}",
+                f"SUPPORTS_AMBIENT_WINDOWS|"
+                f"{str(self.supports_ambient_windows).lower()}",
+                f"SUPPORTS_ROSTER|{str(self.supports_roster).lower()}",
             ]
         if "Puppeteer.Status" in code and not self.injected:
             return ["MOD_STATUS|unavailable"]
@@ -958,21 +985,23 @@ class FakeMod:
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
             pid = int(m.group(1))
+            rebase = pid in self._ambient_windows
             if self.ambient_diffs:
-                # real window semantics: snapshot now, diff at End
+                # real window semantics: snapshot now, diff at End (per
+                # player — v0.4.0 mod parity; a double-Begin rebases)
                 self._ambient_windows[pid] = self._snapshot(pid)
-            return [f"AMBIENT_WINDOW|open|{pid}"]
+            return [f"AMBIENT_WINDOW|{'rebase' if rebase else 'open'}|{pid}"]
         m = re.search(r"Puppeteer\.EndAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
             pid = int(m.group(1))
-            if self.ambient_diffs:
-                snap = self._ambient_windows.pop(pid, None)
-                if snap is not None:
-                    # same parity as the mod: window diffs are AMBIENT rows
-                    # (7-field LEDGER shape with the AMBIENT prefix)
-                    for row in self._diff(pid, snap):
-                        self.ambient_rows.append(
-                            "AMBIENT|" + row.split("|", 1)[1])
+            snap = self._ambient_windows.pop(pid, None) \
+                if self.ambient_diffs else None
+            if snap is not None:
+                # same parity as the mod: window diffs are AMBIENT rows
+                # (7-field LEDGER shape with the AMBIENT prefix)
+                for row in self._diff(pid, snap):
+                    self.ambient_rows.append(
+                        "AMBIENT|" + row.split("|", 1)[1])
             elif self.auto_ambient is not None:
                 # engine effects land inside the window (auto_ambient
                 # fixture): the window diff books them as DECLARED rows
@@ -981,7 +1010,21 @@ class FakeMod:
                 self.ambient_rows.append(
                     f"AMBIENT|{kind}|{etype}|{prefix}{m.group(1)}:{num}"
                     f"|{attr}|{before}|{after}")
-            return [f"AMBIENT_WINDOW|closed|{pid}"]
+            # v0.4.0 mod parity: End-without-Begin is an honest stale
+            # receipt with NO fabricated diff (the auto_ambient fixture
+            # shape stays "closed" — it never tracked a window)
+            receipt = ("closed_stale" if self.ambient_diffs and snap is None
+                       else "closed")
+            return [f"AMBIENT_WINDOW|{receipt}|{pid}"]
+        if "Puppeteer.Roster" in code:
+            # v0.4.0: ALL players with classes — the discovery truth every
+            # other read (OVX) cannot provide (alive-majors-only there)
+            minors = set(self.spectate.get("minor_seats", [])) \
+                if self.spectate else set()
+            rows = [f"ROSTER|{pid}|"
+                    f"{'minor' if pid in minors else 'major'}"
+                    for pid in sorted(self.players)]
+            return rows or ["ROSTER|none"]
 
         # -- Simulate.*: FAKE-ONLY (the live driver must never send these) --
         m = re.search(r"Simulate\.TurnStart\(\s*(\d+)\s*\)", code)

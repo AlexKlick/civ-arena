@@ -45,22 +45,30 @@
 
 -- Same-version reinjection must not discard an active lease or its restore
 -- budget. The adapter normally avoids reinjection; this guards direct loads.
-if type(Puppeteer) == "table" and Puppeteer.version == "0.3.10"
+if type(Puppeteer) == "table" and Puppeteer.version == "0.4.0"
     and type(Puppeteer.AttachCurrentTurn) == "function"
     and type(Puppeteer.GuardedHandoff) == "function"
     and type(Puppeteer.BeginRewardCommand) == "function"
     and type(Puppeteer.FinishRewardCommand) == "function"
+    and type(Puppeteer.Roster) == "function"
     and Puppeteer.supports_freeze and Puppeteer.supports_ledger
-    and Puppeteer.supports_digest and Puppeteer.supports_command_diff then
+    and Puppeteer.supports_digest and Puppeteer.supports_command_diff
+    and Puppeteer.supports_ambient_windows and Puppeteer.supports_roster then
     return
 end
 
 Puppeteer = {}
-Puppeteer.version = "0.3.10"
+Puppeteer.version = "0.4.0"
 Puppeteer.supports_freeze = true
 Puppeteer.supports_ledger = true
 Puppeteer.supports_digest = true
 Puppeteer.supports_command_diff = true
+-- v0.4.0: per-player ambient windows (the v0.3.10 shared snapshot slot
+-- corrupted every window whenever more than one player's window was open)
+-- and the all-players Roster read (OVX enumerates alive majors only, so
+-- city-states were undiscoverable).
+Puppeteer.supports_ambient_windows = true
+Puppeteer.supports_roster = true
 
 -- v0.3.1 diagnostic (live run 007): after an ARENA-driven (leased) H1
 -- end-turn, the NEXT local turn starts WITHOUT PlayerTurnStartComplete
@@ -89,8 +97,9 @@ local reward_hook_registered = false
 -- This quarantine survives lease changes and same-version reinjection.
 local reward_quarantined = false
 local ambient_ledger = {}          -- DECLARED at phase boundaries: the authorization manifest
-local ambient_window_open = false  -- true ONLY inside BeginAmbientWindow/EndAmbientWindow
-local ambient_snapshot = nil       -- BeginAmbientWindow's per-player snapshot
+local ambient_snapshots = {}       -- v0.4.0: per-player window baselines, keyed
+                                   -- by playerID (a window's End diffs ONLY its
+                                   -- own Begin baseline)
 
 local function ifloor(v) return string.format("%d", math.floor(v or 0)) end
 local function boolstr(v) return tostring(v and true or false) end
@@ -255,6 +264,11 @@ function Puppeteer.Handshake()
         and type(Puppeteer.BeginRewardCommand) == "function"
         and type(Puppeteer.FinishRewardCommand) == "function"))
     print("SUPPORTS_GUARDED_HANDOFF|" .. boolstr(type(Puppeteer.GuardedHandoff) == "function"))
+    print("SUPPORTS_AMBIENT_WINDOWS|" .. boolstr(Puppeteer.supports_ambient_windows
+        and type(Puppeteer.BeginAmbientWindow) == "function"
+        and type(Puppeteer.EndAmbientWindow) == "function"))
+    print("SUPPORTS_ROSTER|" .. boolstr(Puppeteer.supports_roster
+        and type(Puppeteer.Roster) == "function"))
     print("---END---")
 end
 
@@ -799,19 +813,42 @@ end
 -- by definition — that is what makes the Python-side diff sound.
 
 function Puppeteer.BeginAmbientWindow(playerID)
-    ambient_snapshot = snapshot_player(playerID)
-    ambient_window_open = true
-    print("AMBIENT_WINDOW|open|" .. playerID)
+    -- v0.4.0: the baseline lands in THIS player's slot. A double-Begin
+    -- rebases (the old baseline is discarded — the receipt says so; the
+    -- wire transcript is the record).
+    local rebase = ambient_snapshots[playerID] ~= nil
+    ambient_snapshots[playerID] = snapshot_player(playerID)
+    print("AMBIENT_WINDOW|" .. (rebase and "rebase" or "open") .. "|" .. playerID)
     print("---END---")
 end
 
 function Puppeteer.EndAmbientWindow(playerID)
-    if ambient_snapshot ~= nil then
-        diff_player(playerID, ambient_snapshot, book_ambient)
-        ambient_snapshot = nil
+    -- diffs ONLY this player's own baseline; other players' open windows
+    -- are untouched (v0.3.10 diffed one shared slot — cross-player garbage)
+    local snap = ambient_snapshots[playerID]
+    if snap ~= nil then
+        diff_player(playerID, snap, book_ambient)
+        ambient_snapshots[playerID] = nil
     end
-    ambient_window_open = false
-    print("AMBIENT_WINDOW|closed|" .. playerID)
+    print("AMBIENT_WINDOW|" .. (snap ~= nil and "closed" or "closed_stale")
+        .. "|" .. playerID)
+    print("---END---")
+end
+
+-- v0.4.0: full roster for spectator discovery — ALL players, not the
+-- alive-majors-only set every other read enumerates (OVX hides city-states).
+function Puppeteer.Roster()
+    local rows = {}
+    for pid, p in pairs(Players) do
+        if p.IsAlive ~= nil and p.IsBarbarian ~= nil
+            and p:IsAlive() and not p:IsBarbarian() then
+            local class = "minor"
+            if p.IsMajor ~= nil and p:IsMajor() then class = "major" end
+            table.insert(rows, "ROSTER|" .. pid .. "|" .. class)
+        end
+    end
+    table.sort(rows)
+    print(#rows == 0 and "ROSTER|none" or table.concat(rows, "\n"))
     print("---END---")
 end
 

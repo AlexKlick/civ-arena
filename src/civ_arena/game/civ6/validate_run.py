@@ -222,6 +222,21 @@ def validate_spectate(run_dir: Path, rounds: int = 30, *, records=None,
             eligibility.append(
                 f"trace_gaps={summary['trace_gaps']} — rounds lost to ring "
                 'wrap are absent from the record')
+        # CAP-R1 #11: CAP-01's gap channels must reach the eligibility
+        # layer too — a run can have zero ring wraps and matching turn
+        # labels yet still carry engine-jump gaps / gap-inferred rounds
+        jump_gaps = [r for r in records if r.get('audit') == 'capture_gap']
+        if jump_gaps:
+            eligibility.append(
+                f'capture_gap audits={len(jump_gaps)} — the engine advanced '
+                'between observations (turns inside the gap are unobserved)')
+        gap_inferred = [r for r in records
+                        if r.get('kind') == 'HUMAN_TURN_START'
+                        and r.get('boundary') == 'gap_inferred']
+        if gap_inferred:
+            eligibility.append(
+                f'gap_inferred rounds={len(gap_inferred)} — coarse interval '
+                'attribution (round opened without a directly observed hook)')
         # a START->END turn span is the honest signature of a lost turn
         # boundary: one interval covers two engine turns (observed live:
         # ring-wrap gaps). Reported, never counted as a structural defect.

@@ -65,6 +65,24 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _boundary_view(event: dict[str, Any]) -> dict[str, Any]:
+    """CAP-R1 #2: PRODUCTION decision audits route through
+    strategy_audit_event, which nests the payload fields
+    (decision_id/directive_id/provider_requests/source) inside
+    ``strategy_payload_json``; hand-built and legacy events carry them
+    top-level. This view exposes BOTH shapes as one flat dict."""
+    view = dict(event)
+    raw = event.get("strategy_payload_json")
+    if isinstance(raw, str):
+        try:
+            nested = json.loads(raw)
+        except ValueError:
+            nested = None
+        if isinstance(nested, dict):
+            view.update(nested)
+    return view
+
+
 def _ref(seq: int) -> dict[str, Any]:
     return {"artifact": "events.jsonl", "seq": seq}
 
@@ -97,8 +115,16 @@ def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     manifest = {
         "exported_at": datetime.now(UTC).isoformat(),
         "run_dir": str(run_dir),
+        # CAP-R1 #12: digest EVERY consumed input — samples derive from
+        # summary.json (outcome/horizon/ids) and llm_costs.jsonl (costs),
+        # so a changed input with an unchanged events digest must still
+        # be detectable against the manifest
         "source": {"events_sha256": _digest(run_dir / "events.jsonl"),
-                   "events": len(events)},
+                   "events": len(events),
+                   **({"summary_sha256": _digest(summary_path)}
+                      if summary_path.exists() else {}),
+                   **({"llm_costs_sha256": _digest(run_dir / "llm_costs.jsonl")}
+                      if (run_dir / "llm_costs.jsonl").exists() else {})},
         "sample_counts": {
             cls: sum(1 for s in samples if s["sample_class"] == cls)
             for cls in {s["sample_class"] for s in samples}},
@@ -122,11 +148,19 @@ def write(samples: list[dict[str, Any]], manifest: dict[str, Any],
 
 def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                           summary: dict[str, Any]) -> list[dict[str, Any]]:
-    boundaries: dict[int, dict[str, Any]] = {}
+    """CAP-R1 #3: samples are keyed by (turn, agent_id) — a hotseat turn
+    carries TWO agents' decisions and each must export as its own sample
+    with only ITS observations/actions/receipts/boundary. Boundaries join
+    per agent; a boundary without an agent id (legacy/hand-built) joins
+    the turn's agent. Boundary FIELDS are read through _boundary_view
+    (#2): production audits nest them in strategy_payload_json."""
+    boundaries: dict[tuple[int, str], list[dict[str, Any]]] = {}
     ledger_gaps = 0
     for e in events:
         if e["kind"] == "HEARTBEAT" and e.get("audit") == "decision_boundary":
-            boundaries[int(e["turn"])] = e
+            boundaries.setdefault(
+                (int(e["turn"]), str(e.get("agent_id"))),
+                []).append(_boundary_view(e))
         elif e["kind"] == "HEARTBEAT" \
                 and e.get("audit") == "ledger_write_failed":
             ledger_gaps += 1
@@ -140,9 +174,12 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
 
     final_turn = summary.get("final_turn")
     aborted = summary.get("aborted")
-    turns = sorted({int(e["turn"]) for e in events
-                    if e["kind"] in ("TOOL_CALL", "TOOL_RESULT")
-                    and isinstance(e.get("turn"), int) and e["turn"] >= 1})
+    segments = sorted({(int(e["turn"]), str(e.get("agent_id")))
+                       for e in events
+                       if e["kind"] in ("TOOL_CALL", "TOOL_RESULT")
+                       and isinstance(e.get("turn"), int) and e["turn"] >= 1})
+    run_agents = {aid for _, aid in segments}
+    single_agent = len(run_agents) == 1
     quality: list[str] = []
     if not boundaries:
         quality.append("pre_boundary_run")
@@ -154,22 +191,42 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
         quality.append("run_aborted")
 
     samples: list[dict[str, Any]] = []
-    for turn in turns:
+    for turn, agent_id in segments:
+        def _agents(e: dict[str, Any], *, _t: int = turn,
+                    _a: str = agent_id) -> bool:
+            return e.get("turn") == _t and str(e.get("agent_id")) == _a
+
         obs = [_ref(e["seq"]) for e in events
-               if e["kind"] == "TOOL_RESULT" and e.get("turn") == turn
+               if e["kind"] == "TOOL_RESULT" and _agents(e)
                and e.get("tool") in _OBSERVE_TOOLS]
         actions = [_ref(e["seq"]) for e in events
-                   if e["kind"] == "TOOL_CALL" and e.get("turn") == turn
+                   if e["kind"] == "TOOL_CALL" and _agents(e)
                    and e.get("tool") in _ACTION_TOOLS]
         receipts = [_ref(e["seq"]) for e in events
-                    if e["kind"] == "TOOL_RESULT" and e.get("turn") == turn
+                    if e["kind"] == "TOOL_RESULT" and _agents(e)
                     and e.get("status") == "accepted"
                     and (e.get("mutations") or e.get("receipts"))]
-        boundary = boundaries.get(turn)
+        # a turn may carry SEVERAL decisions (CAP-R1 #4: the economy-
+        # refresh path accepts a replacement directive with its own
+        # boundary) — in event order; the LAST is the operative identity,
+        # costs join across ALL of the turn's decision ids
+        segment_boundaries = sorted(
+            boundaries.get((turn, agent_id), [])
+            + boundaries.get((turn, "None"), []),
+            key=lambda b: b.get("seq") or 0)
+        boundary = segment_boundaries[-1] if segment_boundaries else None
+        decision_ids = [b["decision_id"] for b in segment_boundaries
+                        if b.get("decision_id")]
         decision_id = boundary.get("decision_id") if boundary else None
         rows = [r for r in cost_rows
-                if decision_id is not None
-                and r.get("decision_id") == decision_id] if not pre_ledger else []
+                if decision_ids
+                and r.get("decision_id") in decision_ids
+                and (r.get("agent_id") is None
+                     or str(r.get("agent_id")) == agent_id)] \
+            if not pre_ledger else []
+        segment_flags = quality.copy()
+        if len(segment_boundaries) > 1:
+            segment_flags.append("boundary_superseded_within_turn")
         request_costs = None
         if rows:
             tokens_in = [r["input_tokens"] for r in rows
@@ -190,12 +247,22 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             "schema_version": SCHEMA_CONTROLLED,
             "run_id": summary.get("match_id"),
             "game_instance_id": summary.get("game_instance_id"),
-            "segment_id": f"turn:{turn}",
+            # multi-agent runs must disambiguate the segment; single-agent
+            # runs keep the original stable id
+            "segment_id": f"turn:{turn}" if single_agent
+            else f"turn:{turn}:{agent_id}",
+            "agent_id": agent_id,
+            "player_id": next((e.get("player_id") for e in events
+                               if _agents(e)), None),
             "split_group": _split_group(summary),
             "decision_id": decision_id,
             "directive_id": boundary.get("directive_id") if boundary else None,
-            "provider_requests": boundary.get("provider_requests")
-            if boundary else None,
+            # the turn's TOTAL request count across its decisions (the
+            # economy refresh makes a second provider call)
+            "provider_requests": sum(
+                b.get("provider_requests") or 0
+                for b in segment_boundaries) if segment_boundaries else None,
+            "decisions_in_turn": len(segment_boundaries),
             "decision_source": boundary.get("source") if boundary else None,
             "logical_request_ids": sorted({
                 r["logical_request_id"] for r in rows
@@ -209,7 +276,7 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             if isinstance(final_turn, int) else None,
             "censoring": "run_aborted" if aborted else None,
             "visibility_class": "ordinary_player_information",
-            "quality_flags": quality.copy(),
+            "quality_flags": segment_flags,
             "source_manifest_ref": {"artifact": "summary.json"},
         })
     return samples
@@ -223,6 +290,11 @@ def _spectator_intervals(events: list[dict[str, Any]],
     turn's END, so the start/end turn labels legitimately differ. The
     mismatch is carried as a quality flag, never silently reconciled."""
     gaps = [e for e in events if e.get("audit") == "trace_gap"]
+    jump_gaps = [e for e in events if e.get("audit") == "capture_gap"]
+    gap_inferred_rounds = sum(
+        1 for e in events
+        if e.get("kind") == "HUMAN_TURN_START"
+        and e.get("boundary") == "gap_inferred")
     open_start: dict[str, Any] | None = None
     samples: list[dict[str, Any]] = []
     for e in events:
@@ -245,6 +317,8 @@ def _spectator_intervals(events: list[dict[str, Any]],
             flags.append("orphan_end_without_start")
         if start_turn != end_turn:
             flags.append("turn_label_mismatch")
+        if start is not None and start.get("boundary") == "gap_inferred":
+            flags.append("gap_inferred_round")
         samples.append({
             "sample_class": "spectator_interval",
             "schema_version": SCHEMA_SPECTATOR,
@@ -258,8 +332,11 @@ def _spectator_intervals(events: list[dict[str, Any]],
             "observed_interval_start": _ref(start["seq"]) if start else None,
             "observed_interval_end": _ref(end["seq"]),
             "interval_closed": True,
-            "source_cursor_start": None,  # pre-CAP-01 runs carry no cursors
-            "source_cursor_end": None,
+            # CAP-R1 #11: the ACTUAL provenance cursors when the run
+            # carries them (None only for pre-CAP-01 runs)
+            "source_cursor_start":
+                start.get("source_cursor") if start else None,
+            "source_cursor_end": end.get("source_cursor"),
             "snapshot_refs": [_ref(snap["seq"])] if snap else [],
             "ambient_diff_refs": [_ref(end["seq"])],
             "ambient_row_count": len(end.get("human_ambient", [])),
@@ -269,6 +346,8 @@ def _spectator_intervals(events: list[dict[str, Any]],
                 {str(row.get("entity_id", ":")).split(":")[0]
                  for row in end.get("human_ambient", [])}),
             "capture_gaps": len(gaps),
+            "engine_jump_gaps": len(jump_gaps),
+            "gap_inferred_rounds": gap_inferred_rounds,
             "truncated": bool(snap.get("truncated")) if snap else None,
             "human_window": start.get("window") if start else None,
             "eligible_tasks": ["state_trend", "outcome_label"],
@@ -293,7 +372,7 @@ def _spectator_intervals(events: list[dict[str, Any]],
             "observed_interval_start": _ref(open_start["seq"]),
             "observed_interval_end": None,
             "interval_closed": False,
-            "source_cursor_start": None,
+            "source_cursor_start": open_start.get("source_cursor"),
             "source_cursor_end": None,
             "snapshot_refs": [_ref(s["seq"]) for s in events
                               if s["kind"] == "SPECTATOR_SNAPSHOT"
@@ -304,6 +383,8 @@ def _spectator_intervals(events: list[dict[str, Any]],
             "observed_actor_ids": [],
             "entity_owner_ids": [],
             "capture_gaps": len(gaps),
+            "engine_jump_gaps": len(jump_gaps),
+            "gap_inferred_rounds": gap_inferred_rounds,
             "truncated": None,
             "human_window": open_start.get("window"),
             "eligible_tasks": ["state_trend", "outcome_label"],

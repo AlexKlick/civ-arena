@@ -13,6 +13,8 @@ spike). Two properties are pinned by tests:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json as _json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -266,7 +268,7 @@ class MiniMaxMessagesClient:
                                                 "prompt_tokens")
                     output_tokens = _usage_value(usage, "output_tokens",
                                                  "completion_tokens")
-            self.on_attempt({
+            record = {
                 "ts": _utcnow_iso(), "request_kind": request_kind,
                 "attempt": attempt, "status_code": status_code,
                 "latency_ms": latency_ms, "model": body.get("model"),
@@ -276,7 +278,17 @@ class MiniMaxMessagesClient:
                 "logical_request_id": logical_request_id,
                 "request_set_key": set_key,
                 "decision_id": self.decision_id,
-            })
+            }
+            if sent_key:
+                # CAP-R1 #13: sweep at FIRE time with the credential
+                # actually sent — a provider response echoing the key back
+                # (including an OLD key after mid-flight env rotation) must
+                # never reach ANY sink. The serialized-record sweep leaves
+                # every other value verbatim.
+                with contextlib.suppress(TypeError, ValueError):
+                    record = _json.loads(
+                        _json.dumps(record).replace(sent_key, "<redacted>"))
+            self.on_attempt(record)
 
         last_error = "no attempt made"
         for attempt in range(self.spec.max_retries + 1):

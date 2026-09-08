@@ -979,6 +979,12 @@ def dump_ambient() -> str:
     return "Puppeteer.DumpAmbient()"
 
 
+def roster() -> str:
+    """v0.4.0: the all-players roster read (majors AND minors — every
+    other enumeration is alive-majors-only, which hid city-states)."""
+    return "Puppeteer.Roster()"
+
+
 def release(player_id: int, turn: int = -1) -> str:
     """TURN-BOUND idempotent lease release (Codex P1-8): -1 releases any
     lease for the player (diagnostics); a turn releases only that turn's
