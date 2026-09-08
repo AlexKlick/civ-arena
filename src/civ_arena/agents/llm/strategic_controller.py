@@ -290,11 +290,18 @@ class StrategicController:
                 # Resolve pending options BEFORE this turn's decision and any
                 # economy action: the model must see current completion and
                 # censor state, and an interrupt must be visible before the
-                # next primitive effect.
+                # next primitive effect. The curator never catalogs queued
+                # cities, so the engine-rate recheck reads each pending city's
+                # catalog row explicitly (one guarded read per pending build).
+                pending_catalogs: dict[str, list] = {}
+                for pending_id in self._forecast.pending_city_ids():
+                    rows = await curator.read('get_available_production',
+                                              city_id=pending_id)
+                    pending_catalogs[pending_id] = rows if isinstance(rows, list) else []
                 for event in self._forecast.observe(turn=turn,
                                                     cities=curator.own('get_cities'),
                                                     units=curator.state['get_units'],
-                                                    catalogs=curator.production):
+                                                    catalogs=pending_catalogs):
                     self._emit(runtime, 'strategy_forecast_outcome', source='autopilot',
                                **event)
             facts = self._facts(curator)
@@ -791,7 +798,10 @@ class StrategicController:
                 comparison = compare_alternatives(
                     turn=runtime._turn, city_id=cid, candidates=policy['candidates'],
                     catalog=catalog, preferences=directive['production_preferences'],
-                    threats=threats, defense_goal=policy.get('defense_goal'))
+                    threats=threats,
+                    defense_context={'defenders':
+                                     policy.get('defenders_owned_queued_reserved'),
+                                     'defense_goal': policy.get('defense_goal')})
                 self._emit(runtime, 'strategy_forecast', source='autopilot', city_id=cid,
                            forecast=forecast, comparison=comparison)
             args = production_args(policy, curator.production.get(cid, []), curator.state,

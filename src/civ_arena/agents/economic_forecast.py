@@ -143,19 +143,22 @@ def _unit_fallback_rank(item: str) -> int:
 
 def _bounded_set(candidates: list[dict], preferences: list[str],
                  threats: tuple[str, ...] | list[str],
-                 defense_goal: int | None) -> list[dict]:
+                 defense_context: Mapping | None) -> list[dict]:
     """Bounded mirror of the production-policy cascade; not the full legal catalog.
 
     The confirmed-barbarian override fires only under the policy's own
-    shortfall condition (defenders < defense_goal). When threats are visible
-    but the shortfall is unknown (advisory context evaluates no inventory),
-    the growth order stands and the threat contingency branch carries the
-    preempt condition instead of silently flipping the recommendation.
+    shortfall condition (defenders_owned_queued_reserved < defense_goal, both
+    taken from the policy result — never recomputed here) AND only when an
+    eligible defender exists; with no eligible defender the policy falls
+    through to its normal cascade, and so does this mirror. When threats are
+    visible but the shortfall is unknown (advisory context evaluates no
+    inventory), the growth order stands and the threat contingency branch
+    carries the preempt condition instead of flipping the recommendation.
     """
     eligible = [row for row in candidates if row.get('eligible')]
-    defenders = sum(row.get('effective', 0) for row in eligible
-                    if row['item_id'] in DEFENDERS)
-    if threats and defense_goal is not None and defenders < defense_goal:
+    shortfall = (defense_context is not None
+                 and defense_context['defenders'] < defense_context['defense_goal'])
+    if threats and shortfall and any(row['item_id'] in DEFENDERS for row in eligible):
         defense = [item for item in preferences if item in DEFENDERS] + list(DEFENDERS)
 
         def defense_rank(row: dict) -> tuple[int, str]:
@@ -182,7 +185,7 @@ def _bounded_set(candidates: list[dict], preferences: list[str],
 def compare_alternatives(*, turn: int, city_id: str, candidates: list[dict],
                          catalog: list, preferences: list[str],
                          threats: tuple[str, ...] | list[str] = (),
-                         defense_goal: int | None = None,
+                         defense_context: Mapping | None = None,
                          statics: Mapping[str, dict] | None = None) -> dict:
     """Compare one bounded candidate set at equal budget: per-item timing plus the
     first composed sequence (investment-then-next). Selection mirrors the existing
@@ -195,7 +198,7 @@ def compare_alternatives(*, turn: int, city_id: str, candidates: list[dict],
     if statics is None:
         unsupported.append('static_yield_and_maintenance_effects')
     summaries = []
-    for row in _bounded_set(candidates, preferences, threats, defense_goal):
+    for row in _bounded_set(candidates, preferences, threats, defense_context):
         item = row['item_id']
         observed = rows.get(item, {})
         turns = turns_or_none(observed.get('turns'))
@@ -228,9 +231,13 @@ def compare_alternatives(*, turn: int, city_id: str, candidates: list[dict],
         'threat_contingency': {
             'condition': 'confirmed is_barbarian contact within THREAT_RADIUS '
                          'of an owned city',
-            'preempt_condition': 'defenders_owned_queued_reserved < defense_goal',
-            'defense_goal': defense_goal,
-            'shortfall_basis': 'evaluated from policy candidates' if defense_goal is not None
+            'preempt_condition': 'defenders_owned_queued_reserved < defense_goal '
+                                 'and an eligible defender exists',
+            'defenders_owned_queued_reserved': (
+                defense_context['defenders'] if defense_context is not None else None),
+            'defense_goal': (defense_context['defense_goal']
+                             if defense_context is not None else None),
+            'shortfall_basis': 'policy_result' if defense_context is not None
                                else 'unknown_inventory_not_evaluated',
             'consequence': 'defense candidates preempt; pending investment forecasts '
                            'are censored, never silently kept'},

@@ -140,11 +140,13 @@ def test_comparison_threat_branch_preempts_investment():
                row("ARCHER", kind="unit", cost=35, turns=2)]
     record = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
                                   catalog=catalog, preferences=["MONUMENT"],
-                                  threats=("u9:1",), defense_goal=2)
+                                  threats=("u9:1",),
+                                  defense_context={'defenders': 0, 'defense_goal': 2})
     assert record["selection"]["recommended"] == "ARCHER"
     assert record["observed_threat_unit_ids"] == ["u9:1"]
     assert record["threat_contingency"]["consequence"].startswith("defense")
     assert record["threat_contingency"]["defense_goal"] == 2
+    assert record["threat_contingency"]["shortfall_basis"] == "policy_result"
     assert record["candidates"][0]["completion_turn"] == 12
 
 
@@ -154,9 +156,13 @@ def test_comparison_threat_without_shortfall_keeps_growth_order():
                             effective=2)]
     catalog = [row("MONUMENT", turns=3),
                row("ARCHER", kind="unit", cost=35, turns=2)]
+    # policy numbers say the defense goal is already satisfied: no preempt,
+    # even though an eligible defender exists in the candidate set
     no_shortfall = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
                                         catalog=catalog, preferences=["MONUMENT"],
-                                        threats=("u9:1",), defense_goal=2)
+                                        threats=("u9:1",),
+                                        defense_context={'defenders': 2,
+                                                         'defense_goal': 2})
     assert no_shortfall["selection"]["recommended"] == "MONUMENT"
     unknown = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
                                    catalog=catalog, preferences=["MONUMENT"],
@@ -167,6 +173,18 @@ def test_comparison_threat_without_shortfall_keeps_growth_order():
     assert unknown["observed_threat_unit_ids"] == ["u9:1"]
     assert unknown["threat_contingency"]["shortfall_basis"] == \
         "unknown_inventory_not_evaluated"
+
+
+def test_comparison_threat_shortfall_without_eligible_defender_falls_through():
+    candidates = [candidate("GRANARY"), candidate("MONUMENT")]
+    catalog = [row("GRANARY", turns=4), row("MONUMENT", turns=3)]
+    record = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
+                                  catalog=catalog, preferences=["MONUMENT"],
+                                  threats=("u9:1",),
+                                  defense_context={'defenders': 0, 'defense_goal': 2})
+    # choose_production finds no eligible defender and falls through to the
+    # normal cascade (preferred MONUMENT), never alphabetical GRANARY
+    assert record["selection"]["recommended"] == "MONUMENT"
 
 
 def test_comparison_unit_tier_mirrors_policy_fallback_order():

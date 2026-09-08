@@ -10,11 +10,14 @@ from civ_arena.agents.runtime import AgentProfile, build_runtime
 from civ_arena.config import ConfigError, LLMSpec, parse_config
 from fakes import FakeModel, use
 
-CATALOG = [{'item_id': 'MONUMENT', 'kind': 'building', 'cost': 25, 'turns': 3},
-           {'item_id': 'WARRIOR', 'kind': 'unit', 'cost': 30, 'turns': 2}]
+CATALOG = (('MONUMENT', 'building', 25, 3), ('WARRIOR', 'unit', 30, 2))
 
 
 class Facade:
+    """Engine-like catalog: turns COUNT DOWN from the turn production was set
+    (GetTurnsLeft semantics). `stall` pins MONUMENT's estimate so the implied
+    completion date slips — the rate-assumption invalidation case."""
+
     def __init__(self):
         self.units = [{'unit_id': 'u0:1', 'owner_id': 0, 'type': 'SCOUT',
                        'coord': '0,0', 'movement': 2, 'hp': 100,
@@ -23,6 +26,9 @@ class Facade:
                         'production_queue': [], 'population': 3}]
         self.you = {'researching': 'MINING', 'gold': 0}
         self.calls = []
+        self.turn = 1
+        self.production_set_turn = 1
+        self.stall = False
 
     async def get_visible_map(self):
         self.calls.append('map')
@@ -42,7 +48,11 @@ class Facade:
         return [{'tech_id': 'POTTERY'}]
 
     async def get_available_production(self, city_id):
-        return copy.deepcopy(CATALOG)
+        elapsed = self.turn - self.production_set_turn
+        return [{'item_id': item, 'kind': kind, 'cost': cost,
+                 'turns': base if self.stall and item == 'MONUMENT'
+                 else base - elapsed}
+                for item, kind, cost, base in CATALOG]
 
     async def set_research(self, tech_id):
         self.calls.append(('set_research', tech_id))
@@ -52,6 +62,7 @@ class Facade:
     async def set_city_production(self, city_id, item_id):
         self.calls.append(('set_city_production', city_id, item_id))
         self.cities[0]['production_queue'] = item_id
+        self.production_set_turn = self.turn
         return {'status': 'accepted'}
 
     async def fortify(self, unit_id, **kwargs):
@@ -93,6 +104,7 @@ def baseline_setup(monkeypatch):
 
 
 async def advance(controller, runtime, facade, turn, **kwargs):
+    facade.turn = turn
     runtime.begin_turn(turn)
     await controller.take_turn(runtime, facade, **kwargs)
 
@@ -191,6 +203,22 @@ async def test_knob_on_leaves_executor_calls_identical(forecast_setup, baseline_
         await advance(on_controller, on_runtime, on_facade, turn)
         await advance(off_controller, off_runtime, off_facade, turn)
     assert on_facade.calls == off_facade.calls
+
+
+async def test_rate_slippage_censors_through_controller(forecast_setup):
+    """R2 regression: healthy countdown never censors; a slipping estimate does."""
+    controller, runtime, model, facade, records = forecast_setup
+    await advance(controller, runtime, facade, 1)  # MONUMENT, completion turn 4
+    await advance(controller, runtime, facade, 2)  # countdown 2 -> implied 4: clean
+    assert not [row for row in of_kind(records, 'strategy_forecast_outcome')
+                if row['event'] == 'rate_estimate_changed']
+    facade.stall = True
+    await advance(controller, runtime, facade, 3)  # estimate pinned at 3 -> implied 6
+    slipped = [row for row in of_kind(records, 'strategy_forecast_outcome')
+               if row['event'] == 'rate_estimate_changed']
+    assert slipped and slipped[0]['turn'] == 3
+    assert slipped[0]['recorded_completion_turn'] == 4
+    assert slipped[0]['implied_completion_turn'] == 6
 
 
 def _config_doc(*, knob, strategic=True, adaptive=True):

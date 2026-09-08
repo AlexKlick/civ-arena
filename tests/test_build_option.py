@@ -91,33 +91,48 @@ def test_censor_event_fires_once_per_pending_build():
     assert monitor._pending["c0:1"]["censored_turn"] == 11
 
 
-def test_rate_estimate_change_censors_when_fresh_catalog_available():
+def test_healthy_countdown_does_not_censor():
+    """GetTurnsLeft is a countdown: turns decrement while completion holds."""
     monitor = DevelopmentOptionMonitor(0)
-    monitor.register(forecast(turns=3))
-    stale = monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])], units=[unit()])
-    assert stale == []  # no fresh catalog row: recheck unavailable, nothing guessed
-    changed = monitor.observe(turn=12, cities=[city(queue=["MONUMENT"])], units=[unit()],
-                              catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
-                                                  "cost": 25, "turns": 6}]})
-    assert [event["event"] for event in changed] == ["rate_estimate_changed"]
-    assert changed[0]["previous_engine_turns"] == 3
-    assert changed[0]["engine_turns"] == 6
-    repeat = monitor.observe(turn=13, cities=[city(queue=["MONUMENT"])], units=[unit()],
-                             catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
-                                                 "cost": 25, "turns": 6}]})
+    monitor.register(forecast(turns=3, turn=10))  # implied completion turn 13
+    for turn, remaining in ((11, 2), (12, 1)):
+        events = monitor.observe(
+            turn=turn, cities=[city(queue=["MONUMENT"])], units=[unit()],
+            catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                                "cost": 25, "turns": remaining}]})
+        assert events == []
+    assert monitor._pending["c0:1"]["censored"] is None
+
+
+def test_completion_date_slippage_censors_once():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast(turns=3, turn=10))  # implied completion turn 13
+    stalled = monitor.observe(
+        turn=11, cities=[city(queue=["MONUMENT"])], units=[unit()],
+        catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                            "cost": 25, "turns": 3}]})
+    assert [event["event"] for event in stalled] == ["rate_estimate_changed"]
+    assert stalled[0]["recorded_completion_turn"] == 13
+    assert stalled[0]["implied_completion_turn"] == 14
+    repeat = monitor.observe(
+        turn=12, cities=[city(queue=["MONUMENT"])], units=[unit()],
+        catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                            "cost": 25, "turns": 3}]})
     assert repeat == []
     completed = monitor.observe(turn=14, cities=[city(queue=[])], units=[unit()])
     assert completed[0]["censored"] == "rate_estimate_changed"
+    assert completed[0]["censored_turn"] == 11
 
 
-def test_unchanged_rate_estimate_does_not_censor():
+def test_zero_or_absent_turns_row_never_censors():
     monitor = DevelopmentOptionMonitor(0)
-    monitor.register(forecast(turns=3))
-    events = monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])], units=[unit()],
-                             catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
-                                                 "cost": 25, "turns": 3}]})
-    assert events == []
-    assert monitor._pending["c0:1"]["censored"] is None
+    monitor.register(forecast(turns=3, turn=10))
+    for bad in (0, None):
+        events = monitor.observe(
+            turn=11, cities=[city(queue=["MONUMENT"])], units=[unit()],
+            catalogs={"c0:1": [{"item_id": "MONUMENT", "kind": "building",
+                                "cost": 25, "turns": bad}]})
+        assert events == []
 
 
 def test_threat_outside_radius_does_not_censor():
@@ -208,6 +223,6 @@ def test_advisory_carries_confirmed_threats_without_flipping_recommendation():
     assert plan["observed_threat_unit_ids"] == ["u9:1"]
     assert plan["selection"]["recommended"] == "MONUMENT"
     assert plan["threat_contingency"]["preempt_condition"] == \
-        "defenders_owned_queued_reserved < defense_goal"
+        "defenders_owned_queued_reserved < defense_goal and an eligible defender exists"
     assert plan["threat_contingency"]["shortfall_basis"] == \
         "unknown_inventory_not_evaluated"
