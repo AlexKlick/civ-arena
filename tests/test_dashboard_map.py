@@ -9,7 +9,7 @@ import pytest
 
 from civ_arena import dashboard as d
 from civ_arena import minimap
-from test_minimap import bind, packet, source
+from test_minimap import bind, packet, source, world_event
 
 
 def records():
@@ -197,6 +197,58 @@ def test_map_read_refuses_symlink_artifact(tmp_path):
     (run / "events.jsonl").symlink_to(elsewhere)
     with pytest.raises(OSError):
         d.DashboardStore(tmp_path).load_map("fixture", player=0, turn=1)
+
+
+def with_world(extra):
+    """Insert world records after the turn-1 packets, before the turn-2 packet."""
+    base = records()
+    events = base[:2] + extra + base[2:]
+    return [dict(event, seq=i) for i, event in enumerate(events)]
+
+
+def test_spectator_world_survives_redaction_and_stays_spectator_scoped(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAP_TEST_SECRET", "CIVILIZATION_GENEVA")
+    write(tmp_path, with_world([world_event(2, 1)]))
+    store = d.DashboardStore(tmp_path)
+    result = store.load_map("fixture", spectator=True, turn=1)
+    world = result["world"]
+    assert world["receipt"] == {"seq": 2, "turn": 1, "source": "spectator_world", "ts": None}
+    assert world["after_seat"] == 1
+    # Names redact; coordinates, counts and palette ints survive intact.
+    roster = {row["player_id"]: row["civ_name"] for row in world["roster"]}
+    assert roster[12] == "[redacted]" and roster[0] == "CIVILIZATION_EGYPT"
+    assert {owner: len(rows) for owner, rows
+            in world["owned_tiles_columns"].items()} == {"0": 6, "1": 5, "12": 12}
+    assert world["fog_audit"]["disagree_coords"] == ["6,4", "1,1"]
+    assert world["palette"]["12"]["primary"] > 0
+    assert "CIVILIZATION_GENEVA" not in minimap.canonical(result)
+    assert '"world"' in minimap.render(result)
+    # The player route over the same log attaches nothing.
+    assert "world" not in store.load_map("fixture", player=0, turn=1)
+
+
+def test_snapshot_carried_world_reaches_the_map_through_the_real_route(tmp_path):
+    write(tmp_path, with_world([world_event(2, 1, kind="SPECTATOR_SNAPSHOT", audit=None)]))
+    result = d.DashboardStore(tmp_path).load_map("fixture", spectator=True, turn=1)
+    assert result["world"]["receipt"]["source"] == "SPECTATOR_SNAPSHOT"
+    assert result["world"]["receipt"]["turn"] == 1
+
+
+def test_unusable_world_keeps_the_map_but_withholds_the_layer(tmp_path):
+    broken = world_event(2, 1)
+    broken["world"] = {"schema": 1}
+    write(tmp_path, with_world([broken]))
+    result = d.DashboardStore(tmp_path).load_map("fixture", spectator=True, turn=1)
+    assert "world" not in result
+    assert any("withheld" in line for line in result["limits"])
+    assert minimap.render(result)
+
+
+def test_redaction_that_corrupts_a_world_coordinate_refuses_the_map(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAP_TEST_SECRET", "6,4")
+    write(tmp_path, with_world([world_event(2, 1)]))
+    with pytest.raises(ValueError, match="coordinate"):
+        d.DashboardStore(tmp_path).load_map("fixture", spectator=True, turn=1)
 
 
 def test_http_map_scope_csp_readonly_and_unavailable_view(tmp_path):

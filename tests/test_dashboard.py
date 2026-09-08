@@ -405,3 +405,75 @@ def test_bad_encoded_strategy_payload_is_incomplete(tmp_path, payload):
     result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
     assert result['status'] == 'incomplete'
     assert 'Strategy payload JSON is malformed.' in result['warnings']
+
+
+# -- spectator world summary (M4) ---------------------------------------------
+
+def spectator_world(turn=1, world=None):
+    from test_minimap import world_event
+    return world_event(999, turn, world)
+
+
+def test_spectator_world_summary_present_bounded_and_redacted(tmp_path, monkeypatch):
+    monkeypatch.setenv('EXAMPLE_API_KEY', 'CIVILIZATION_GENEVA')
+    events = [start(), identity(), spectator_world(1)]
+    write_run(tmp_path, events)
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    summary = result['spectator_world_summary']
+    assert summary['records'] == [{'turn': 1, 'seq': 2, 'after_seat': 1,
+                                   'game_era': 'ANCIENT',
+                                   'players': [
+                                       {'player_id': 0, 'civ_name': 'CIVILIZATION_EGYPT',
+                                        'gold': 220, 'gold_per_turn': 6.5, 'science': 7.2,
+                                        'culture': 3.1, 'faith': 1.0, 'era': 'ANCIENT',
+                                        'researching': 'POTTERY',
+                                        'civics': ['CODE_OF_LAWS'], 'civics_count': 1,
+                                        'researched_count': 1},
+                                       {'player_id': 1, 'civ_name': 'CIVILIZATION_SUMERIA',
+                                        'gold': 180, 'gold_per_turn': 4.0, 'science': 5.5,
+                                        'culture': 2.0, 'faith': 0.5, 'era': 'ANCIENT',
+                                        'researching': 'ANIMAL_HUSBANDRY', 'civics': [],
+                                        'civics_count': 0, 'researched_count': 0}]}]
+    assert 'omniscient' in summary['note']
+    assert 'CIVILIZATION_GENEVA' not in json.dumps(result)
+
+
+def test_spectator_world_summary_keeps_one_record_per_turn_and_late_seq(tmp_path):
+    from copy import deepcopy
+
+    from test_minimap import WORLD_FIXTURE
+
+    later = spectator_world(1)
+    later['world'] = deepcopy(WORLD_FIXTURE)
+    later['world']['after_seat'] = 0
+    events = [start(), identity(), spectator_world(1), later, spectator_world(2)]
+    write_run(tmp_path, events)
+    records = d.DashboardStore(tmp_path).load('match-one', now=NOW)[
+        'spectator_world_summary']['records']
+    assert [row['turn'] for row in records] == [1, 2]
+    assert records[0]['after_seat'] == 0 and records[0]['seq'] == 3
+    assert records[1]['turn'] == 2 and records[1]['seq'] == 4
+
+
+def test_spectator_world_summary_absent_without_records_and_bounded_when_many(
+        tmp_path, monkeypatch):
+    from civ_arena import dashboard_compare
+    write_run(tmp_path, [start(), identity()])
+    assert 'spectator_world_summary' not in d.DashboardStore(tmp_path).load(
+        'match-one', now=NOW)
+    write_run(tmp_path, [start(), identity()] + [spectator_world(t) for t in range(1, 6)],
+              name='match-many')
+    monkeypatch.setattr(dashboard_compare, 'MAX_WORLD_RECORDS', 3)
+    result = d.DashboardStore(tmp_path).load('match-many', now=NOW)
+    assert [row['turn'] for row in result['spectator_world_summary']['records']] == [3, 4, 5]
+    assert any('Spectator world record limit' in warning for warning in result['warnings'])
+
+
+def test_unusable_spectator_worlds_are_counted_not_projected(tmp_path):
+    broken = spectator_world(1)
+    broken['world'] = {'schema': 7}
+    write_run(tmp_path, [start(), identity(), broken, spectator_world(2)])
+    result = d.DashboardStore(tmp_path).load('match-one', now=NOW)
+    records = result['spectator_world_summary']['records']
+    assert [row['turn'] for row in records] == [2]
+    assert any('unusable' in warning for warning in result['warnings'])

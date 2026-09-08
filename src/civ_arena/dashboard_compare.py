@@ -14,6 +14,7 @@ import json
 import math
 
 from civ_arena.dashboard_map import CONTEXT_MARKER
+from civ_arena.minimap import validate_world
 
 MAX_RESEARCHED = 128
 MAX_HISTORY = 160
@@ -25,6 +26,9 @@ MAX_ROLES = 32
 MAX_REASONS = 16
 MAX_UNCERTAINTIES = 16
 MAX_DIRECTIVE_FIELDS = 32
+MAX_WORLD_RECORDS = 120
+MAX_SUMMARY_PLAYERS = 16
+MAX_SUMMARY_CIVICS = 32
 NAME_CHARS = 40
 
 RESEARCH_NOTE = ("Research sets come from each seat's own retained request packets. Seats are "
@@ -32,6 +36,14 @@ RESEARCH_NOTE = ("Research sets come from each seat's own retained request packe
 TIMELINE_NOTE = ('Per-turn rows come from retained audits, tool results and request packets. '
                  'Gaps are unsupplied values, never interpolated. Provider requests are '
                  'recorded POST attempts, not decisions.')
+WORLD_NOTE = ('Spectator world captures are omniscient engine reads taken at recorded seat and '
+              'turn points. They are operator evidence, never player-visible state, and never '
+              'enter model packets. Economy rows are the latest capture at or before the '
+              'selected turn; each capture states the seat it followed.')
+WORLD_INVALID = ('A spectator world capture was present but unusable; it was ignored.')
+WORLD_RECORDS_CAPPED = 'Spectator world record limit reached; older captures omitted.'
+WORLD_PLAYERS_CAPPED = ('Spectator economy row limit reached; later players in one capture '
+                        'omitted.')
 CATALOG_NOTE = ('Tree layout comes from the base source catalog (scope base_source_catalog, '
                 'effective ruleset unverified, group semantics unverified). It is not the '
                 'effective ruleset of this match.')
@@ -528,6 +540,85 @@ def first_value(*candidates):
     return None, None
 
 
+def spectator_world_records(events, warnings):
+    """Latest validated spectator world per turn, in turn order.
+
+    World-carrying records are the hotseat ``spectator_world`` audit (spectator
+    scope) and ``SPECTATOR_SNAPSHOT`` events whose payload carries ``world``.
+    Each record is validated whole through the map's world validator; an
+    unusable capture is ignored and counted, never half-projected. When one
+    turn carries several captures (baseline plus per-seat), the highest
+    recorded sequence is that turn's capture.
+    """
+    latest, invalid = {}, 0
+    for event in events:
+        if event.get('audit') == 'spectator_world':
+            if event.get('visibility_scope') != 'spectator' or 'world' not in event:
+                continue
+        elif event.get('kind') != 'SPECTATOR_SNAPSHOT' or 'world' not in event:
+            continue
+        turn, seq = event.get('turn'), event.get('seq')
+        if type(turn) is not int or type(seq) is not int or turn < 0:
+            continue
+        try:
+            doc = validate_world(event['world'])
+        except (ValueError, TypeError, RecursionError):
+            invalid += 1
+            continue
+        held = latest.get(turn)
+        if held is None or seq > held['seq']:
+            latest[turn] = {'turn': turn, 'seq': seq, 'doc': doc}
+    if invalid:
+        warn(warnings, WORLD_INVALID)
+    return [latest[turn] for turn in sorted(latest)]
+
+
+def spectator_world_summary(events, warnings, redactor):
+    """The bounded spectator economy summary for the run payload, or None.
+
+    The payload carries one bounded record per captured turn; the match room
+    shows the record at or before the selected turn (the same latest-at-or-
+    before-cutoff rule the observed map uses). A capture's economy rows are
+    redacted name by name, and counts stay counts.
+    """
+    records = spectator_world_records(events, warnings)
+    if not records:
+        return None
+    if len(records) > MAX_WORLD_RECORDS:
+        warn(warnings, WORLD_RECORDS_CAPPED)
+        records = records[-MAX_WORLD_RECORDS:]
+    rows = []
+    for record in records:
+        players, capped = [], False
+        for player in record['doc']['players']:
+            if len(players) >= MAX_SUMMARY_PLAYERS:
+                capped = True
+                break
+            civics = [name(civic, redactor) for civic in (player.get('civics') or [])
+                      if name(civic, redactor) is not None]
+            players.append({'player_id': player['player_id'],
+                            'civ_name': name(player.get('civ_name'), redactor),
+                            'gold': number(player.get('gold')),
+                            'gold_per_turn': number(player.get('gold_per_turn')),
+                            'science': number(player.get('science')),
+                            'culture': number(player.get('culture')),
+                            'faith': number(player.get('faith')),
+                            'era': name(player.get('era'), redactor),
+                            'researching': name(player.get('researching'), redactor),
+                            'civics': civics[:MAX_SUMMARY_CIVICS],
+                            'civics_count': len(player.get('civics') or []),
+                            'researched_count': len(player.get('researched') or [])})
+        row = {'turn': record['turn'], 'seq': record['seq'],
+               'after_seat': record['doc']['after_seat'],
+               'game_era': name(record['doc'].get('game_era'), redactor),
+               'players': players}
+        if capped:
+            row['players_truncated'] = True
+            warn(warnings, WORLD_PLAYERS_CAPPED)
+        rows.append(row)
+    return {'note': WORLD_NOTE, 'records': rows}
+
+
 def timeline_row(turn, fact, added, redactor):
     audit = fact.get('audit') if isinstance(fact.get('audit'), dict) else {}
     overview = fact.get('get_overview') or {}
@@ -589,9 +680,36 @@ def timeline_from(events, turns, seats, packets, warnings, redactor):
             warn(warnings, ROWS_CAPPED)
         seat_rows.append({'player_id': seat['player_id'], 'agent_id': seat['agent_id'],
                           'rows': ordered[-MAX_ROWS:]})
+    series = [{'key': key, 'label': label} for key, label in SERIES]
+    # Spectator science/culture series: optional, present only when omniscient
+    # captures recorded those yields, and tagged with their source so spectator
+    # data never reads as a seat's own packet. A turn without a capture keeps a
+    # gap; values are never interpolated or carried forward.
+    economy = {}
+    for record in spectator_world_records(events, warnings):
+        for player in record['doc']['players']:
+            economy[(player['player_id'], record['turn'])] = player
+    attached = False
+    if economy:
+        for seat in seat_rows:
+            for row in seat['rows']:
+                player = economy.get((seat['player_id'], row['turn']))
+                if player is None:
+                    continue
+                science, culture = number(player.get('science')), number(player.get('culture'))
+                if science is not None:
+                    row['science'] = science
+                    row['sources']['science'] = 'spectator'
+                    attached = True
+                if culture is not None:
+                    row['culture'] = culture
+                    row['sources']['culture'] = 'spectator'
+                    attached = True
+    if attached:
+        series += [{'key': 'science', 'label': 'Science per turn', 'source': 'spectator'},
+                   {'key': 'culture', 'label': 'Culture per turn', 'source': 'spectator'}]
     return {'turns': timeline_turns(seat_rows), 'seats': seat_rows, 'violations': marks,
-            'series': [{'key': key, 'label': label} for key, label in SERIES],
-            'note': TIMELINE_NOTE}
+            'series': series, 'note': TIMELINE_NOTE}
 
 
 def timeline_turns(seat_rows):

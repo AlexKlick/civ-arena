@@ -1,0 +1,418 @@
+{
+  "schema": 1,
+  "after_seat": 1,
+  "contexts": {
+    "roster": "gamecore",
+    "tiles": "gamecore",
+    "palette": "ingame"
+  },
+  "game_era": "ANCIENT",
+  "grid": {
+    "w": 96,
+    "h": 60
+  },
+  "roster": [
+    {
+      "player_id": 0,
+      "civ_name": "CIVILIZATION_EGYPT",
+      "leader": "CLEOPATRA",
+      "is_major": true,
+      "is_barbarian": false,
+      "alive": true,
+      "level": "PRINCE",
+      "kind": "major",
+      "suzerain": -1
+    },
+    {
+      "player_id": 1,
+      "civ_name": "CIVILIZATION_SUMERIA",
+      "leader": "GILGAMESH",
+      "is_major": true,
+      "is_barbarian": false,
+      "alive": true,
+      "level": "PRINCE",
+      "kind": "major",
+      "suzerain": -1
+    },
+    {
+      "player_id": 12,
+      "civ_name": "CIVILIZATION_GENEVA",
+      "leader": "",
+      "is_major": false,
+      "is_barbarian": false,
+      "alive": true,
+      "level": "",
+      "kind": "city_state",
+      "suzerain": 0
+    }
+  ],
+  "players": [
+    {
+      "player_id": 0,
+      "civ_name": "CIVILIZATION_EGYPT",
+      "gold": 220,
+      "gold_per_turn": 6.5,
+      "science": 7.2,
+      "culture": 3.1,
+      "faith": 1.0,
+      "upkeep": 3.0,
+      "era": "ANCIENT",
+      "researching": "POTTERY",
+      "researched": [
+        "MINING"
+      ],
+      "civics": [
+        "CODE_OF_LAWS"
+      ]
+    },
+    {
+      "player_id": 1,
+      "civ_name": "CIVILIZATION_SUMERIA",
+      "gold": 180,
+      "gold_per_turn": 4.0,
+      "science": 5.5,
+      "culture": 2.0,
+      "faith": 0.5,
+      "upkeep": 2.0,
+      "era": "ANCIENT",
+      "researching": "ANIMAL_HUSBANDRY",
+      "researched": [],
+      "civics": []
+    }
+  ],
+  "cities": [
+    {
+      "city_id": "c0:131073",
+      "owner": 0,
+      "q": 1,
+      "r": 1,
+      "name": "THEBES",
+      "population": 7,
+      "is_capital": true,
+      "is_major": true,
+      "production_queue": [
+        "SETTLER"
+      ],
+      "buildings": [],
+      "districts": [],
+      "hp": 100,
+      "max_hp": 200
+    },
+    {
+      "city_id": "c1:131074",
+      "owner": 1,
+      "q": 4,
+      "r": 1,
+      "name": "UR",
+      "population": 6,
+      "is_capital": true,
+      "is_major": true,
+      "production_queue": [],
+      "buildings": [],
+      "districts": []
+    },
+    {
+      "city_id": "c12:131075",
+      "owner": 12,
+      "q": 6,
+      "r": 4,
+      "name": "GENEVA",
+      "population": 3,
+      "is_capital": true,
+      "is_major": false,
+      "production_queue": [],
+      "buildings": [],
+      "districts": []
+    }
+  ],
+  "owned_tiles_columns": {
+    "0": [
+      {
+        "q": 0,
+        "r": 1,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 1,
+        "r": 0,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 1,
+        "r": 1,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": 131073
+      },
+      {
+        "q": 2,
+        "r": 0,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 2,
+        "r": 1,
+        "terrain": "PLAINS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 2,
+        "r": 2,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      }
+    ],
+    "1": [
+      {
+        "q": 4,
+        "r": 0,
+        "terrain": "PLAINS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 4,
+        "r": 1,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": 131074
+      },
+      {
+        "q": 4,
+        "r": 2,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 3,
+        "r": 1,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 3,
+        "r": 2,
+        "terrain": "PLAINS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      }
+    ],
+    "12": [
+      {
+        "q": 6,
+        "r": 4,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": 131075
+      },
+      {
+        "q": 7,
+        "r": 3,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 6,
+        "r": 3,
+        "terrain": "PLAINS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 5,
+        "r": 4,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 5,
+        "r": 5,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": true,
+        "city": -1
+      },
+      {
+        "q": 6,
+        "r": 5,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 7,
+        "r": 4,
+        "terrain": "PLAINS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 7,
+        "r": 2,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 6,
+        "r": 2,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 5,
+        "r": 3,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 8,
+        "r": 3,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      },
+      {
+        "q": 4,
+        "r": 4,
+        "terrain": "GRASS",
+        "feature": "",
+        "resource": "",
+        "improvement": "",
+        "district": "",
+        "river": false,
+        "city": -1
+      }
+    ]
+  },
+  "fog_audit": {
+    "requested": 23,
+    "engine_visible": 21,
+    "engine_not_visible": 1,
+    "unavailable": 1,
+    "disagree_coords": [
+      "6,4",
+      "1,1"
+    ]
+  },
+  "palette": {
+    "0": {
+      "primary": 4293246323,
+      "secondary": 4289759797
+    },
+    "1": {
+      "primary": 4284861368,
+      "secondary": 4281244293
+    },
+    "12": {
+      "primary": 4292120294,
+      "secondary": 4288370614
+    }
+  },
+  "truncated": {
+    "tiles": false,
+    "world": false
+  },
+  "read_ms": 12.5
+}

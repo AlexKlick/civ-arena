@@ -20,6 +20,11 @@ const option = (parent, value, label) => {
   const e = text('option', label, parent); e.value = value; return e;
 };
 const civName = value => typeof value === 'string' && value !== '' ? value : null;
+// The spectator world (M4) is omniscient engine capture attached to the bundle
+// on the spectator route only; player-route pages never carry it. Everything
+// below reads it defensively: a missing key stays unsupplied, never a value.
+const world = data.world && typeof data.world === 'object' ? data.world : null;
+let worldLayerOn = true;
 let snapshots = [], rows = [], actors = [], productions = [], windows = [], bounds, view, selected = null;
 let tiles = new Map(), seatIds = [], roster = {ids: null, names: new Map()}, layers = {}, latestSeq = () => undefined;
 for (const seat of data.seats) option($('perspective'), String(seat.player_id), `Player ${seat.player_id}`);
@@ -82,6 +87,101 @@ function computeRoster(snaps) {
     }
   }
   return {ids: supplied ? [...ids].sort((a, b) => a - b) : null, names};
+}
+// -- spectator world helpers -------------------------------------------------
+function worldRosterByOwner() {
+  const byOwner = new Map();
+  if (!world || !Array.isArray(world.roster)) return byOwner;
+  for (const row of world.roster) {
+    if (row !== null && typeof row === 'object' && Number.isInteger(row.player_id)) {
+      byOwner.set(row.player_id, row);
+    }
+  }
+  return byOwner;
+}
+// Owner colour for the world layer: the engine palette int when it is present
+// AND decodes, else the M1 owner class. The int is data on the wire; it only
+// becomes a colour here, at runtime.
+function worldOwnerColor(id) {
+  if (world && world.palette !== null && typeof world.palette === 'object' &&
+      Object.prototype.hasOwnProperty.call(world.palette, String(id))) {
+    const row = world.palette[String(id)];
+    const rgb = row !== null && typeof row === 'object'
+      ? rgbString(paletteColor(row.primary)) : null;
+    if (rgb !== null) return rgb;
+  }
+  return ownerColorFor(id);
+}
+function worldOwnedCoords() {
+  const coords = [];
+  if (!world || world.owned_tiles_columns === null ||
+      typeof world.owned_tiles_columns !== 'object') return coords;
+  for (const rows of Object.values(world.owned_tiles_columns)) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (row !== null && typeof row === 'object' && Number.isInteger(row.q) &&
+          Number.isInteger(row.r)) coords.push(`${row.q},${row.r}`);
+    }
+  }
+  return coords;
+}
+// Only city-state cities draw world badges: majors' cities already appear as
+// seat badges from the seats' own packets, and duplicating them would blend the
+// two ownership provenances the legend keeps apart.
+function worldCityRows() {
+  if (!world || !Array.isArray(world.cities)) return [];
+  const roster = worldRosterByOwner();
+  return world.cities.filter(city => {
+    if (city === null || typeof city !== 'object' || !Number.isInteger(city.owner)) return false;
+    const row = roster.get(city.owner);
+    return row !== undefined && row.is_major === false && row.is_barbarian !== true;
+  });
+}
+// A five-point star path: capital status is a shape, never a font glyph.
+function starPath(x, y, radius) {
+  const points = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? radius : radius * 0.45;
+    const a = (Math.PI / 5) * i - Math.PI / 2;
+    points.push(`${fmt(x + r * Math.cos(a))},${fmt(y + r * Math.sin(a))}`);
+  }
+  return 'M' + points.join(' L') + ' Z';
+}
+function drawWorldLayer(parent) {
+  if (!world) return;
+  for (const [id, hexes] of worldTintGroups()) {
+    svg('path', {class: 'tint world', d: hexOutlinePath(hexes), fill: worldOwnerColor(id),
+      'fill-opacity': palette.tint_opacity, 'data-owner': id, 'data-key': `world:${id}`}, parent);
+  }
+  for (const [id, group] of territorySegments(world, worldRosterByOwner(), palette.borders.inset)) {
+    svg('path', {class: 'border world', d: segmentPath(group.segments), stroke: worldOwnerColor(id),
+      'data-owner': id, 'data-segments': group.segments.length, 'data-key': `world:${id}`}, parent);
+  }
+  for (const city of worldCityRows()) {
+    const [x, y] = point(`${city.q},${city.r}`);
+    const name = civName(city.name) || 'city-state city';
+    const g = svg('g', {class: 'world-city', 'data-owner': city.owner,
+      'aria-label': `${name} · spectator capture`}, parent);
+    drawCityBadge(g, x, y, {color: worldOwnerColor(city.owner), population: city.population});
+    if (city.is_capital === true) {
+      svg('path', {class: 'world-capital', d: starPath(x, y - 15.5, 3.4)}, g);
+    }
+    svg('text', {class: 'label', x, y: y + 24}, g).textContent = name;
+  }
+}
+function worldTintGroups() {
+  const groups = new Map();
+  if (!world || world.owned_tiles_columns === null ||
+      typeof world.owned_tiles_columns !== 'object') return groups;
+  for (const owner of Object.keys(world.owned_tiles_columns)) {
+    const id = Number(owner), rows = world.owned_tiles_columns[owner];
+    if (!Number.isInteger(id) || !Array.isArray(rows)) continue;
+    const hexes = rows.filter(row => row !== null && typeof row === 'object' &&
+      Number.isInteger(row.q) && Number.isInteger(row.r))
+      .map(row => `${row.q},${row.r}`);
+    if (hexes.length) groups.set(id, hexes);
+  }
+  return groups;
 }
 // Elevation marks are paths, not font glyphs, so no font can turn them into tofu.
 const markPath = (x, y, kind) => kind === 'mountain'
@@ -172,10 +272,13 @@ function draw() {
   layers = {};
   // `labels` is painted after `actors` so an actor badge can never overpaint a
   // decision label; it takes no pointer events, so it never hides a target.
-  for (const name of ['tiles', 'tints', 'borders', 'elevation', 'paths', 'districts', 'actors',
-                      'labels']) {
+  // The spectator territory layer sits between the observed tints and the
+  // observed borders: omniscient capture underneath, seat observation on top.
+  for (const name of ['tiles', 'tints', 'world', 'borders', 'elevation', 'paths', 'districts',
+                      'actors', 'labels']) {
     layers[name] = svg('g', {class: `layer layer-${name}`}, $('world'));
   }
+  if (layers.world) layers.world.classList.toggle('off', world !== null && !worldLayerOn);
   const marks = {hills: {0: [], 1: []}, mountain: {0: [], 1: []}};
   const tileFragment = document.createDocumentFragment(), miniFragment = document.createDocumentFragment();
   rows.forEach(alternatives => {
@@ -196,6 +299,7 @@ function draw() {
     svg('path', {class: 'tint', d: hexOutlinePath(g.hexes), fill: ownerColorFor(g.owner_id), 'fill-opacity': palette.tint_opacity,
       'data-owner-class': g.ownerClass, 'data-owner': g.owner_id, 'data-stale': g.stale ? 1 : 0, 'data-key': key}, layers.tints);
   }
+  drawWorldLayer(layers.world);
   for (const [key, g] of borderSegments(tiles, resolve, classify, palette.borders.inset)) {
     const style = palette.borders[g.style];
     svg('path', {class: 'border', d: segmentPath(g.segments), stroke: ownerColorFor(g.owner_id), 'stroke-width': style.width,
@@ -239,8 +343,12 @@ function draw() {
     e.addEventListener('keydown', ev => {if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();pick();}});
     svg('text',{class:'label',x,y:y+3},layers.districts).textContent='D';
   });
+  // Omniscient territory can extend beyond every observed receipt; the fit
+  // bounds follow it so the world layer is never silently cropped. The small
+  // overview navigator stays observed-receipts-only.
   const coords = [...rows.map(r => r[0].observation.coord), ...actors.map(a => a.observation.coord),
-    ...productions.filter(a=>a.admission?.coord).map(a=>a.admission.coord)];
+    ...productions.filter(a=>a.admission?.coord).map(a=>a.admission.coord),
+    ...worldOwnedCoords()];
   const xy = coords.map(point), xs=xy.map(p=>p[0]), ys=xy.map(p=>p[1]);
   bounds = xy.length ? [Math.min(...xs)-25,Math.min(...ys)-25,
     Math.max(...xs)-Math.min(...xs)+50,Math.max(...ys)-Math.min(...ys)+50] : [0,0,100,100];
@@ -254,6 +362,7 @@ function draw() {
   $('graph-note').textContent='Select an owned unit for recorded candidate choices, or a city for its observed production queue.';
   renderLegend(union);
   renderResearch(union);
+  renderRoster();
   showProductionJournal();
   fit();
 }
@@ -290,6 +399,35 @@ function renderResearch(union) {
       text('p', `Options not requested in this packet (${r.options_source || 'source not recorded'})`, block);
     }
   });
+}
+// Roster panel: the engine's spectator roster (civ, leader, kind, suzerain,
+// alive). Identity here is omniscient capture; the observed map's ownership
+// still comes from seat packets, and the two provenances never blend.
+function renderRoster() {
+  const root = $('roster');
+  if (!root) return;
+  root.replaceChildren();
+  if (!world) {
+    text('p', 'Spectator roster not recorded in this export.', root);
+    return;
+  }
+  const receipt = world.receipt !== null && typeof world.receipt === 'object' ? world.receipt : {};
+  text('p', `Engine roster at the spectator capture (seat ${world.after_seat} · turn ` +
+    `${receipt.turn !== undefined ? receipt.turn : 'not recorded'}).`, root);
+  const rows = Array.isArray(world.roster) ? world.roster : [];
+  if (!rows.length) text('p', 'No roster rows recorded in this capture.', root);
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object' || !Number.isInteger(row.player_id)) continue;
+    const entry = text('div', '', root, `roster-row${row.alive === false ? ' dead' : ''}`);
+    text('span', `P${row.player_id}`, entry, 'roster-id');
+    const civ = civName(row.civ_name);
+    text('strong', civ === null ? 'civ not recorded' : civ.replace(/^CIVILIZATION_/, ''), entry);
+    text('span', civName(row.leader) || 'leader not recorded', entry, 'roster-leader');
+    text('span', civName(row.kind) || 'kind not recorded', entry, 'roster-kind');
+    text('span', Number.isInteger(row.suzerain) && row.suzerain !== -1
+      ? `suzerain P${row.suzerain}` : 'no suzerain recorded', entry, 'roster-suzerain');
+    text('span', row.alive === false ? 'not alive' : 'alive', entry, 'roster-alive');
+  }
 }
 // The key is drawn by the same functions as the map, so it cannot drift from it.
 function renderLegend(union) {
@@ -334,6 +472,35 @@ function renderLegend(union) {
   item(g, s => borderSample(s, T.ink, 'unknown_beyond'), palette.borders.unknown_beyond.label);
   item(g, s => { tile(s, 'GRASS'); svg('polygon', {class: 'tint', points: ring(12.5), fill: T.seat0, 'fill-opacity': palette.tint_opacity}, s); },
     'tint = owner colour over observed owned hexes');
+  if (world) {
+    g = group('Territory (spectator capture)');
+    // The toggle switches ONLY this layer; observed borders, tints and honesty
+    // marks stay on so the two provenances can be compared, never confused.
+    const toggle = text('div', '', g, 'legend-item');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.id = 'world-territory-toggle';
+    box.checked = worldLayerOn;
+    box.className = 'legend-check';
+    const boxLabel = document.createElement('label');
+    boxLabel.htmlFor = 'world-territory-toggle';
+    boxLabel.className = 'legend-label';
+    boxLabel.textContent = 'Spectator territory (omniscient capture)';
+    box.addEventListener('change', () => {
+      worldLayerOn = box.checked;
+      if (layers.world) layers.world.classList.toggle('off', !worldLayerOn);
+    });
+    toggle.append(box, boxLabel);
+    const turn = world.receipt !== null && typeof world.receipt === 'object' &&
+      world.receipt.turn !== undefined ? world.receipt.turn : 'not recorded';
+    item(g, s => svg('line', {class: 'border world', x1: -13, y1: 0, x2: 13, y2: 0,
+      stroke: worldOwnerColor(0)}, s),
+      `Territory: spectator capture at seat ${world.after_seat} · turn ${turn}`);
+    item(g, s => borderSample(s, T.ink, 'frontier'), 'Observed ownership: seat packets');
+    item(g, s => svg('polygon', {class: 'tint world', points: ring(12.5),
+      fill: worldOwnerColor(0), 'fill-opacity': palette.tint_opacity}, s),
+      'tint = engine palette colour over omniscient owned hexes; absent or undecodable palette falls back to the owner class');
+  }
   g = group('Provenance');
   item(g, s => tile(s, 'GRASS', null, true), 'Dim = older packet receipt for that seat (hexes, borders, tints) — receipt age, not visibility');
   item(g, null, 'Blank = unsupplied, not empty world. Extents are observed receipts, not map bounds.');
@@ -344,6 +511,14 @@ function renderLegend(union) {
     'hatched outline = excluded candidate (reason in tooltip)');
   item(g, s => svg('line', {class: 'decision-edge', x1: -12, y1: 7, x2: 12, y2: -7, stroke: T.seat0}, s),
     'solid edge = the recorded chosen move, not movement or current orders');
+  if (world) {
+    const fog = world.fog_audit !== null && typeof world.fog_audit === 'object'
+      ? world.fog_audit : {};
+    const disagree = Array.isArray(fog.disagree_coords) ? fog.disagree_coords.length : 0;
+    item(g, null, `Fog audit (spectator capture): engine visible ${fog.engine_visible !== undefined ? fog.engine_visible : '—'} · ` +
+      `engine not visible ${fog.engine_not_visible !== undefined ? fog.engine_not_visible : '—'} · ` +
+      `unavailable ${fog.unavailable !== undefined ? fog.unavailable : '—'} · disagreeing ${disagree}`);
+  }
   if (union) item(g, null, 'Union view: each hex takes the newest receipt carrying an owner key; seats are asynchronous.');
 }
 function setView() {$('map').setAttribute('viewBox',view.join(' '));

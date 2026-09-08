@@ -399,7 +399,7 @@
   function buildChart(series, turns, seats, violations) {
     const key = String(series.key);
     const figure = H.element('figure', 'timeline-chart');
-    H.append(figure, H.element('figcaption', '', String(series.label || key)));
+    H.append(figure, H.element('figcaption', '', Core.seriesTitle(series)));
     const canvas = H.svg('svg', {class: 'timeline-svg', viewBox: `0 0 ${PLOT.w} ${PLOT.h}`,
       tabindex: 0, role: 'group', 'data-series': key,
       'aria-label': `${series.label || key} for each seat, by turn`});
@@ -576,7 +576,7 @@
     grid.replaceChildren(...built.map(item => item.figure));
     const columns = [];
     series.forEach((entry, seriesIndex) => seats.forEach((seat, seatIndex) => columns.push({
-      label: `${seatTag(seat.player_id)} ${entry.label || entry.key}`,
+      label: `${seatTag(seat.player_id)} ${Core.seriesTitle(entry)}`,
       values: charts[seriesIndex].seatValues[seatIndex].values,
     })));
     const headRow = H.append(H.element('tr'), H.element('th', '', 'Turn'));

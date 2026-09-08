@@ -142,6 +142,57 @@ function tintGroups(tiles, resolve, classify) {
   }
   return groups;
 }
+// Spectator world territory: frontier-only border segments over the omniscient
+// owned_tiles_columns. Every owned tile is known here, so every edge is either a
+// frontier (the neighbour's owner differs, or the neighbour is not owned, which
+// is the territory's map edge) or interior (same owner both sides, no segment).
+// There is no `unknown_beyond`: that honesty rule belongs to the seat-observed
+// view, where unobserved neighbours exist. Grouping is per owner (one path per
+// owner), and the segments use the same insetEdge primitive as the observed
+// borders so the two layers stay visually comparable. `rosterByOwner` (a Map of
+// owner id -> roster row, or null) only annotates each group with the engine
+// roster row so the renderer can name city-states; geometry never needs it.
+function territorySegments(world, rosterByOwner, inset) {
+  const owned = new Map();
+  const columns = world !== null && typeof world === 'object' &&
+    world.owned_tiles_columns !== null && typeof world.owned_tiles_columns === 'object'
+    ? world.owned_tiles_columns : {};
+  for (const owner of Object.keys(columns)) {
+    const id = Number(owner);
+    if (!Number.isInteger(id) || id < 0) continue;
+    const rows = columns[owner];
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (row === null || typeof row !== 'object') continue;
+      if (!Number.isInteger(row.q) || !Number.isInteger(row.r)) continue;
+      owned.set(`${row.q},${row.r}`, id);
+    }
+  }
+  const roster = rosterByOwner instanceof Map ? rosterByOwner : null;
+  const groups = new Map();
+  for (const [coord, id] of owned) {
+    for (let edge = 0; edge < 6; edge++) {
+      if (owned.get(neighbourCoord(coord, edge)) === id) continue;
+      if (!groups.has(id)) {
+        groups.set(id, {owner_id: id, roster: roster !== null ? roster.get(id) : null, segments: []});
+      }
+      groups.get(id).segments.push(insetEdge(coord, edge, inset));
+    }
+  }
+  return groups;
+}
+// Engine palette ints are 32-bit ABGR-packed words (the Civ player-colour
+// convention): red is the LOW byte, green the next, blue the third; the top byte
+// is alpha and carries no hue. This function is the single interpretation
+// point — if a live probe later confirms a different packing, only this body
+// changes. Anything that is not an integer in [0, 2^32) reads as null so the
+// renderer falls back to the M1 owner-class colour.
+function paletteColor(value) {
+  if (!Number.isInteger(value) || value < 0 || value > 0xFFFFFFFF) return null;
+  return {r: value & 0xFF, g: (value >>> 8) & 0xFF, b: (value >>> 16) & 0xFF};
+}
+const rgbString = colour => colour === null ? null
+  : `rgb(${colour.r},${colour.g},${colour.b})`;
 function segmentPath(segments) {
   return segments.map(s => `M${fmt(s[0])} ${fmt(s[1])} L${fmt(s[2])} ${fmt(s[3])}`).join(' ');
 }
@@ -235,4 +286,10 @@ function decisionShapes(decision) {
           chosen: dest === null ? null
             : {coord: dest, x1: ox, y1: oy, x2: point(dest)[0], y2: point(dest)[1]},
           candidates, labels, dropped};
+}
+// Same module pattern as dashboard_static's core modules: a window global is
+// unnecessary here (top-level declarations already reach the concatenated
+// script), but Node tests and any require() consumer get the world functions.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {territorySegments, paletteColor, rgbString};
 }
