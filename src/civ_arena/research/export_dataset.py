@@ -48,6 +48,10 @@ _ACTION_TOOLS = frozenset({
 })
 # privileged/future label fields live OUTSIDE any actor-input section;
 # the exporter emits no context/prompt/payload fields at all
+# sinks whose failure cannot cost a row in llm_costs.jsonl: the spend
+# ledger and the opt-in wire transcript (live_driver._guarded). Anything
+# else — including an absent sink name — is treated as cost-affecting.
+_UNRELATED_SINKS = frozenset({"spend", "wire"})
 _FORBIDDEN_KEYS = frozenset({
     "request", "response", "prompt", "system", "messages", "payload",
     "context", "wire", "actor_input",
@@ -70,6 +74,12 @@ def _parse_events(raw: bytes) -> list[dict[str, Any]]:
     # non-integral seq stays as it is and fails contiguity.
     for row in rows:
         seq = row.get("seq")
+        # Codex r5: bool is an int subclass, so `true` at index 1 would
+        # satisfy contiguity (True == 1) and then order as an integer.
+        # A boolean sequence number is a malformed log, not data.
+        if isinstance(seq, bool):
+            raise ValueError("event sequence is not an integer — "
+                             "refusing export")
         if isinstance(seq, float) and seq.is_integer():
             row["seq"] = int(seq)
     if [r.get("seq") for r in rows] != list(range(len(rows))):
@@ -263,6 +273,17 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
     ``None`` derives from disk (the direct-call path, unchanged)."""
     boundaries: dict[tuple[int, str], list[dict[str, Any]]] = {}
     ledger_gaps = 0
+    # Codex r5 finding 1: the driver guards THREE sinks — spend, costs and
+    # the opt-in wire transcript — and audits each failure under the same
+    # name (live_driver._guarded). Only "costs" writes llm_costs.jsonl, so
+    # a failed wire transcript must not make every decision's costs
+    # incomplete. An UNKNOWN or absent sink name stays conservative: a
+    # legacy log that does not say which sink failed may have lost cost
+    # rows. The audit carries the agent, so an attributable cost failure
+    # suppresses only that agent's samples; one without an agent is
+    # unattributable and suppresses the run.
+    cost_gap_agents: set[str] = set()
+    cost_gap_unattributable = False
     for e in events:
         if e["kind"] == "HEARTBEAT" and e.get("audit") == "decision_boundary":
             boundaries.setdefault(
@@ -271,6 +292,13 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
         elif e["kind"] == "HEARTBEAT" \
                 and e.get("audit") == "ledger_write_failed":
             ledger_gaps += 1
+            if e.get("sink") in _UNRELATED_SINKS:
+                continue
+            who = e.get("agent") or e.get("agent_id")
+            if who is None:
+                cost_gap_unattributable = True
+            else:
+                cost_gap_agents.add(str(who))
 
     pre_ledger = (ledger_absent if ledger_absent is not None
                   else not (run_dir / "llm_costs.jsonl").exists())
@@ -467,13 +495,17 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                     # recorded rows let a decision with one of two
                     # expected attempts — or with ZERO recorded attempts
                     # — publish usage_complete: true beside
-                    # costs_attempts_missing. A ledger write known to
-                    # have been lost anywhere in the run is
-                    # unattributable, so no sample may claim coverage.
+                    # costs_attempts_missing. A COST-ledger write known
+                    # to have been lost for this agent (or for nobody in
+                    # particular) means rows may be missing that nothing
+                    # else can reveal, so that sample may not claim
+                    # coverage — see cost_gap_agents above for why an
+                    # unrelated sink's failure does not count.
                     "usage_complete": (unknown_usage == 0
                                        and unknown_latency == 0
                                        and bool(rows)
-                                       and not ledger_gaps
+                                       and not cost_gap_unattributable
+                                       and agent_id not in cost_gap_agents
                                        and (not isinstance(expected, int)
                                             or len(rows) >= expected)),
                 }

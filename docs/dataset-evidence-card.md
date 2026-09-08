@@ -60,31 +60,39 @@ filled. `quality_flags` values and their meaning:
 |---|---|
 | `pre_boundary_run` | run predates decision boundaries — `decision_id`/`directive_id` are null, not invented |
 | `pre_ledger_run` | run predates the cost ledger — `request_costs` is null, not zero |
-| `ledger_write_gaps` | at least one `ledger_write_failed` audit: recorded costs are known-incomplete |
+| `ledger_write_gaps` | at least one `ledger_write_failed` audit **for any sink** (`spend`, `costs` or `wire`). It is a run-level "a sink failed" signal and does *not* by itself mean cost rows were lost — read `usage_complete`, which distinguishes the cost ledger from the others |
 | `run_aborted` | the run did not finish; `censoring: "run_aborted"` and outcome horizons are truncated |
 
 **Sample-level (controlled_decision)**
 
 | Flag | Meaning |
 |---|---|
-| `boundary_superseded_within_turn` | **turn-level context, not a claim about this sample**: the turn carried more than one boundary. It is set on *every* sample of that turn, including the surviving last boundary, so a consumer reading one sample knows the turn's decision grain was split. |
-| `decision_id_reused_costs_ambiguous` | the id appears on more than one boundary **anywhere in the run** — across turns and agents, not only within one `(turn, agent)`. Every occurrence is flagged. |
+| `boundary_superseded_within_turn` | **`(turn, agent)`-scoped context, not a claim about this sample**: that agent's turn carried more than one boundary. It is set on every sample of that `(turn, agent)` segment, including the surviving last boundary. A second agent in the same turn with a single boundary is *not* flagged. |
+| `decision_id_reused_costs_ambiguous` | the id has more than one **exported occurrence** anywhere in the run — across turns and agents. Note that a single agentless boundary is fanned out into every agent's segment for that turn, so one source boundary can produce two occurrences and raise this flag. |
 | `costs_partial` | at least one *recorded* attempt's usage or latency was not captured — the totals are a **known subtotal**, not a total |
 | `costs_attempts_missing` | fewer attempts were recorded than the boundary expected |
 
-Cost joining: each ledger row is assigned to **exactly one** sample. A row is
-eligible for the occurrences whose agent it may join (a row with no `agent_id`
-may join any), and it goes to the **last eligible occurrence** for its decision
-id. Agent-qualified rows for one reused id can therefore land on different
-occurrences — the rule is last-eligible-per-row, not one universal final
-occurrence for the id.
+Cost joining: every ledger row **that has an eligible occurrence** is assigned to
+exactly one sample. A row is eligible for the occurrences whose agent it may join
+(a row with no `agent_id` may join any), and it goes to the **last eligible
+occurrence** for its decision id. Agent-qualified rows for one reused id can
+therefore land on different occurrences — the rule is last-eligible-per-row, not
+one universal final occurrence for the id. A row whose decision id appears on no
+boundary, or whose agent matches no occurrence of that id, **remains unassigned**
+and is carried by no sample: the exporter conserves rows only within the set it
+can attribute, and does not invent a home for the rest.
 
 `usage_complete` asserts that the known subtotal **covers the whole decision**:
 every recorded attempt has usage and latency, at least one attempt was recorded,
-the count is not short of what the boundary expected, and no ledger write is
-known to have been lost anywhere in the run (a lost write is unattributable, so
-no sample may claim coverage). It is not a statement about the well-formedness
-of the rows present. Independent of it: an empty known-usage list yields `None`,
+and the count is not short of what the boundary expected. It is additionally
+false when a **cost-ledger** write is known to have been lost for this sample's
+agent, or lost without an agent recorded (unattributable, so the whole run loses
+the claim). The driver guards three sinks under one `ledger_write_failed` audit —
+`spend`, `costs` and the opt-in `wire` transcript — and only `costs` writes the
+cost ledger, so a failed wire transcript does **not** invalidate cost coverage;
+an unknown or absent sink name is treated conservatively as cost-affecting.
+`usage_complete` is not a statement about the well-formedness of the rows
+present. Independent of it: an empty known-usage list yields `None`,
 never `0`, so "no known usage" stays distinguishable from "usage known to be
 zero"; a recorded `0` is preserved as data.
 
@@ -99,10 +107,11 @@ zero"; a recorded `0` is preserved as data.
 
 Three **run-wide** counters ride on every interval: `capture_gaps`,
 `engine_jump_gaps`, `gap_inferred_rounds`. `truncated` is **interval-local and
-nullable** — it reports whether *this* interval's own snapshot was truncated, and
-is `null` when the interval has no snapshot (including the open final interval).
-Successive intervals in one run legitimately carry different values, so reading
-one interval never establishes run-wide truncation.
+nullable**: a *closed* interval derives it from its own selected snapshot, and is
+`null` when it selected none; an *open* interval always reports `null` even when
+it retained a `snapshot_refs` entry. Successive intervals in one run legitimately
+carry different values, so reading one interval never establishes run-wide
+truncation, and a `null` never means "not truncated".
 
 ## 4. Actor uncertainty — the hard limit on spectate data
 

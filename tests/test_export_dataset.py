@@ -944,9 +944,13 @@ def test_integral_float_seq_still_ranks_as_its_integer(tmp_path):
     assert sum(s["request_costs"]["attempts"] for s in reused) == 1
     joined = [s for s in reused if s["request_costs"]["attempts"] == 1]
     assert joined[0]["segment_id"] == "turn:2"  # the last occurrence
-    # the float is normalized to a real int, so refs stay int-typed
-    refs = [r["seq"] for s in samples for r in s["observation_refs"]]
-    assert refs and all(isinstance(seq, int) for seq in refs)
+    # and the normalization is what did it: the BOUNDARY's own seq comes
+    # back as a real int (Codex r5 — an observation-ref assertion would
+    # not have proven this, since the changed row is not a ref)
+    from civ_arena.research.export_dataset import _parse_events
+    parsed = _parse_events((run_dir / "events.jsonl").read_bytes())
+    assert parsed[6]["audit"] == "decision_boundary"
+    assert isinstance(parsed[6]["seq"], int)
 
 
 def test_usage_complete_requires_covering_every_expected_attempt(tmp_path):
@@ -992,29 +996,91 @@ def test_usage_complete_false_when_no_attempt_was_recorded(tmp_path):
     assert "costs_attempts_missing" in first["quality_flags"]
 
 
-def test_usage_complete_false_when_a_ledger_write_was_lost(tmp_path):
-    """A ledger_write_failed audit means rows were lost somewhere in the
-    run and cannot be attributed to a sample — so no sample may claim
-    its subtotal covers the decision, however complete it looks."""
-    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
-                         with_boundaries=True)
+def _with_sink_failure(run_dir: Path, **audit_fields) -> None:
+    """Splice one ledger_write_failed audit into a run's events."""
     rows = [json.loads(line) for line
             in (run_dir / "events.jsonl").read_text().splitlines()]
     rebuilt = []
     for i, row in enumerate(rows):
         if i == 1:
             rebuilt.append({**row, "kind": "HEARTBEAT",
-                            "audit": "ledger_write_failed", "sink": "jsonl"})
+                            "audit": "ledger_write_failed", **audit_fields})
         rebuilt.append(row)
     for i, row in enumerate(rebuilt):
         row["seq"] = i
     (run_dir / "events.jsonl").write_text(
         "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+
+
+@pytest.mark.parametrize("sink", ["costs", "jsonl", None])
+def test_usage_complete_false_when_a_cost_ledger_write_was_lost(tmp_path, sink):
+    """A COST-ledger write failure means rows may be missing that nothing
+    else can reveal, so the sample may not claim coverage. An UNKNOWN or
+    absent sink name stays conservative for the same reason."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    fields = {"agent": "a0"} if sink is None else {"agent": "a0", "sink": sink}
+    _with_sink_failure(run_dir, **fields)
     samples, _ = export(run_dir)
     first = next(s for s in samples if s["segment_id"] == "turn:1")
     assert "ledger_write_gaps" in first["quality_flags"]
     assert first["request_costs"]["attempts"] == 1
     assert first["request_costs"]["usage_complete"] is False
+
+
+@pytest.mark.parametrize("sink", ["spend", "wire"])
+def test_unrelated_sink_failure_leaves_cost_coverage_intact(tmp_path, sink):
+    """Codex r5 finding 1: the driver guards three sinks under ONE audit
+    name, but only 'costs' writes llm_costs.jsonl. A failed spend ledger
+    or opt-in wire transcript must not make every decision's costs
+    incomplete when every expected row, token count and latency was
+    recorded."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    _with_sink_failure(run_dir, agent="a0", sink=sink)
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    # the run-level signal survives — something DID fail
+    assert "ledger_write_gaps" in first["quality_flags"]
+    # ...but this decision's cost accounting is genuinely complete
+    assert first["request_costs"]["usage_complete"] is True
+    assert "costs_partial" not in first["quality_flags"]
+
+
+def test_cost_sink_failure_suppresses_only_the_failing_agent(tmp_path):
+    """The audit carries the agent, so an attributable cost failure
+    scopes to that agent's samples; another agent's accounting stands."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    _with_sink_failure(run_dir, agent="a-other", sink="costs")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert "ledger_write_gaps" in first["quality_flags"]
+    assert first["request_costs"]["usage_complete"] is True
+
+
+def test_unattributable_cost_failure_suppresses_the_run(tmp_path):
+    """A cost failure with no agent cannot be scoped, so every sample
+    loses its coverage claim — the conservative case."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    _with_sink_failure(run_dir, sink="costs")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert first["request_costs"]["usage_complete"] is False
+
+
+def test_boolean_seq_is_refused(tmp_path):
+    """Codex r5: bool is an int subclass, so `true` at index 1 would pass
+    the contiguity check (True == 1) and then order as an integer."""
+    run_dir = _write_run(tmp_path, spectate=False)
+    rows = [json.loads(line) for line
+            in (run_dir / "events.jsonl").read_text().splitlines()]
+    rows[1]["seq"] = True
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+    with pytest.raises(ValueError, match="not an integer"):
+        export(run_dir)
 
 
 def test_captured_ledger_absence_never_resurrects_from_disk(tmp_path):
