@@ -55,6 +55,7 @@ local techs = {
   HasTech = function(_, i) return i == 0 end,
 }
 local influence = {GetSuzerain = function() return 42 end}
+local religion = {GetFaithYield = function() return 6 end}
 
 local d1 = {
   GetType = function() return 5 end,
@@ -78,6 +79,8 @@ local growth = {
   GetFoodSurplus = function() return 2 end,
   GetTurnsLeft = function() return 3 end,
 }
+local plotC, plotN  -- forward: city:GetPlot() captures these
+
 local bq = {
   GetCurrentProductionTypeHash = function() return 0 end,
   GetProduction = function() return 5 end,
@@ -95,6 +98,7 @@ local city = {
   GetBuildQueue = function() return bq end,
   GetFood = function() return 21 end,
   GetTurnsLeft = function() return 4 end,
+  GetPlot = function() return plotC end,
 }
 local minorcity = {
   GetX = function() return 30 end,
@@ -108,7 +112,7 @@ local minorcity = {
   GetFood = function() return 5 end,
   GetTurnsLeft = function() return 9 end,
 }
-local plotC = {
+plotC = {
   GetX = function() return 10 end, GetY = function() return 4 end,
   GetFeatureType = function() return -1 end, GetResourceType = function() return -1 end,
   GetImprovementType = function() return -1 end, GetDistrictType = function() return 5 end,
@@ -116,7 +120,7 @@ local plotC = {
   IsCity = function() return true end, GetOwner = function() return 0 end,
   GetTerrainType = function() return 2 end,
 }
-local plotN = {
+plotN = {
   GetX = function() return 11 end, GetY = function() return 4 end,
   GetFeatureType = function() return -1 end, GetResourceType = function() return -1 end,
   GetImprovementType = function() return -1 end, GetDistrictType = function() return -1 end,
@@ -135,6 +139,7 @@ local function P(id, major, barb, city_obj)
     GetCulture = function() return culture end,
     GetTechs = function() return techs end,
     GetInfluence = function() return influence end,
+    GetReligion = function() return religion end,
     GetEra = function() return 0 end,
     GetCivilizationLevelType = function() return 1 end,
     GetCities = function()
@@ -149,6 +154,10 @@ end
 local player_list = {P(0, true, false, city), P(1, false, false, minorcity)}
 for i = 2, 14 do player_list[i + 1] = P(i, false, true, nil) end
 
+PlayerManager = {
+  GetAliveMajors = function() return {player_list[1]} end,
+  GetAlive = function() return player_list end,
+}
 Game = {
   GetPlayers = function() return player_list end,
   GetEras = function() return {GetCurrentEra = function() return 0 end} end,
@@ -162,6 +171,10 @@ Map = {
     return nil
   end,
   GetPlotByIndex = function(_, i) if i == 0 then return plotC end return nil end,
+  GetNeighborPlot = function(x, y, d)
+    if d == 2 and x == 10 and y == 4 then return plotN end
+    return nil
+  end,
 }
 GameInfo = {
   Technologies = setmetatable({}, {__call = function() return iter(techrows) end}),
@@ -249,6 +262,8 @@ def test_missing_globals_yield_missing_rows_never_errors(lua):
         'PROBE|ui.getplayercolors|missing|',
         'PROBE|ui.getheadselectedcity|missing|',
         'PROBE|ui.queryplayerlinecolor|missing|',
+        'PROBE|pv.p0.isvisible.neighbor|missing|',
+        'PROBE|pv.p0.isrevealed.neighbor|missing|',
     ):
         assert expected in rows, expected
     assert all(f'|{t}|' not in r for r in probe_rows(rows) for t in ('error',))
@@ -273,6 +288,16 @@ def test_probe_rows_answer_the_matrix_shape_questions(lua):
         'PROBE|map.getplotcount|number|100',
         'PROBE|map.getgridsize.raw|number|10,8,nil,nil,nil,nil',
         'PROBE|map.getplotbyindex0.raw|table|<table>,nil,nil,nil,nil,nil',
+        # fixed city/plot anchoring: PlayerManager routes (cities_read
+        # mirror) win over the Game.GetPlayers() scan, city:GetPlot() works
+        'PROBE|city.anchor.route|enum|playermanager.majors',
+        'PROBE|city.enum.majors|enum|pid=0,major=true,barb=false,cities=1',
+        'PROBE|city.enum.majors.count|enum|1',
+        'PROBE|city.enum.alive|enum|pid=1,major=false,barb=false,cities=1',
+        'PROBE|city.enum.players|enum|true',
+        'PROBE|city.getplot.raw|table|<table>,nil,nil,nil,nil,nil',
+        'PROBE|city.xy|enum|x=10,y=4',
+        'PROBE|p0.religion.getfaithyield|number|6',
         'PROBE|p0.anchor|table|<table>',
         'PROBE|p0.treasury.getgold.raw|number|12,nil,nil,nil,nil,nil',
         'PROBE|p0.treasury.getgoldbalance|number|12.5',
