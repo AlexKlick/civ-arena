@@ -92,9 +92,9 @@ def baseline_setup(monkeypatch):
     return controller, runtime, model, Facade(), records
 
 
-async def advance(controller, runtime, facade, turn):
+async def advance(controller, runtime, facade, turn, **kwargs):
     runtime.begin_turn(turn)
-    await controller.take_turn(runtime, facade)
+    await controller.take_turn(runtime, facade, **kwargs)
 
 
 def of_kind(records, kind):
@@ -153,6 +153,24 @@ async def test_threat_censors_before_next_production_and_survives_completion(
                  if row['event'] == 'completed']
     assert completed and completed[0]['censored'] == 'threat_interrupt'
     assert completed[0]['censored_turn'] == 2
+
+
+async def test_current_turn_resolution_reaches_that_turns_decision(forecast_setup):
+    """R1 regression: the model deciding on turn N sees turn-N outcomes."""
+    controller, runtime, model, facade, records = forecast_setup
+    await advance(controller, runtime, facade, 1)
+    for turn in (2, 3):
+        await advance(controller, runtime, facade, turn)
+    facade.cities[0]['production_queue'] = []
+    await advance(controller, runtime, facade, 4, tactical_requested=True)
+    completed = [row for row in of_kind(records, 'strategy_forecast_outcome')
+                 if row['event'] == 'completed']
+    assert completed and completed[0]['observed_turn'] == 4
+    assert completed[0]['estimated_completion_turn'] == 4
+    # The decision request for turn 4 already carries the resolved outcome.
+    context = model.requests[-1]['messages'][0]['content']
+    assert '"completed"' in context
+    assert '"recent_outcomes"' in context
 
 
 async def test_knob_off_default_is_inert(baseline_setup):

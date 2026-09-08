@@ -2,11 +2,12 @@
 
 The option spans turns for one owned city: it registers a pre-action forecast
 when the executor accepts a production choice, censors the forecast when a
-confirmed threat appears under a non-defender build, and resolves the outcome
-from later queue observations. It composes bounded advisory context for the
-strategic controller's decision metadata. It never widens the executor's
-choices: the production policy's defense override remains the only behavioral
-effect of a threat.
+confirmed threat appears under a non-defender build or when a fresh catalog
+row contradicts the engine-rate basis, and resolves the outcome from later
+queue observations. It composes bounded advisory context for the strategic
+controller's decision metadata. It never widens the executor's choices: the
+production policy's defense override remains the only behavioral effect of a
+threat.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from civ_arena.agents.economic_forecast import (
     classify_outcome,
     compare_alternatives,
     forecast_completion_turn,
+    turns_or_none,
 )
 from civ_arena.agents.production_policy import DEFENDERS, THREAT_RADIUS
 from civ_arena.agents.strategy_directive import coordinate
@@ -94,11 +96,15 @@ class DevelopmentOptionMonitor:
         self._recent_outcomes.append(outcome)
         del self._recent_outcomes[:-MAX_RECENT_OUTCOMES]
 
-    def observe(self, *, turn: int, cities: list, units: list) -> list[dict]:
+    def observe(self, *, turn: int, cities: list, units: list,
+                catalogs: Mapping | None = None) -> list[dict]:
         """Resolve pending options against fresh observations; returns audit events.
 
-        Runs before this turn's production actions so an interrupt is visible
-        before the next primitive effect, never only after it.
+        Runs before this turn's decision and production actions so an interrupt
+        is visible before the next primitive effect, never only after it. When
+        a fresh catalog row is available for a pending item (focus-refreshed
+        cities only — queued cities are not catalog-refreshed by default), the
+        engine_rate_basis assumption is rechecked against its turns estimate.
         """
         events: list[dict] = []
         own = [city for city in cities
@@ -117,6 +123,21 @@ class DevelopmentOptionMonitor:
                                'detail': 'no_material_threat assumption invalidated; '
                                          'defense preempts investment',
                                'threat_unit_ids': list(threats)})
+            row = next((entry for entry in (catalogs or {}).get(cid, [])
+                        if isinstance(entry, Mapping) and entry.get('item_id') == item),
+                       None)
+            if row is not None and state['censored'] is None:
+                fresh = turns_or_none(row.get('turns'))
+                recorded = forecast['observed']['engine_turns_estimate']
+                if fresh is not None and recorded is not None and fresh != recorded:
+                    state['censored'] = 'rate_estimate_changed'
+                    state['censored_turn'] = turn
+                    events.append({'city_id': cid, 'item_id': item, 'turn': turn,
+                                   'event': 'rate_estimate_changed',
+                                   'detail': 'engine_rate_basis assumption invalidated: '
+                                             'turns estimate changed',
+                                   'previous_engine_turns': recorded,
+                                   'engine_turns': fresh})
             city = by_id.get(cid)
             if city is None:
                 events.append({'city_id': cid, 'item_id': item, 'turn': turn,
@@ -143,15 +164,19 @@ class DevelopmentOptionMonitor:
             events.append(outcome)
         return events
 
-    def advisory(self, *, turn: int, cities: list, production: Mapping,
+    def advisory(self, *, turn: int, cities: list, units: list, production: Mapping,
                  preferences: list) -> dict:
         """Bounded advisory context for decision metadata.
 
-        Plans use observed catalogs and preferences only; the executor's
-        inventory evaluation is intentionally not duplicated here.
+        Plans use observed catalogs, preferences and the confirmed-threat
+        observable only; the executor's inventory evaluation is intentionally
+        not duplicated here, so the defense shortfall stays unknown and the
+        threat contingency carries the preempt condition instead of flipping
+        the recommendation.
         """
         own = [city for city in cities
                if city.get('owner', city.get('owner_id')) == self.player_id]
+        threats = barbarians_near_owned_cities(units, own, player_id=self.player_id)
         pending = [{'city_id': cid, 'item_id': state['forecast']['item_id'],
                     'estimated_completion_turn': forecast_completion_turn(
                         state['forecast']),
@@ -170,7 +195,8 @@ class DevelopmentOptionMonitor:
                           and isinstance(row.get('item_id'), str)]
             plans[cid] = compare_alternatives(turn=turn, city_id=cid,
                                               candidates=candidates, catalog=catalog,
-                                              preferences=list(preferences))
+                                              preferences=list(preferences),
+                                              threats=threats)
             if len(plans) >= MAX_ADVISORY_CITIES:
                 break
         return {'version': 1, 'option': OPTION_NAME,
