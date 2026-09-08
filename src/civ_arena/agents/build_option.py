@@ -96,6 +96,9 @@ class DevelopmentOptionMonitor:
         self._recent_outcomes.append(outcome)
         del self._recent_outcomes[:-MAX_RECENT_OUTCOMES]
 
+    def pending_city_ids(self) -> list[str]:
+        return sorted(self._pending)
+
     def observe(self, *, turn: int, cities: list, units: list,
                 catalogs: Mapping | None = None) -> list[dict]:
         """Resolve pending options against fresh observations; returns audit events.
@@ -128,15 +131,20 @@ class DevelopmentOptionMonitor:
                        None)
             if row is not None and state['censored'] is None:
                 fresh = turns_or_none(row.get('turns'))
-                recorded = forecast['observed']['engine_turns_estimate']
-                if fresh is not None and recorded is not None and fresh != recorded:
+                recorded = forecast_completion_turn(forecast)
+                # The engine estimate is a COUNTDOWN: a healthy build's turns
+                # decrement each turn while the implied completion date holds.
+                # Only a changed implied completion date invalidates the
+                # engine_rate_basis assumption.
+                if fresh is not None and recorded is not None and turn + fresh != recorded:
                     state['censored'] = 'rate_estimate_changed'
                     state['censored_turn'] = turn
                     events.append({'city_id': cid, 'item_id': item, 'turn': turn,
                                    'event': 'rate_estimate_changed',
                                    'detail': 'engine_rate_basis assumption invalidated: '
-                                             'turns estimate changed',
-                                   'previous_engine_turns': recorded,
+                                             'implied completion date changed',
+                                   'recorded_completion_turn': recorded,
+                                   'implied_completion_turn': turn + fresh,
                                    'engine_turns': fresh})
             city = by_id.get(cid)
             if city is None:
