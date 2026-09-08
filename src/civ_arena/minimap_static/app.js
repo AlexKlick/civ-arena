@@ -99,12 +99,17 @@ function worldRosterByOwner() {
   }
   return byOwner;
 }
-// Owner colour for the world layer: the engine palette int when it is present
-// AND decodes, else the M1 owner class. The int is data on the wire; it only
-// becomes a colour here, at runtime.
+// Owner colour for the world layer: the engine palette int when it is
+// present AND `palette_confirmed === true`, else the M1 owner class.
+// Codex r2 finding 7: the M4 producer always emits `palette_confirmed:
+// false` until a separate live-chain flip verifies the packing against
+// a known leader colour — using the unverified engine ints as fill
+// before that flip would silently miscolour the territory layer.
+// `palette_confirmed === true` is the only path to engine palette.
 function worldOwnerColor(id) {
-  if (world && world.palette !== null && typeof world.palette === 'object' &&
-      Object.prototype.hasOwnProperty.call(world.palette, String(id))) {
+  if (world && world.palette_confirmed === true
+      && world.palette !== null && typeof world.palette === 'object'
+      && Object.prototype.hasOwnProperty.call(world.palette, String(id))) {
     const row = world.palette[String(id)];
     const rgb = row !== null && typeof row === 'object'
       ? rgbString(paletteColor(row.primary)) : null;
@@ -426,7 +431,9 @@ function renderRoster() {
     text('span', civName(row.kind) || 'kind not recorded', entry, 'roster-kind');
     text('span', Number.isInteger(row.suzerain) && row.suzerain !== -1
       ? `suzerain P${row.suzerain}` : 'no suzerain recorded', entry, 'roster-suzerain');
-    text('span', row.alive === false ? 'not alive' : 'alive', entry, 'roster-alive');
+    text('span', row.alive === true ? 'alive'
+        : row.alive === false ? 'not alive' : 'not recorded',
+        entry, 'roster-alive');
   }
 }
 // The key is drawn by the same functions as the map, so it cannot drift from it.

@@ -319,6 +319,20 @@ class LLMAgentRuntime:
             return False, self._error(f"bad arguments: {exc}")
         if curator is not None and name in _GAME_ACTIONS:
             result = curator.action_result(name, args, result)
+        # Codex r2 finding 9: when the curator is None (unpaced tool
+        # use, no caching wrapper), the gate must still apply to the
+        # model-bound overview response. The curator's cache-time gate
+        # closes the cached path; this closes the direct facade path
+        # so default-off tool-response documents stay byte-identical
+        # to the legacy 5-key shape.
+        if name == "get_overview" and not getattr(
+                self.llm, "own_economy_context", False) \
+                and isinstance(result, dict) and "you" in result:
+            gated = dict(result)
+            gated["you"] = {k: result["you"][k] for k in (
+                "player_id", "civ_name", "gold", "researched", "researching"
+            ) if k in result["you"]}
+            result = gated
         ok = not isinstance(result, dict) or result.get("status") != "rejected"
         if name == "end_turn":
             ok = isinstance(result, dict) and result.get("status") == "accepted"

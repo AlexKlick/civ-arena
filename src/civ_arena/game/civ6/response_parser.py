@@ -283,13 +283,22 @@ def parse_cities(lines: list[str], *, qualified: bool = False) -> list[dict[str,
     return sorted(out, key=lambda c: entity_ids.sort_key(c["city_id"]))
 
 
-def _era_name(idx: int) -> str:
+def _era_name(value) -> str:
     """Amendment 3 item 2: the world doc carries era as a NAME STRING,
-    never an int. The wire from the live probe resolves through
-    ``GameInfo.Eras[idx].EraType``; rehearsal / FakeMod emit the raw
-    int — normalize here at parse time so the validator sees a string
-    regardless of transport. The fallback is still a string."""
-    return str(int(idx))
+    never an int. The wire may carry either:
+      - a name string (the live probe path: lua_translator resolves
+        via ``GameInfo.Eras[idx].EraType``, emitting e.g. 'ERA_ANCIENT')
+      - a canonical int (the rehearsal / FakeMod path)
+    Both forms are accepted here — the parser NEVER raises on a
+    well-formed era token, regardless of transport. The fallback for
+    a string that doesn't resolve is the empty string; for an out-of-
+    range int, the stringified int (the previous rehearsal-only
+    fallback)."""
+    if isinstance(value, str):
+        return value
+    if type(value) is int:
+        return str(value)
+    raise ValueError(f"non-canonical era token: {value!r}")
 
 
 def parse_overview(lines: list[str]) -> dict[str, Any]:
@@ -344,15 +353,22 @@ def parse_overview(lines: list[str]) -> dict[str, Any]:
                         if type(value) is not int:
                             raise ValueError(f"non-canonical {key}: {line!r}")
                         row[key] = value
-                # Amendment 3 item 2: per-player era is a NAME STRING
-                # at parse time (the live probe resolves via
-                # GameInfo.Eras; FakeMod / rehearsal emit the raw int).
-                # `?` keeps the field absent; an int resolves to a string
-                # name (or its stringified fallback).
+                # Amendment 3 item 2 (Codex r2 finding 2): per-player
+                # era is a NAME STRING at parse time. The wire may
+                # carry either a name string (the live probe path:
+                # lua_translator resolves via GameInfo.Eras) or a
+                # canonical int (FakeMod / rehearsal). `_era_name`
+                # accepts both forms and normalizes to a string. The
+                # `?` token keeps the field absent.
                 if era != "?":
-                    era_value = _coerce_strict(era)
-                    if type(era_value) is not int:
-                        raise ValueError(f"non-canonical era: {line!r}")
+                    # Try int first (FakeMod / rehearsal emit numeric
+                    # eras). If that fails, treat the token as a name
+                    # string (the live probe path). Either path is
+                    # well-formed; only an unparseable token raises.
+                    try:
+                        era_value = _coerce_strict(era)
+                    except ValueError:
+                        era_value = era
                     row["era"] = _era_name(era_value)
                 if civic != "?":
                     row["progressing_civic"] = None if civic == "-" else civic

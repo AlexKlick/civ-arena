@@ -222,7 +222,7 @@ print("---END---")
 # -- strict parsers ------------------------------------------------------------
 
 
-def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
+def parse_roster(lines: list[str]) -> tuple[list[dict[str, Any]], int]:
     """PLAYERROW|pid|civ|leader|major|barbarian|alive|level|kind|suzerain
     -> roster docs. Exact framing (Amendment 3 item 8): SPECW|1|roster
     header, zero/one ROSTER_TRUNCATED sentinel, 9-field rows in
@@ -230,14 +230,18 @@ def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
     non-PLAYERROW marker raise. The wire keeps level '?' — the parsed
     doc emits no level key (Amendment 3 item 2).
 
-    Note: the ROSTER_TRUNCATED count is consumed at package() time
-    (it carries into ``truncated.roster``) — the parser only validates
-    the framing, it does not surface the count.
+    Codex r2 finding 5: returns ``(rows, truncated_count)``. The wire
+    ROSTER_TRUNCATED count carries into ``truncated.roster`` in the
+    world doc — the previous parser dropped the count as a side effect
+    of the ruff cleanup, and 64 printed rows + ROSTER_TRUNCATED|1
+    produced no truncation record. The tuple shape keeps the framing
+    validation in this parser and the count carry in the caller.
     """
     rows: list[dict[str, Any]] = []
     pids: set[int] = set()
     header_seen = False
     truncated_seen = False
+    truncated_count = 0
     for line in response_parser._split_lines(lines):  # noqa: SLF001
         line = line.strip()
         if not line or line == "---END---":
@@ -256,6 +260,7 @@ def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
             value = response_parser._coerce_strict(rest)  # noqa: SLF001
             if type(value) is not int or value < 0:
                 raise ValueError(f"malformed ROSTER_TRUNCATED: {line!r}")
+            truncated_count = value
             continue
         if prefix != "PLAYERROW":
             raise ValueError(f"non-roster row in world roster read: {line!r}")
@@ -298,7 +303,7 @@ def parse_roster(lines: list[str]) -> list[dict[str, Any]]:
         raise ValueError("roster read is empty")
     if len(rows) > MAX_ROSTER:
         raise ValueError("roster bound exceeded")
-    return rows
+    return rows, truncated_count
 
 
 def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
@@ -346,6 +351,15 @@ def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
             if truncated_seen:
                 raise ValueError(
                     f"duplicate TILES_TRUNCATED in tiles read: {line!r}")
+            # Codex r2 finding 6: TILES_TRUNCATED must come AFTER GRID
+            # AND after the OWNEDROW rows it counts. The wire order
+            # is GRID → OWNEDROW* → optional TILES_TRUNCATED → TILES_END.
+            if not grid_seen:
+                raise ValueError(
+                    f"TILES_TRUNCATED before GRID in tiles read: {line!r}")
+            if not rows:
+                raise ValueError(
+                    f"TILES_TRUNCATED before any OWNEDROW in tiles read: {line!r}")
             truncated_seen = True
             value = response_parser._coerce_strict(rest)  # noqa: SLF001
             if type(value) is not int or value < 0:
@@ -364,6 +378,12 @@ def parse_owned_tiles(lines: list[str]) -> dict[str, Any]:
         if not grid_seen:
             raise ValueError(
                 f"OWNEDROW before GRID in tiles read: {line!r}")
+        # Codex r2 finding 6: OWNEDROW after TILES_TRUNCATED means the
+        # truncation count is stale — reject. The terminal TILES_END
+        # is enforced by the outer ended_seen guard above.
+        if truncated_seen:
+            raise ValueError(
+                f"OWNEDROW after TILES_TRUNCATED in tiles read: {line!r}")
         parts = rest.split("|")
         if len(parts) != 10:
             raise ValueError(f"malformed OWNEDROW (want 10 fields): {line!r}")
@@ -489,7 +509,8 @@ def _bounded_json(doc: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return doc, True
 
 
-def package(*, roster: list[dict[str, Any]], players: list[dict[str, Any]],
+def package(*, roster: list[dict[str, Any]], roster_truncated: int,
+            players: list[dict[str, Any]],
             cities: list[dict[str, Any]], tiles: dict[str, Any],
             palette: dict[int, dict[str, int]] | None,
             after_seat: int, game_era: str | None, read_ms: float) -> dict[str, Any]:
@@ -498,25 +519,42 @@ def package(*, roster: list[dict[str, Any]], players: list[dict[str, Any]],
     to them; unread fields are ABSENT, never null). Bounds applied with
     RECORDED truncation; blank = unsupplied."""
     # Amendment 2 closed sets — everything else the parsers produce stops
-    # here (alive/civic-progress never ride the world doc).
+    # here (alive/civic-progress never ride the world doc). Codex r2
+    # finding 4: drop None-valued optional keys (`researching` is None
+    # when no research is active, `civics` is None when the row
+    # carries no civic progress) — absent = unsupplied, never null.
+    OPTIONAL_PLAYER_KEYS = frozenset({
+        "player_id", "civ_name", "gold", "gold_per_turn", "science", "culture",
+        "faith", "upkeep", "era", "researching", "researched", "civics",
+    })
     world_players = [
-        {k: v for k, v in row.items() if k in (
-            "player_id", "civ_name", "gold", "gold_per_turn", "science",
-            "culture", "faith", "upkeep", "era", "researching", "researched",
-            "civics")}
+        {k: v for k, v in row.items()
+         if k in OPTIONAL_PLAYER_KEYS and v is not None}
         for row in players
     ]
+    # Codex r2 finding 4: drop None-valued optional keys for cities
+    # too. Required keys (city_id/owner/q/r) stay even when None — the
+    # parser never emits them as None; defensive filter is for forward
+    # compatibility.
     world_cities = [
-        {k: v for k, v in row.items() if k in (
-            "city_id", "owner", "q", "r", "name", "population", "is_capital",
-            "is_major", "hp", "max_hp", "production_queue", "buildings",
-            "districts")}
+        {k: v for k, v in row.items()
+         if k in frozenset({
+             "city_id", "owner", "q", "r", "name", "population", "is_capital",
+             "is_major", "hp", "max_hp", "production_queue", "buildings",
+             "districts"}) and v is not None}
         for row in cities
     ]
     truncated: dict[str, Any] = {"tiles": bool(tiles.get("truncated")),
                                  "world": False}
     kept_roster = roster[:MAX_ROSTER]
-    if len(roster) > MAX_ROSTER:
+    # Codex r2 finding 5: ROSTER_TRUNCATED count carries into the doc.
+    # The wire count is the source of truth (a real engine may print
+    # exactly MAX_ROSTER rows AND emit ROSTER_TRUNCATED|N if its own
+    # enumeration exceeded MAX_ROSTER); the local slice-truncation
+    # check is a defensive upper bound for hostile / rehearsal inputs.
+    if roster_truncated > 0:
+        truncated["roster"] = roster_truncated
+    elif len(roster) > MAX_ROSTER:
         truncated["roster"] = len(roster) - MAX_ROSTER
     kept_cities = world_cities[:MAX_WORLD_CITIES]
     if len(world_cities) > MAX_WORLD_CITIES:
@@ -585,7 +623,8 @@ async def capture(adapter: Any, *, turn: int, after_seat: int,
     the existing translators/parsers — never observe() — so every command
     rides the SAME GameConnection._lock (no second tuner client)."""
     started = time.monotonic()
-    roster = parse_roster(await adapter.read_raw(roster_read()))
+    roster, roster_truncated = parse_roster(
+        await adapter.read_raw(roster_read()))
     tiles = parse_owned_tiles(await adapter.read_raw(owned_tiles_read()))
     overview = response_parser.parse_overview(
         await adapter.read_raw(lua_translator.overview_read()))
@@ -598,7 +637,8 @@ async def capture(adapter: Any, *, turn: int, after_seat: int,
     players = [dict(row) for row in overview.get("players", {}).values()
                if row.get("alive")]
     _ = turn  # the carrier stamps turn on the audit envelope, not the doc
-    return package(roster=roster, players=players, cities=cities, tiles=tiles,
+    return package(roster=roster, roster_truncated=roster_truncated,
+                   players=players, cities=cities, tiles=tiles,
                    palette=palette, after_seat=after_seat,
                    game_era=overview.get("game_era"),
                    read_ms=(time.monotonic() - started) * 1000.0)
@@ -611,9 +651,11 @@ async def spectate_world(adapter: Any, *, turn: int) -> dict[str, Any]:
     call through SpectateTransport. Economy/cities live in the snapshot's
     own census fields; this block carries what only SPECW can see."""
     started = time.monotonic()
-    roster = parse_roster(await adapter.read_raw(roster_read()))
+    roster, roster_truncated = parse_roster(
+        await adapter.read_raw(roster_read()))
     tiles = parse_owned_tiles(await adapter.read_raw(owned_tiles_read()))
     _ = turn  # the snapshot envelope stamps turn; the doc itself is turn-free
-    return package(roster=roster, players=[], cities=[], tiles=tiles,
+    return package(roster=roster, roster_truncated=roster_truncated,
+                   players=[], cities=[], tiles=tiles,
                    palette=None, after_seat=-1, game_era=None,
                    read_ms=(time.monotonic() - started) * 1000.0)
