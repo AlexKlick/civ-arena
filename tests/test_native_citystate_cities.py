@@ -104,7 +104,9 @@ def test_seven_vs_eighteen_field_shapes():
         "BUILDING_MONUMENT;BUILDING_WALLS|DISTRICT_CITY_CENTER",
         "---END---"], qualified=True)[0]
     assert extended["hp"] == 180 and extended["max_hp"] == 200
-    assert extended["buildings"] == ["BUILDING_MONUMENT", "BUILDING_WALLS"]
+    # wire names are engine-prefixed; the parser strips BUILDING_ to the
+    # doctrine/sim vocabulary (the queue read's convention)
+    assert extended["buildings"] == ["MONUMENT", "WALLS"]
     assert extended["districts"] == ["DISTRICT_CITY_CENTER"]
     assert extended["is_capital"] is True and extended["is_major"] is True
     # hp+max_hp are both-or-neither, bounded 0<=hp<=max_hp<=1e6
