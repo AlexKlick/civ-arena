@@ -77,6 +77,19 @@ def test_defender_build_is_not_censored():
     assert events_by_kind(events)["completed"].get("censored") is None
 
 
+def test_censor_event_fires_once_per_pending_build():
+    monitor = DevelopmentOptionMonitor(0)
+    monitor.register(forecast())
+    raider = unit("u9:1", owner=1, kind="WARRIOR", coord="2,0", barbarian=True)
+    first = monitor.observe(turn=11, cities=[city(queue=["MONUMENT"])],
+                            units=[unit(), raider])
+    assert [event["event"] for event in first] == ["threat_censored"]
+    again = monitor.observe(turn=12, cities=[city(queue=["MONUMENT"])],
+                            units=[unit(), raider])
+    assert again == []
+    assert monitor._pending["c0:1"]["censored_turn"] == 11
+
+
 def test_threat_outside_radius_does_not_censor():
     monitor = DevelopmentOptionMonitor(0)
     monitor.register(forecast())

@@ -69,6 +69,7 @@ def test_issued_forecast_is_never_edited_by_outcomes():
 
 @pytest.mark.parametrize("observed_turn,queue,expected", [
     (12, ["MONUMENT"], None),
+    (13, ["MONUMENT"], None),
     (14, ["MONUMENT"], "overdue_pending"),
     (13, [], "completed"),
     (15, [], "completed"),
@@ -94,6 +95,16 @@ def test_forecast_rejects_fabricated_inputs():
         build_forecast(turn=10, city_id="", item_id="MONUMENT", row=row())
     with pytest.raises(ValueError):
         build_forecast(turn=10, city_id="c0:1", item_id="MONUMENT", row=None)
+
+
+def test_zero_or_noninteger_turns_is_not_a_completion_basis():
+    for bad in (0, -3, 2.5, True, "3", None):
+        record = build_forecast(turn=10, city_id="c0:1", item_id="MONUMENT",
+                                row={"item_id": "MONUMENT", "kind": "building",
+                                     "turns": bad})
+        assert record["ranges"] == ()
+        assert record["observed"]["engine_turns_estimate"] is None
+        assert "engine_turns_estimate" in record["unsupported"]
 
 
 def test_comparison_bounded_deterministic_and_weighted():
