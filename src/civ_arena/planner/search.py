@@ -105,7 +105,7 @@ def abstract_doc(state: SimState, pid: int) -> dict[str, Any]:
             "researching": p["researching"],
             "units": dict(sorted(units.items())),
             "development": sorted(
-                [c["city_id"], ",".join(c["buildings"]),
+                [c["city_id"], ",".join(c.get("buildings", [])),
                  c["production_queue"][0] if c["production_queue"] else ""]
                 for c in cities),
         }

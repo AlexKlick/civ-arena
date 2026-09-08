@@ -71,6 +71,9 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
                 profile.decision_mode != 'strategic_autopilot'
                 or profile.llm.adaptive_context is None):
             raise ValueError('research_building_briefing requires strategic adaptive context')
+        own_economy = getattr(profile.llm, 'own_economy_context', False)
+        if type(own_economy) is not bool:
+            raise ValueError('own_economy_context requires boolean opt-in')
         runtime = LLMAgentRuntime.build(profile, telemetry=telemetry, diary=diary,
                                         strategy=strategy, on_post=on_post)
         if profile.decision_mode == "strategic_autopilot":

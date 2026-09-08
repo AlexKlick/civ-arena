@@ -185,29 +185,43 @@ class VisibilityPolicy:
         # post-spike refinement.
         if key not in observable:
             return None
-        full = {
+        # M4: every extended key is CONDITIONAL — the parser no longer
+        # synthesizes hp/bucket/building placeholders, so each candidate
+        # rides only when the omniscient doc actually carries it (contract
+        # §6: conditional hp, never assumed). The foreign allowlist then
+        # strips everything but the closed public set.
+        full: dict[str, Any] = {
             "city_id": c["city_id"],
             "name": c["name"],
             "coord": key,
             "owner_id": c["owner"],
-            "hp": c["hp"],
             "population": c["population"],
-            "production_queue": c["production_queue"],
-            "food_bucket": c["food_bucket"],
-            "production_bucket": c["production_bucket"],
-            "buildings": c["buildings"],
         }
+        for optional in ("hp", "production_queue", "food_bucket",
+                         "production_bucket", "buildings"):
+            if optional in c:
+                full[optional] = c[optional]
         return {k: v for k, v in full.items() if k in self.foreign_city_fields}
 
     def _own_player(self, doc: dict[str, Any], player_id: int) -> dict[str, Any]:
         p = doc["players"][str(player_id)]
-        return {
+        out: dict[str, Any] = {
             "player_id": p["player_id"],
             "civ_name": p["civ_name"],
             "gold": p["gold"],
             "researched": list(p["researched"]),
             "researching": p["researching"],
         }
+        # M4 (contract §6): the OVX|2 economy keys pass through for SELF
+        # ONLY — never to public/other players; the CONTEXT layer gates
+        # whether the model ever sees them (LLMSpec.own_economy_context).
+        for key in ("science", "culture", "faith", "gold_per_turn", "upkeep",
+                    "era", "progressing_civic", "civic_progress", "civic_cost"):
+            if key in p:
+                out[key] = p[key]
+        if "civics" in p:
+            out["civics"] = list(p["civics"])
+        return out
 
     # NOTE: own-entity projections deep-copy nested lists so an agent
     # mutating a returned observation cannot reach live game state.

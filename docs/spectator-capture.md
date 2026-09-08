@@ -113,3 +113,85 @@ reasoning reconstruction; graph memory; curated context).
 games (hotseat seat-type split, no arming for the human seat,
 lease-free local-switch wait, human-scale budgets, no key sweeps during
 the human turn). This lane deliberately touches none of that machinery.
+
+## M4: the spectator WORLD block and the spectator_world audit
+
+M4 widens capture onto BOTH carrier phases and adds a spectator-omniscient
+world doc consumed only by viewer routes (`game/civ6/world_capture.py`):
+
+- hotseat (`match.spectator_capture: true`): `phase_dispatch_hotseat`
+  emits a HEARTBEAT `audit="spectator_world"`
+  `visibility_scope="spectator"` once after the initial-attach step
+  (baseline, `after_seat=-1`) and once immediately after every
+  `completed_seat_turn` audit, under `HotseatLimits.spectator` (20 s);
+  every failure is audited as `spectator_world_failed` (redacted) and the
+  match continues. NO new EVENT_KINDS; the world NEVER enters model
+  packets (`arena/visibility.py` is the no-leak boundary).
+- spectate: `SpectatorCensus.snapshot()` gains an ADDITIVE `world` key at
+  `snapshot_scope: full` — roster + owned tiles through the READ
+  transport ONLY (palette needs the write transport; the phase's
+  never-acts pin forbids writes), once per round, with its own digest
+  bracket and a `world.digest_consistent` flag. Under the 256 KB cap the
+  world drops FIRST (`truncated.world: true`); digests/counts always
+  survive.
+
+### Accessor matrix (live probe 2026-09-08, parked game, mod 0.3.10)
+
+Full evidence: `runs/m4-capture-evidence-20260908/probe/
+accessor-matrix-20260908.md` in the observer worktree (raw logs beside
+it). Summary:
+
+| Accessor | GameCore (read) | InGame (write) |
+|---|---|---|
+| `Game.GetPlayers()` / `PlayerManager.GetAlive()` (all players incl. city-states, barbarian) | yes | yes |
+| `IsMajor` / `IsAlive` / `IsBarbarian`, `PlayerConfigurations:GetLeaderTypeName` / `GetCivilizationTypeName` | yes | yes |
+| `GetInfluence():GetSuzerain()` | yes | yes |
+| `PlayersVisibility[pid]:IsVisible(plot)` (TABLE route) | yes | yes |
+| `Map.GetPlotCount/GetGridSize/GetPlotByIndex/GetNeighborPlot` | yes | yes |
+| Treasury `GetGoldBalance/GetGoldYield/GetTotalMaintenance`, `GetTechs():GetScienceYield()`, `GetCulture():GetCultureYield()`, `GetReligion():GetFaithYield()`, `player:GetEra()` | yes | yes |
+| `GetTechs():HasTech()`, `GetCulture():GetProgressingCivic()` / `HasCivic()` | yes | yes |
+| `GetCulture():GetCulturalProgress()` / `GetCostNextCivic()` | NO | yes |
+| `UI.GetPlayerColors(pid)` (two ints) | NO | yes |
+| `player:GetCivilizationLevelType()` | NO | NO |
+
+Non-claims, explicitly: the 2026-08-31 "fog not exposed" finding applied
+to the PLOT-object route — the PlayersVisibility TABLE route works on
+GameCore (so `live.visible_map_context` stays `gamecore` by default and
+is NOT required for fog); PLAYERROW `level` stays unread (`?` → absent —
+the accessor exists nowhere probed) and `kind` is DERIVED from the
+boolean flags, never an engine read; COLORROW carries RAW ints and the
+ABGR/ARGB packing is UNVERIFIED (the viewer keeps the M1 owner-class
+fallback until `scripts/live_capture_check.py` confirms it against an
+attached game). The named-but-wrong getters (`GetGold`, `GetScience`,
+`treasury:GetScienceYield`, …) appear nowhere in the Lua.
+
+THE PARKED-GAME CITY TRAP (Amendment 1.5): `p:GetCities():GetCount()` /
+`Members()` return ZERO on both contexts in a parked never-attached game
+— the real `cities_read()` Lua verbatim also returned zero rows. Cities
+enumerate only on a driver-attached game; every extended city accessor
+(growth getters, HasBuilding, districts, production progress) keeps its
+pcall `?` fallback until confirmed against the attached 3-round chain,
+and texlua stub tests are the interim authority for those shapes.
+
+### Wire and scope (contract §2)
+
+| Read | Header | Context | Notes |
+|---|---|---|---|
+| visible map | `VMAP|4` (13-field TILEROW) | GameCore (default) / InGame opt-in | static keys (feature, river) on every row; dynamic keys (resource, improvement, district, appeal, engine_visible) visible-only; resources tech-gated per the seat |
+| cities | `CITIES|2` (18-field CITYROW) | InGame | GetAlive() incl. city-states; majors fail-loud queue, minors pcall-guarded; placeholders REMOVED |
+| overview | `OVX|2` (13-field OVROW + OVERA + OVCIVICS) | GameCore | yields + era on read transport; civic progress InGame-only ('?' → absent) |
+| spectator roster | `SPECW|1\|roster` (PLAYERROW) | GameCore | level `?`; kind derived |
+| spectator tiles | `SPECW\|1\|tiles` (GRID/OWNEDROW/TILES_END) | GameCore | owned plots only; raw resource (no seat tech gate); TILES_END must match |
+| spectator palette | `SPECW\|1\|palette` (COLORROW) | InGame | raw ints, packing unverified |
+
+Caps: roster ≤ 64 (`truncated.roster` count), cities ≤ 256, owned-tile
+rows ≤ 4096 total (`TILES_TRUNCATED`), disagree_coords ≤ 64, world doc ≤
+256 KiB (`truncated.world`). Blank = unsupplied; a missing key is never
+a value. Fog counters ride the world doc's `fog_audit`
+(requested/engine_visible/engine_not_visible/unavailable + ≤64
+disagreeing coords) and the adapter's `fog_audit_for(pid)`.
+
+Cross-link: CAP-R1 finding 8 (roster discovery can't see minors —
+`docs/codex-r1-findings-20260907.md`) is delivered in SUBSTANCE by
+`world_capture.roster_read`; the spectate census's OVX-based discovery is
+deliberately NOT rewired.

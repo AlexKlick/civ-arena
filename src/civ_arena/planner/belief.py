@@ -73,12 +73,20 @@ OWN_UNIT_FIELDS = frozenset({
 # translator legitimately omits are not required — they are filled with
 # declared sim defaults at intake (the belief layer's job is normalizing
 # projections into sim-shaped belief; M17a's first sim-to-real seam).
+# M4: hp/food_bucket/production_bucket/buildings are no longer REQUIRED —
+# the parser stopped synthesizing them (unread -> absent), so they join
+# the declared defaults below. hp's default is a PLANNER PRIOR, never an
+# observation.
 OWN_CITY_REQUIRED = frozenset({
-    "city_id", "owner", "name", "coord", "q", "r", "population", "hp",
-    "food_bucket", "production_bucket", "production_queue", "buildings",
+    "city_id", "owner", "name", "coord", "q", "r", "population",
+    "production_queue",
 })
 OWN_CITY_DEFAULTS: dict[str, Any] = {
     "border_radius": 2,  # the sim's founded-city territory radius
+    "hp": 100,  # planner prior, not observation
+    "food_bucket": 0,
+    "production_bucket": 0,
+    "buildings": [],
 }
 
 
@@ -313,7 +321,8 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         q, r = _sim(c["coord"])
         cities[cid] = {
             "city_id": cid, "owner": c["owner_id"], "name": c["name"],
-            "q": q, "r": r, "population": c["population"], "hp": c["hp"],
+            "q": q, "r": r, "population": c["population"],
+            "hp": c.get("hp", 100),  # planner prior, not observation
             "food_bucket": 0, "production_bucket": 0, "production_queue": [],
             "buildings": [], "border_radius": 2,
         }

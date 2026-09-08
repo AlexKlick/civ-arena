@@ -150,6 +150,33 @@ def test_misshapen_own_entries_are_refused() -> None:
         pass
 
 
+def test_own_and_foreign_cities_without_extended_fields_fill_priors() -> None:
+    """M4 tolerance: the parser stopped synthesizing hp/buckets/buildings,
+    so a lite own-city row (unread keys ABSENT) is accepted and the belief
+    layer fills its DECLARED priors — hp 100 is a planner prior, never an
+    observation (contract §6)."""
+    belief = PlannerBelief(0)
+    lite_own = {"city_id": "c1", "owner": 0, "name": "Ur", "coord": "3,4",
+                "q": 3, "r": 4, "population": 2, "production_queue": []}
+    hpless_foreign = {"city_id": "c9", "owner_id": 12, "name": "Genoa",
+                      "coord": "9,9", "population": 3}
+    belief.observe_cities([lite_own, hpless_foreign], turn=1)
+    doc = build_state_doc(belief, seed=1)
+    own = doc["cities"]["c1"]
+    assert own["hp"] == 100            # planner prior, not observation
+    assert own["buildings"] == [] and own["food_bucket"] == 0
+    assert own["production_bucket"] == 0 and own["border_radius"] == 2
+    foreign = doc["cities"]["c9"]
+    assert foreign["hp"] == 100        # planner prior, not observation
+    # a REAL observed hp is kept, never overwritten by the prior
+    real = dict(lite_own, city_id="c2", hp=180, max_hp=200,
+                buildings=["BUILDING_MONUMENT"])
+    belief.observe_cities([real], turn=2)
+    doc2 = build_state_doc(belief, seed=1)
+    assert doc2["cities"]["c2"]["hp"] == 180
+    assert doc2["cities"]["c2"]["buildings"] == ["BUILDING_MONUMENT"]
+
+
 def _border_only_city_fixture() -> tuple[SimState, PlannerBelief]:
     """A rival city whose BORDER tile is observable while its center is not:
     the projection legally shows a c1-tagged tile with no c1 city record."""

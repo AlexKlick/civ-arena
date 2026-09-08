@@ -523,12 +523,22 @@ async def test_observes_over_fake_and_foreign_projection():
         assert vmap["tiles"], "M17c: the revealed-tiles read is real"
         observable, remembered = adapter.visibility_for(0)
         for key, tile in vmap["tiles"].items():
-            # Native terrain is static evidence; ownership remains visible-only.
-            expected_fields = {"terrain", "native_terrain"}
-            if key in observable:
-                expected_fields |= {"owner", "city"}
-            assert set(tile) == expected_fields
+            # Native terrain and the M4 STATIC keys (feature/river) are
+            # static evidence; ownership and every DYNAMIC key remain
+            # visible-only (widened from the pre-M4 {terrain,
+            # native_terrain} pin).
+            base = {"terrain", "native_terrain"}
+            allowed_static = {"feature", "river"}
+            dynamics = {"resource", "improvement", "district", "appeal",
+                        "engine_visible"}
             assert set(tile["native_terrain"]) == {"type", "biome", "hills"}
+            if key in observable:
+                assert base | {"owner", "city"} <= set(tile), key
+                assert set(tile) <= base | allowed_static | dynamics | {
+                    "owner", "city"}, (key, set(tile))
+            else:
+                assert set(tile) <= base | allowed_static, (key, set(tile))
+                assert not set(tile) & dynamics, key
         # the projection with the adapter's own visibility ground truth
         policy = VisibilityPolicy()
         observable, remembered = adapter.visibility_for(0)
