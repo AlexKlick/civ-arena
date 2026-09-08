@@ -286,6 +286,42 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
     if aborted:
         quality.append("run_aborted")
 
+    # Codex r3 finding 1: recipient resolution is RUN-WIDE, not per
+    # segment. Rebuilding it inside each (turn, agent) let one
+    # decision_id reused across TURNS (or shared across agents through a
+    # turn-level boundary) join several samples and double-count its
+    # ledger rows. Every occurrence of an id anywhere in the run competes
+    # for that id's rows; assignment runs from the ROW side so a row
+    # lands on exactly one occurrence and no row that some occurrence
+    # could accept is dropped. Every occurrence of a repeated id is
+    # flagged, in every turn it appears in.
+    seg_boundaries: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    occurrences: dict[str, list[tuple[tuple[int, int, str, int],
+                                      tuple[int, str, int], str]]] = {}
+    for _turn, _agent in segments:
+        _bs = sorted(boundaries.get((_turn, _agent), [])
+                     + boundaries.get((_turn, "None"), []),
+                     key=lambda b: b.get("seq") or 0)
+        seg_boundaries[(_turn, _agent)] = _bs
+        for _i, _b in enumerate(_bs):
+            _did = _b.get("decision_id")
+            if not _did:
+                continue
+            _seq = _b.get("seq") if isinstance(_b.get("seq"), int) else -1
+            occurrences.setdefault(_did, []).append(
+                ((_seq, _turn, _agent, _i), (_turn, _agent, _i), _agent))
+
+    rows_by_occ: dict[tuple[int, str, int], list[dict[str, Any]]] = {}
+    if not pre_ledger:
+        for row in cost_rows:
+            cands = occurrences.get(row.get("decision_id") or "", [])
+            # the row's agent filter is the SAME one the join used
+            eligible = [c for c in cands
+                        if row.get("agent_id") is None
+                        or str(row.get("agent_id")) == c[2]]
+            if eligible:
+                rows_by_occ.setdefault(max(eligible)[1], []).append(row)
+
     samples: list[dict[str, Any]] = []
     for turn, agent_id in segments:
         def _agents(e: dict[str, Any], *, _t: int = turn,
@@ -301,22 +337,11 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
         # boundary of the same (turn, agent); the last decision owns
         # the rest of the turn. The LAST boundary keeps the stable
         # segment id; superseded ones carry an @decision_id suffix.
-        segment_boundaries = sorted(
-            boundaries.get((turn, agent_id), [])
-            + boundaries.get((turn, "None"), []),
-            key=lambda b: b.get("seq") or 0)
-        # Codex r1 finding 6 / r2 finding 2: a decision_id REUSED by
-        # several boundaries of this (turn, agent) is ambiguous — rows
-        # join only the LAST OCCURRENCE of that id (A, A, B: the second
-        # A carries A's rows; B its own), every sibling is flagged.
-        last_by_id: dict[str, dict[str, Any]] = {}
-        id_counts: dict[str, int] = {}
-        for b in segment_boundaries:
-            if b.get("decision_id"):
-                id_counts[b["decision_id"]] = \
-                    id_counts.get(b["decision_id"], 0) + 1
-                last_by_id[b["decision_id"]] = b
-        reused_ids = {d for d, n in id_counts.items() if n > 1}
+        # Codex r1 finding 6 / r2 finding 2 / r3 finding 1: a REUSED
+        # decision_id is ambiguous — its rows join only the LAST
+        # OCCURRENCE of that id in the RUN (A, A, B: the second A
+        # carries A's rows; B its own), and every occurrence is flagged.
+        segment_boundaries = seg_boundaries[(turn, agent_id)]
         # windows carry TWO starts: OBSERVATIONS span the wide window
         # (previous boundary, next boundary) — inputs precede the
         # boundary (r1 finding 3); ACTIONS/RECEIPTS span the narrow
@@ -341,7 +366,8 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
             windows.append((None, None, None, None))
         base_segment = f"turn:{turn}" if single_agent \
             else f"turn:{turn}:{agent_id}"
-        for boundary, w_start, w_exec, w_end in windows:
+        for occ_index, (boundary, w_start, w_exec, w_end) in \
+                enumerate(windows):
             def _window(e: dict[str, Any], *, _s: int | None,
                         _e: int | None = w_end) -> bool:
                 if not _agents(e):
@@ -369,20 +395,16 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                         and e.get("status") == "accepted"
                         and (e.get("mutations") or e.get("receipts"))]
             decision_id = boundary.get("decision_id") if boundary else None
-            decision_ids = [decision_id] if decision_id else []
-            cost_recipient = (boundary is last_by_id[decision_id]
-                              if decision_id else False)
-            shared_id = decision_id in reused_ids
-            rows = [r for r in cost_rows
-                    if decision_ids
-                    and cost_recipient
-                    and r.get("decision_id") in decision_ids
-                    and (r.get("agent_id") is None
-                         or str(r.get("agent_id")) == agent_id)] \
+            rows = rows_by_occ.get((turn, agent_id, occ_index), []) \
                 if not pre_ledger else []
+            shared_id = len(occurrences.get(decision_id or "", [])) > 1
             segment_flags = quality.copy()
             superseded = boundary is not segment_boundaries[-1] \
                 if segment_boundaries else False
+            # turn-level CONTEXT, not a per-sample claim: it marks every
+            # sample of a turn that carried a replacement, including the
+            # surviving last boundary, so a consumer reading one sample
+            # knows the turn's decision grain was split.
             if len(segment_boundaries) > 1:
                 segment_flags.append("boundary_superseded_within_turn")
             if shared_id:

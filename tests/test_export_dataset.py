@@ -765,21 +765,33 @@ def test_reused_decision_id_joins_costs_once_and_flags_ambiguity(tmp_path):
 
 
 def test_execution_between_boundaries_belongs_to_its_own_decision(tmp_path):
-    """Codex r2 finding 1: with boundary A -> move/receipt -> boundary B,
-    the move is A's EXECUTION — it must ride A's sample only. A's
-    INPUT observations still span the wide window, but actions and
-    receipts are bounded by (own boundary, next boundary)."""
+    """Codex r2 finding 1 (regression corrected per r3 finding 2): the
+    two boundaries must sit in the SAME (turn, agent) — across turns
+    ``_agents()`` already separates them, so a cross-turn fixture passes
+    even with the pre-fix wide window and proves nothing.
+
+    Same-turn A -> move/receipt -> B -> move/receipt: each move is the
+    EXECUTION of the boundary that commanded it. Observations still span
+    the wide window; actions and receipts are bounded by (own boundary,
+    next boundary)."""
     run_dir = _write_run(tmp_path, spectate=False)  # no fixture boundary
     lines = (run_dir / "events.jsonl").read_text().splitlines()
     rows = [json.loads(line) for line in lines]
+
+    def _boundary(row, did):
+        return {**row, "kind": "HEARTBEAT", "audit": "decision_boundary",
+                "decision_id": did, "directive_id": "dir",
+                "provider_requests": 1, "source": "model"}
+
     rebuilt = []
     for i, row in enumerate(rows):
-        if i in (3, 6):  # before turn-1 move_unit, before turn-2 pair
-            rebuilt.append({**row, "kind": "HEARTBEAT",
-                            "audit": "decision_boundary",
-                            "decision_id": f"d-{i}", "directive_id": "dir",
-                            "provider_requests": 1, "source": "model"})
+        if i == 3:  # before turn-1 move_unit
+            rebuilt.append(_boundary(row, "d-a"))
         rebuilt.append(row)
+        if i == 4:  # after turn-1 move receipt: replacement + its own pair
+            rebuilt.append(_boundary(row, "d-b"))
+            rebuilt.append(dict(rows[3]))
+            rebuilt.append(dict(rows[4]))
     for i, row in enumerate(rebuilt):
         row["seq"] = i
     (run_dir / "events.jsonl").write_text(
@@ -787,14 +799,61 @@ def test_execution_between_boundaries_belongs_to_its_own_decision(tmp_path):
     samples, _ = export(run_dir)
     by_id = {s["decision_id"]: s for s in samples}
     # rebuilt: MS(0), TC gu(1), TR gu(2), bA(3), TC mv(4), TR mv(5),
-    #          TC gu(6), bB(7), TR gu(8) ... — turn 1's move (4/5) is
-    # d-3's execution; d-6 (turn 2's replacement) must NOT claim it
-    assert 4 in [r["seq"] for r in by_id["d-3"]["requested_action_refs"]]
-    assert 5 in [r["seq"] for r in by_id["d-3"]["execution_receipt_refs"]]
-    assert 4 not in [r["seq"] for r in by_id["d-6"]["requested_action_refs"]]
-    assert 5 not in [r["seq"] for r in by_id["d-6"]["execution_receipt_refs"]]
-    # the wide observation window still feeds d-6 turn-2 inputs
-    assert 8 in [r["seq"] for r in by_id["d-6"]["observation_refs"]]
+    #          bB(6), TC mv(7), TR mv(8), then turn 2 — ALL of 1..8 are
+    # turn 1 / agent a0, so only the window logic can separate them.
+    a, b = by_id["d-a"], by_id["d-b"]
+    assert a["segment_id"] != b["segment_id"]
+    assert [r["seq"] for r in a["requested_action_refs"]] == [4]
+    assert [r["seq"] for r in a["execution_receipt_refs"]] == [5]
+    assert [r["seq"] for r in b["requested_action_refs"]] == [7]
+    assert [r["seq"] for r in b["execution_receipt_refs"]] == [8]
+    # exclusive ownership shows up in the derived count too
+    assert a["procedural_tool_calls"] == 1
+    assert b["procedural_tool_calls"] == 1
+    # the wide observation window still feeds A its pre-boundary inputs
+    assert 2 in [r["seq"] for r in a["observation_refs"]]
+
+
+def test_cross_turn_reused_id_joins_its_rows_exactly_once(tmp_path):
+    """Codex r3 finding 1: the same decision_id on boundaries in turn 1
+    AND turn 2 is one ambiguous identity, not two. Its ledger rows may
+    join exactly ONE sample (the run-wide last occurrence) — per-segment
+    recipient resolution double-counted them — and every occurrence
+    carries the ambiguity flag."""
+    run_dir = _write_run(tmp_path, spectate=False)
+    lines = (run_dir / "events.jsonl").read_text().splitlines()
+    rows = [json.loads(line) for line in lines]
+    rebuilt = []
+    for i, row in enumerate(rows):
+        if i in (1, 5):  # before each turn's first tool call
+            rebuilt.append({**row, "kind": "HEARTBEAT",
+                            "audit": "decision_boundary",
+                            "decision_id": "d-x", "directive_id": "dir",
+                            "provider_requests": 1, "source": "model"})
+        rebuilt.append(row)
+    for i, row in enumerate(rebuilt):
+        row["seq"] = i
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rebuilt) + "\n")
+    (run_dir / "llm_costs.jsonl").write_text(json.dumps({
+        "ts": "t", "agent_id": "a0", "player_id": 0,
+        "request_kind": "generation", "attempt": 0, "status_code": 200,
+        "latency_ms": 5, "model": "m", "payload_hash": "h1",
+        "input_tokens": 9, "output_tokens": 1,
+        "decision_id": "d-x", "logical_request_id": "lr-x",
+        "request_set_key": "h1:generation"}, sort_keys=True) + "\n")
+    samples, _ = export(run_dir)
+    reused = [s for s in samples if s["decision_id"] == "d-x"]
+    assert len(reused) == 2  # one per turn
+    assert {s["segment_id"] for s in reused} == {"turn:1", "turn:2"}
+    # the row is counted ONCE across the whole run, not once per turn
+    assert sum(s["request_costs"]["attempts"] for s in reused) == 1
+    assert sum(s["request_costs"]["tokens_in"] or 0 for s in reused) == 9
+    joined = [s for s in reused if s["request_costs"]["attempts"] == 1]
+    assert len(joined) == 1
+    assert joined[0]["segment_id"] == "turn:2"  # run-wide last occurrence
+    for s in reused:  # the ambiguity is visible in BOTH turns
+        assert "decision_id_reused_costs_ambiguous" in s["quality_flags"]
 
 
 def test_reused_id_with_following_decision_keeps_costs(tmp_path):
