@@ -153,17 +153,22 @@ def test_comparison_threat_branch_preempts_investment():
 def test_comparison_threat_without_shortfall_keeps_growth_order():
     candidates = [candidate("MONUMENT"),
                   candidate("ARCHER", kind="unit", reason="below_unit_target",
-                            effective=2)]
+                            effective=0)]
     catalog = [row("MONUMENT", turns=3),
                row("ARCHER", kind="unit", cost=35, turns=2)]
-    # policy numbers say the defense goal is already satisfied: no preempt,
-    # even though an eligible defender exists in the candidate set
+    # policy numbers say the defense goal is already satisfied: no preempt.
+    # The eligible ARCHER contributes ZERO — the two defenders live in owned
+    # inventory the candidate set cannot see, so the old eligible-candidate
+    # sum would report a shortfall and flip the recommendation to ARCHER;
+    # only the policy result's own totals keep the growth order.
     no_shortfall = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
                                         catalog=catalog, preferences=["MONUMENT"],
                                         threats=("u9:1",),
                                         defense_context={'defenders': 2,
                                                          'defense_goal': 2})
     assert no_shortfall["selection"]["recommended"] == "MONUMENT"
+    assert no_shortfall["threat_contingency"]["defenders_owned_queued_reserved"] == 2
+    assert no_shortfall["threat_contingency"]["shortfall_basis"] == "policy_result"
     unknown = compare_alternatives(turn=10, city_id="c0:1", candidates=candidates,
                                    catalog=catalog, preferences=["MONUMENT"],
                                    threats=("u9:1",))

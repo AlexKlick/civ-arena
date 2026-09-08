@@ -292,9 +292,16 @@ class StrategicController:
                 # censor state, and an interrupt must be visible before the
                 # next primitive effect. The curator never catalogs queued
                 # cities, so the engine-rate recheck reads each pending city's
-                # catalog row explicitly (one guarded read per pending build).
+                # catalog row explicitly (one guarded read per pending build)
+                # — but only for cities still on the owned roster: the native
+                # accessor rejects a captured or razed city id, and a lost
+                # pending city must resolve through observe()'s
+                # invalidated_city_unobserved path, never abort the turn.
+                owned_ids = {city['city_id'] for city in curator.own('get_cities')}
                 pending_catalogs: dict[str, list] = {}
                 for pending_id in self._forecast.pending_city_ids():
+                    if pending_id not in owned_ids:
+                        continue
                     rows = await curator.read('get_available_production',
                                               city_id=pending_id)
                     pending_catalogs[pending_id] = rows if isinstance(rows, list) else []

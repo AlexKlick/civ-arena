@@ -76,9 +76,10 @@ def build_forecast(*, turn: int, city_id: str, item_id: str, row: Mapping,
                      'confirmed_threat_unit_ids': list(threats)},
         'assumptions': (
             {'id': 'engine_rate_basis', 'source': 'catalog engine turns estimate',
-             'invalidation': 'a later available catalog row reports a different turns '
-                             'estimate (queued cities are not catalog-refreshed by '
-                             'default; the recheck fires only when a fresh row exists)'},
+             'invalidation': 'a later available catalog row reports a different implied '
+                             'completion date while this build is still the queue head '
+                             '(queued cities are not catalog-refreshed by default; the '
+                             'recheck fires only when a fresh row exists)'},
             {'id': 'queue_unchanged',
              'source': 'set_city_production acceptance is the only observed queue writer',
              'invalidation': 'the observed queue no longer starts with this item'},

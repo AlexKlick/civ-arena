@@ -48,6 +48,13 @@ class Facade:
         return [{'tech_id': 'POTTERY'}]
 
     async def get_available_production(self, city_id):
+        city = next((c for c in self.cities if c['city_id'] == city_id),
+                    {'owner': None})
+        if city.get('owner') != 0:
+            # native accessor shape: unowned or unknown city ids error out
+            # (lua: "production observation city unavailable")
+            return {'status': 'rejected',
+                    'rejection': 'production observation city unavailable'}
         elapsed = self.turn - self.production_set_turn
         return [{'item_id': item, 'kind': kind, 'cost': cost,
                  'turns': base if self.stall and item == 'MONUMENT'
@@ -61,7 +68,8 @@ class Facade:
 
     async def set_city_production(self, city_id, item_id):
         self.calls.append(('set_city_production', city_id, item_id))
-        self.cities[0]['production_queue'] = item_id
+        city = next(c for c in self.cities if c['city_id'] == city_id)
+        city['production_queue'] = item_id
         self.production_set_turn = self.turn
         return {'status': 'accepted'}
 
@@ -219,6 +227,41 @@ async def test_rate_slippage_censors_through_controller(forecast_setup):
     assert slipped and slipped[0]['turn'] == 3
     assert slipped[0]['recorded_completion_turn'] == 4
     assert slipped[0]['implied_completion_turn'] == 6
+
+
+async def test_lost_pending_city_resolves_through_the_monitor(forecast_setup):
+    """R3 regression: the catalog pre-read must skip a captured city — the
+    native accessor rejects unowned ids — so the loss resolves through
+    observe()'s invalidated_city_unobserved path instead of aborting."""
+    controller, runtime, model, facade, records = forecast_setup
+    facade.cities.append({'city_id': 'c1:2', 'owner': 0, 'coord': '1,0',
+                          'production_queue': [], 'population': 2})
+    await advance(controller, runtime, facade, 1)  # forecasts in both cities
+    assert 'c1:2' in [row['city_id'] for row in of_kind(records, 'strategy_forecast')]
+    facade.cities[1]['owner'] = 1  # captured with its build still pending
+    await advance(controller, runtime, facade, 2)  # must not raise MatchAborted
+    lost = [row for row in of_kind(records, 'strategy_forecast_outcome')
+            if row['event'] == 'invalidated_city_unobserved']
+    assert lost and lost[0]['city_id'] == 'c1:2'
+
+
+async def test_comparison_defense_totals_come_from_the_policy_result(forecast_setup):
+    """R3 regression: the comparison's defense numbers are the policy result's
+    own totals, transmitted verbatim — never recomputed over candidates."""
+    controller, runtime, model, facade, records = forecast_setup
+    facade.units.append({'unit_id': 'u9:1', 'owner_id': 1, 'type': 'WARRIOR',
+                         'coord': '2,0', 'is_barbarian': True})
+    await advance(controller, runtime, facade, 1)
+    forecast = of_kind(records, 'strategy_forecast')[0]
+    economy = next(row for row in records
+                   if row['audit'] == 'strategy_economy'
+                   and row.get('tool') == 'set_city_production')
+    contingency = forecast['comparison']['threat_contingency']
+    assert contingency['defenders_owned_queued_reserved'] == \
+        economy['production_policy']['defenders_owned_queued_reserved']
+    assert contingency['defense_goal'] == \
+        economy['production_policy']['defense_goal']
+    assert contingency['shortfall_basis'] == 'policy_result'
 
 
 def _config_doc(*, knob, strategic=True, adaptive=True):

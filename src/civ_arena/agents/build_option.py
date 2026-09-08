@@ -105,9 +105,10 @@ class DevelopmentOptionMonitor:
 
         Runs before this turn's decision and production actions so an interrupt
         is visible before the next primitive effect, never only after it. When
-        a fresh catalog row is available for a pending item (focus-refreshed
-        cities only — queued cities are not catalog-refreshed by default), the
-        engine_rate_basis assumption is rechecked against its turns estimate.
+        a fresh catalog row is available for a pending item that is still the
+        queue head (focus-refreshed cities only — queued cities are not
+        catalog-refreshed by default), the engine_rate_basis assumption is
+        rechecked against its implied completion date.
         """
         events: list[dict] = []
         own = [city for city in cities
@@ -126,26 +127,6 @@ class DevelopmentOptionMonitor:
                                'detail': 'no_material_threat assumption invalidated; '
                                          'defense preempts investment',
                                'threat_unit_ids': list(threats)})
-            row = next((entry for entry in (catalogs or {}).get(cid, [])
-                        if isinstance(entry, Mapping) and entry.get('item_id') == item),
-                       None)
-            if row is not None and state['censored'] is None:
-                fresh = turns_or_none(row.get('turns'))
-                recorded = forecast_completion_turn(forecast)
-                # The engine estimate is a COUNTDOWN: a healthy build's turns
-                # decrement each turn while the implied completion date holds.
-                # Only a changed implied completion date invalidates the
-                # engine_rate_basis assumption.
-                if fresh is not None and recorded is not None and turn + fresh != recorded:
-                    state['censored'] = 'rate_estimate_changed'
-                    state['censored_turn'] = turn
-                    events.append({'city_id': cid, 'item_id': item, 'turn': turn,
-                                   'event': 'rate_estimate_changed',
-                                   'detail': 'engine_rate_basis assumption invalidated: '
-                                             'implied completion date changed',
-                                   'recorded_completion_turn': recorded,
-                                   'implied_completion_turn': turn + fresh,
-                                   'engine_turns': fresh})
             city = by_id.get(cid)
             if city is None:
                 events.append({'city_id': cid, 'item_id': item, 'turn': turn,
@@ -154,8 +135,38 @@ class DevelopmentOptionMonitor:
                 self._retain(events[-1])
                 del self._pending[cid]
                 continue
+            queue_items = _queue_items(city)
+            # The recheck belongs to the queue_unchanged assumption: a fresh
+            # catalog row speaks for the monitored build only while that build
+            # is still the queue head. A completed or replaced item's row
+            # estimates a NEW build, whose implied completion date must not
+            # censor this forecast's outcome.
+            if state['censored'] is None and queue_items[:1] == [item]:
+                row = next((entry for entry in (catalogs or {}).get(cid, [])
+                            if isinstance(entry, Mapping)
+                            and entry.get('item_id') == item),
+                           None)
+                if row is not None:
+                    fresh = turns_or_none(row.get('turns'))
+                    recorded = forecast_completion_turn(forecast)
+                    # The engine estimate is a COUNTDOWN: a healthy build's
+                    # turns decrement each turn while the implied completion
+                    # date holds. Only a changed implied completion date
+                    # invalidates the engine_rate_basis assumption.
+                    if (fresh is not None and recorded is not None
+                            and turn + fresh != recorded):
+                        state['censored'] = 'rate_estimate_changed'
+                        state['censored_turn'] = turn
+                        events.append({'city_id': cid, 'item_id': item, 'turn': turn,
+                                       'event': 'rate_estimate_changed',
+                                       'detail': 'engine_rate_basis assumption '
+                                                 'invalidated: implied completion '
+                                                 'date changed',
+                                       'recorded_completion_turn': recorded,
+                                       'implied_completion_turn': turn + fresh,
+                                       'engine_turns': fresh})
             outcome = classify_outcome(forecast=forecast, observed_turn=turn,
-                                       queue_items=_queue_items(city))
+                                       queue_items=queue_items)
             if outcome is None:
                 continue
             if outcome['outcome'] == 'overdue_pending':
