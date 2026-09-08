@@ -54,8 +54,12 @@ _FORBIDDEN_KEYS = frozenset({
 
 
 def _load_events(run_dir: Path) -> list[dict[str, Any]]:
+    return _parse_events((run_dir / "events.jsonl").read_bytes())
+
+
+def _parse_events(raw: bytes) -> list[dict[str, Any]]:
     rows = [json.loads(line) for line
-            in (run_dir / "events.jsonl").read_text().splitlines() if line.strip()]
+            in raw.decode().splitlines() if line.strip()]
     if [r.get("seq") for r in rows] != list(range(len(rows))):
         raise ValueError("event sequence is not contiguous — refusing export")
     return rows
@@ -63,6 +67,31 @@ def _load_events(run_dir: Path) -> list[dict[str, Any]]:
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# R-03 (recheck 2026-09-08): the exporter's own inputs. write() refuses
+# to place an output (or its manifest sibling) on any of these — a
+# derived artifact clobbering its evidence source is unrecoverable.
+_SOURCE_ARTIFACTS = ("events.jsonl", "summary.json", "llm_costs.jsonl")
+
+
+def _resolve_target(path: Path) -> Path:
+    """Canonical identity of an output target: symlinks resolved, `..` and
+    duplicate separators folded — two spellings of the same file must
+    compare equal so an alias cannot smuggle past the source guard."""
+    return Path(path).resolve(strict=False)
+
+
+def _source_paths(run_dir: Any) -> set[Path]:
+    """Every path write() must refuse to touch for the run the manifest
+    names: the three consumed artifacts AND the run directory itself
+    (a directory target would shadow the sources on creation)."""
+    try:
+        run = Path(str(run_dir))
+    except (TypeError, ValueError):
+        return set()
+    return {_resolve_target(run / name) for name in _SOURCE_ARTIFACTS} \
+        | {_resolve_target(run)}
 
 
 def _boundary_view(event: dict[str, Any]) -> dict[str, Any]:
@@ -94,16 +123,35 @@ def _split_group(summary: dict[str, Any]) -> str:
 
 
 def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Returns (samples, manifest). Never mutates the run dir."""
+    """Returns (samples, manifest). Never mutates the run dir.
+
+    R-03 (recheck 2026-09-08): every consumed input is read as BYTES
+    exactly once — the manifest digests those bytes, and the samples
+    parse from them, so the hashes bind to what was actually consumed
+    (no re-read window between digest and parse)."""
     run_dir = Path(run_dir)
-    events = _load_events(run_dir)
+    events_bytes = (run_dir / "events.jsonl").read_bytes()
+    events = _parse_events(events_bytes)
     summary_path = run_dir / "summary.json"
-    summary = json.loads(summary_path.read_text()) if summary_path.exists() \
-        else {}
+    summary_bytes = summary_path.read_bytes() if summary_path.exists() else None
+    summary = json.loads(summary_bytes) if summary_bytes is not None else {}
+    costs_path = run_dir / "llm_costs.jsonl"
+    cost_rows = _parse_costs(costs_path.read_bytes()) if costs_path.exists() \
+        else None
     if summary.get("phase") == "spectate":
         samples = _spectator_intervals(events, summary)
+    elif not summary_path.exists():
+        # summary.json is the outcome record (final_turn/aborted/ids) —
+        # without it a driven run's outcome horizon and censoring are
+        # UNKNOWN and a controlled export would invent them. Spectator
+        # data must not fall into the controlled class merely because
+        # MATCH_START exists.
+        raise ValueError(
+            "driven run has no summary.json — outcome unknown; refusing "
+            "controlled export")
     elif any(e["kind"] == "MATCH_START" for e in events):
-        samples = _controlled_decisions(run_dir, events, summary)
+        samples = _controlled_decisions(run_dir, events, summary,
+                                        cost_rows=cost_rows)
     else:
         raise ValueError("run dir is neither spectate nor driven "
                          "(no MATCH_START); refusing export")
@@ -118,13 +166,17 @@ def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         # CAP-R1 #12: digest EVERY consumed input — samples derive from
         # summary.json (outcome/horizon/ids) and llm_costs.jsonl (costs),
         # so a changed input with an unchanged events digest must still
-        # be detectable against the manifest
-        "source": {"events_sha256": _digest(run_dir / "events.jsonl"),
+        # be detectable against the manifest. R-03: each digest is the
+        # sha of the exact bytes parsed above.
+        "source": {"events_sha256":
+                   hashlib.sha256(events_bytes).hexdigest(),
                    "events": len(events),
-                   **({"summary_sha256": _digest(summary_path)}
-                      if summary_path.exists() else {}),
-                   **({"llm_costs_sha256": _digest(run_dir / "llm_costs.jsonl")}
-                      if (run_dir / "llm_costs.jsonl").exists() else {})},
+                   **({"summary_sha256":
+                       hashlib.sha256(summary_bytes).hexdigest()}
+                      if summary_bytes is not None else {}),
+                   **({"llm_costs_sha256":
+                       hashlib.sha256(costs_path.read_bytes()).hexdigest()}
+                      if cost_rows is not None else {})},
         "sample_counts": {
             cls: sum(1 for s in samples if s["sample_class"] == cls)
             for cls in {s["sample_class"] for s in samples}},
@@ -135,25 +187,49 @@ def export(run_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 def write(samples: list[dict[str, Any]], manifest: dict[str, Any],
           out_path: Path) -> None:
+    """Publish derived outputs without clobbering evidence (R-03): the
+    output and its manifest sibling are refused on any source artifact
+    of the run the manifest names — direct path, symlink alias, or `..`
+    spelling all compare equal after resolution."""
     out_path = Path(out_path)
+    manifest_path = out_path.with_suffix(out_path.suffix + ".manifest.json")
+    sources = _source_paths(manifest.get("run_dir")) if isinstance(
+        manifest, dict) else set()
+    for target in (out_path, manifest_path):
+        if _resolve_target(target) in sources:
+            raise ValueError(
+                f"refusing to overwrite source evidence: {target} is a "
+                f"consumed artifact of run_dir "
+                f"{manifest.get('run_dir')!r}; write derived outputs "
+                "elsewhere")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as fh:
         for sample in samples:
             fh.write(json.dumps(sample, sort_keys=True,
                                 separators=(",", ":")) + "\n")
-    with open(out_path.with_suffix(
-            out_path.suffix + ".manifest.json"), "w", encoding="utf-8") as fh:
+    with open(manifest_path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, sort_keys=True, indent=2)
 
 
+def _parse_costs(raw: bytes) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in raw.decode().splitlines()
+            if line.strip()]
+
+
 def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
-                          summary: dict[str, Any]) -> list[dict[str, Any]]:
+                          summary: dict[str, Any], *,
+                          cost_rows: list[dict[str, Any]] | None = None
+                          ) -> list[dict[str, Any]]:
     """CAP-R1 #3: samples are keyed by (turn, agent_id) — a hotseat turn
     carries TWO agents' decisions and each must export as its own sample
     with only ITS observations/actions/receipts/boundary. Boundaries join
     per agent; a boundary without an agent id (legacy/hand-built) joins
     the turn's agent. Boundary FIELDS are read through _boundary_view
-    (#2): production audits nest them in strategy_payload_json."""
+    (#2): production audits nest them in strategy_payload_json.
+
+    R-03: ``cost_rows`` are the rows export() already parsed from the
+    exact bytes it digested into the manifest; when omitted (direct
+    calls) the file is read as before."""
     boundaries: dict[tuple[int, str], list[dict[str, Any]]] = {}
     ledger_gaps = 0
     for e in events:
@@ -165,12 +241,11 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                 and e.get("audit") == "ledger_write_failed":
             ledger_gaps += 1
 
-    cost_rows: list[dict[str, Any]] = []
     pre_ledger = not (run_dir / "llm_costs.jsonl").exists()
-    if not pre_ledger:
-        cost_rows = [json.loads(line) for line
-                     in (run_dir / "llm_costs.jsonl").read_text()
-                     .splitlines() if line.strip()]
+    if not pre_ledger and cost_rows is None:
+        cost_rows = _parse_costs((run_dir / "llm_costs.jsonl").read_bytes())
+    if cost_rows is None:
+        cost_rows = []
 
     final_turn = summary.get("final_turn")
     aborted = summary.get("aborted")
@@ -196,89 +271,144 @@ def _controlled_decisions(run_dir: Path, events: list[dict[str, Any]],
                     _a: str = agent_id) -> bool:
             return e.get("turn") == _t and str(e.get("agent_id")) == _a
 
-        obs = [_ref(e["seq"]) for e in events
-               if e["kind"] == "TOOL_RESULT" and _agents(e)
-               and e.get("tool") in _OBSERVE_TOOLS]
-        actions = [_ref(e["seq"]) for e in events
-                   if e["kind"] == "TOOL_CALL" and _agents(e)
-                   and e.get("tool") in _ACTION_TOOLS]
-        receipts = [_ref(e["seq"]) for e in events
-                    if e["kind"] == "TOOL_RESULT" and _agents(e)
-                    and e.get("status") == "accepted"
-                    and (e.get("mutations") or e.get("receipts"))]
         # a turn may carry SEVERAL decisions (CAP-R1 #4: the economy-
         # refresh path accepts a replacement directive with its own
-        # boundary) — in event order; the LAST is the operative identity,
-        # costs join across ALL of the turn's decision ids
+        # boundary) — in event order. R-02 tail (recheck 2026-09-08):
+        # GENUINE decision grain — one sample per boundary, not one
+        # aggregated sample per turn. Events partition by seq: decision
+        # k owns the calls after its boundary and before the next
+        # boundary of the same (turn, agent); the last decision owns
+        # the rest of the turn. The LAST boundary keeps the stable
+        # segment id; superseded ones carry an @decision_id suffix.
         segment_boundaries = sorted(
             boundaries.get((turn, agent_id), [])
             + boundaries.get((turn, "None"), []),
             key=lambda b: b.get("seq") or 0)
-        boundary = segment_boundaries[-1] if segment_boundaries else None
-        decision_ids = [b["decision_id"] for b in segment_boundaries
-                        if b.get("decision_id")]
-        decision_id = boundary.get("decision_id") if boundary else None
-        rows = [r for r in cost_rows
-                if decision_ids
-                and r.get("decision_id") in decision_ids
-                and (r.get("agent_id") is None
-                     or str(r.get("agent_id")) == agent_id)] \
-            if not pre_ledger else []
-        segment_flags = quality.copy()
-        if len(segment_boundaries) > 1:
-            segment_flags.append("boundary_superseded_within_turn")
-        request_costs = None
-        if rows:
-            tokens_in = [r["input_tokens"] for r in rows
-                         if isinstance(r.get("input_tokens"), int)]
-            tokens_out = [r["output_tokens"] for r in rows
-                          if isinstance(r.get("output_tokens"), int)]
-            request_costs = {
-                "attempts": len(rows),
+        windows: list[tuple[dict[str, Any] | None, int | None, int | None]] = []
+        for i, b in enumerate(segment_boundaries):
+            w_start = b.get("seq") if isinstance(b.get("seq"), int) else None
+            w_end = (segment_boundaries[i + 1].get("seq")
+                     if i + 1 < len(segment_boundaries)
+                     and isinstance(segment_boundaries[i + 1].get("seq"), int)
+                     else None)
+            windows.append((b, w_start, w_end))
+        if not windows:
+            windows.append((None, None, None))
+        base_segment = f"turn:{turn}" if single_agent \
+            else f"turn:{turn}:{agent_id}"
+        for boundary, w_start, w_end in windows:
+            def _window(e: dict[str, Any], *, _s: int | None = w_start,
+                        _e: int | None = w_end) -> bool:
+                if not _agents(e):
+                    return False
+                # only int seqs are windowable; a non-int seq falls out
+                # of every explicit window (the boundary's own row does
+                # too — the window is (start, end) EXCLUSIVE on both
+                # sides)
+                if not isinstance(e.get("seq"), int):
+                    return _s is None and _e is None
+                if _s is not None and not e["seq"] > _s:
+                    return False
+                return not (_e is not None and not e["seq"] < _e)
+
+            obs = [_ref(e["seq"]) for e in events
+                   if e["kind"] == "TOOL_RESULT" and _window(e)
+                   and e.get("tool") in _OBSERVE_TOOLS]
+            actions = [_ref(e["seq"]) for e in events
+                       if e["kind"] == "TOOL_CALL" and _window(e)
+                       and e.get("tool") in _ACTION_TOOLS]
+            receipts = [_ref(e["seq"]) for e in events
+                        if e["kind"] == "TOOL_RESULT" and _window(e)
+                        and e.get("status") == "accepted"
+                        and (e.get("mutations") or e.get("receipts"))]
+            decision_id = boundary.get("decision_id") if boundary else None
+            decision_ids = [decision_id] if decision_id else []
+            rows = [r for r in cost_rows
+                    if decision_ids
+                    and r.get("decision_id") in decision_ids
+                    and (r.get("agent_id") is None
+                         or str(r.get("agent_id")) == agent_id)] \
+                if not pre_ledger else []
+            segment_flags = quality.copy()
+            superseded = boundary is not segment_boundaries[-1] \
+                if segment_boundaries else False
+            if len(segment_boundaries) > 1:
+                segment_flags.append("boundary_superseded_within_turn")
+            request_costs = None
+            if rows:
+                tokens_in = [r["input_tokens"] for r in rows
+                             if isinstance(r.get("input_tokens"), int)]
+                tokens_out = [r["output_tokens"] for r in rows
+                              if isinstance(r.get("output_tokens"), int)]
+                latencies = [r["latency_ms"] for r in rows
+                             if isinstance(r.get("latency_ms"), int)]
+                # R-04 (recheck 2026-09-08): a KNOWN subtotal, never a
+                # silently-qualified total. Attempts whose usage the cost
+                # ledger did not record (None) are counted separately and
+                # flag the sample; they are NOT folded in as zeros.
+                # Genuine zeros survive — a recorded 0 is data, an absent
+                # field is not (sum over the known list only; empty list
+                # -> None, not 0, so "no known usage" stays
+                # distinguishable from "usage known to be zero").
+                unknown_usage = sum(
+                    1 for r in rows
+                    if not isinstance(r.get("input_tokens"), int)
+                    or not isinstance(r.get("output_tokens"), int))
+                unknown_latency = len(rows) - len(latencies)
+                expected = boundary.get("provider_requests") \
+                    if boundary else None
+                request_costs = {
+                    "attempts": len(rows),
+                    "expected_attempts": expected,
+                    "attempts_with_unknown_usage": unknown_usage,
+                    "attempts_with_unknown_latency": unknown_latency,
+                    "logical_request_ids": sorted({
+                        r["logical_request_id"] for r in rows
+                        if r.get("logical_request_id")}),
+                    "tokens_in": sum(tokens_in) if tokens_in else None,
+                    "tokens_out": sum(tokens_out) if tokens_out else None,
+                    "latency_ms_sum": sum(latencies) if latencies else None,
+                    "usage_complete": unknown_usage == 0
+                    and unknown_latency == 0,
+                }
+                if unknown_usage or unknown_latency:
+                    segment_flags.append("costs_partial")
+                if isinstance(expected, int) and len(rows) < expected:
+                    segment_flags.append("costs_attempts_missing")
+            suffix = f"@{decision_id}" if (superseded and decision_id) else ""
+            samples.append({
+                "sample_class": "controlled_decision",
+                "schema_version": SCHEMA_CONTROLLED,
+                "run_id": summary.get("match_id"),
+                "game_instance_id": summary.get("game_instance_id"),
+                "segment_id": base_segment + suffix,
+                "agent_id": agent_id,
+                "player_id": next((e.get("player_id") for e in events
+                                   if _window(e)
+                                   or (w_start is None and _agents(e))), None),
+                "split_group": _split_group(summary),
+                "decision_id": decision_id,
+                "directive_id": boundary.get("directive_id")
+                if boundary else None,
+                "provider_requests": boundary.get("provider_requests")
+                if boundary else None,
+                "decisions_in_turn": len(segment_boundaries),
+                "decision_source": boundary.get("source") if boundary else None,
                 "logical_request_ids": sorted({
                     r["logical_request_id"] for r in rows
                     if r.get("logical_request_id")}),
-                "tokens_in": sum(tokens_in) if tokens_in else None,
-                "tokens_out": sum(tokens_out) if tokens_out else None,
-                "latency_ms_sum": sum(r.get("latency_ms") or 0 for r in rows),
-            }
-        samples.append({
-            "sample_class": "controlled_decision",
-            "schema_version": SCHEMA_CONTROLLED,
-            "run_id": summary.get("match_id"),
-            "game_instance_id": summary.get("game_instance_id"),
-            # multi-agent runs must disambiguate the segment; single-agent
-            # runs keep the original stable id
-            "segment_id": f"turn:{turn}" if single_agent
-            else f"turn:{turn}:{agent_id}",
-            "agent_id": agent_id,
-            "player_id": next((e.get("player_id") for e in events
-                               if _agents(e)), None),
-            "split_group": _split_group(summary),
-            "decision_id": decision_id,
-            "directive_id": boundary.get("directive_id") if boundary else None,
-            # the turn's TOTAL request count across its decisions (the
-            # economy refresh makes a second provider call)
-            "provider_requests": sum(
-                b.get("provider_requests") or 0
-                for b in segment_boundaries) if segment_boundaries else None,
-            "decisions_in_turn": len(segment_boundaries),
-            "decision_source": boundary.get("source") if boundary else None,
-            "logical_request_ids": sorted({
-                r["logical_request_id"] for r in rows
-                if r.get("logical_request_id")}),
-            "observation_refs": obs,
-            "requested_action_refs": actions,
-            "execution_receipt_refs": receipts,
-            "request_costs": request_costs,
-            "procedural_tool_calls": len(actions),
-            "outcome_horizon": (final_turn - turn)
-            if isinstance(final_turn, int) else None,
-            "censoring": "run_aborted" if aborted else None,
-            "visibility_class": "ordinary_player_information",
-            "quality_flags": segment_flags,
-            "source_manifest_ref": {"artifact": "summary.json"},
-        })
+                "observation_refs": obs,
+                "requested_action_refs": actions,
+                "execution_receipt_refs": receipts,
+                "request_costs": request_costs,
+                "procedural_tool_calls": len(actions),
+                "outcome_horizon": (final_turn - turn)
+                if isinstance(final_turn, int) else None,
+                "censoring": "run_aborted" if aborted else None,
+                "visibility_class": "ordinary_player_information",
+                "quality_flags": segment_flags,
+                "source_manifest_ref": {"artifact": "summary.json"},
+            })
     return samples
 
 

@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from civ_arena.research.export_dataset import export, write
 
 REPO = Path(__file__).resolve().parents[1]
@@ -412,12 +414,14 @@ def test_intervals_carry_source_cursors_and_gap_channels(tmp_path):
     assert "gap_inferred_round" in second["quality_flags"]
 
 
-def test_turn_with_replacement_decision_aggregates_both_boundaries(tmp_path):
-    """CAP-R1 #4: the economy refresh emits a SECOND decision_boundary on
-    the same turn. The turn's sample carries the OPERATIVE (last) identity,
-    the SUMMED request count, both decisions' cost rows, and the
-    superseded-within-turn flag — the turn-start decision's costs never
-    vanish from the join."""
+def test_turn_with_replacement_decision_exports_per_decision_segments(tmp_path):
+    """CAP-R1 #4 + R-02 tail (recheck 2026-09-08): the economy refresh
+    emits a SECOND decision_boundary on the same turn. The turn exports
+    one sample PER boundary (genuine decision grain): the operative
+    (last) decision keeps the stable segment id, the superseded one
+    carries an @decision_id suffix, and each sample joins only ITS OWN
+    decision's cost rows — the turn-start decision's costs never vanish
+    from the export."""
     run_dir = _write_run(tmp_path, spectate=False)
     lines = (run_dir / "events.jsonl").read_text().splitlines()
     rows = [json.loads(line) for line in lines]
@@ -457,13 +461,160 @@ def test_turn_with_replacement_decision_aggregates_both_boundaries(tmp_path):
         "\n".join(json.dumps(r, sort_keys=True) for r in ledger) + "\n")
     samples, _ = export(run_dir)
     by_seg = {s["segment_id"]: s for s in samples}
+    # R-02 tail (recheck 2026-09-08): GENUINE decision grain — the turn
+    # exports one sample PER boundary. The operative (last) decision
+    # keeps the stable segment id; the superseded turn-start decision
+    # carries an @decision_id suffix. Costs and the request count are
+    # per decision (the refresh's second provider call belongs to the
+    # refresh, not to the directive it replaced).
     first = by_seg["turn:1"]
     assert first["decision_id"] == "d-refresh"   # operative = last
     assert first["directive_id"] == "dir2"
-    assert first["provider_requests"] == 2        # summed across decisions
+    assert first["provider_requests"] == 1        # its OWN boundary only
     assert first["decisions_in_turn"] == 2
     assert "boundary_superseded_within_turn" in first["quality_flags"]
-    assert first["request_costs"]["attempts"] == 2   # BOTH rows joined
-    assert first["request_costs"]["tokens_in"] == 12
+    assert first["request_costs"]["attempts"] == 1   # only lr2 joins
+    assert first["request_costs"]["tokens_in"] == 7
+    superseded = by_seg["turn:1@d-start"]
+    assert superseded["decision_id"] == "d-start"
+    assert superseded["directive_id"] == "dir1"
+    assert superseded["provider_requests"] == 1
+    assert "boundary_superseded_within_turn" in superseded["quality_flags"]
+    assert superseded["request_costs"]["attempts"] == 1   # only lr1 joins
+    assert superseded["request_costs"]["tokens_in"] == 5
     second = by_seg["turn:2"]
     assert "boundary_superseded_within_turn" not in second["quality_flags"]
+
+
+# -- recheck 2026-09-08 regressions (R-03/R-04) -------------------------------
+
+
+def test_unknown_cost_attempts_flagged_never_folded_as_zero(tmp_path):
+    """R-04: one recorded attempt (100/10/5ms) plus one UNKNOWN attempt
+    must export as a KNOWN subtotal with the unknown counted separately
+    and a costs_partial flag — never as an unqualified total. Genuine
+    zeros stay zeros (a recorded 0 is data; an absent field is not)."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    ledger = [  # d1 rows: one known, one unknown; d2 row: genuine zeros
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 5, "model": "m", "payload_hash": "h1",
+         "input_tokens": 100, "output_tokens": 10,
+         "decision_id": "d1", "logical_request_id": "lr-known",
+         "request_set_key": "h1:generation"},
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": None, "model": "m", "payload_hash": "h2",
+         "input_tokens": None, "output_tokens": None,
+         "decision_id": "d1", "logical_request_id": "lr-unknown",
+         "request_set_key": "h2:generation"},
+        {"ts": "t", "agent_id": "a0", "player_id": 0,
+         "request_kind": "generation", "attempt": 0, "status_code": 200,
+         "latency_ms": 0, "model": "m", "payload_hash": "h3",
+         "input_tokens": 0, "output_tokens": 0,
+         "decision_id": "d2", "logical_request_id": "lr-zero",
+         "request_set_key": "h3:generation"},
+    ]
+    (run_dir / "llm_costs.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in ledger) + "\n")
+    samples, _ = export(run_dir)
+    by_turn = {s["segment_id"]: s for s in samples}
+    partial = by_turn["turn:1"]["request_costs"]
+    assert partial["attempts"] == 2
+    assert partial["attempts_with_unknown_usage"] == 1
+    assert partial["attempts_with_unknown_latency"] == 1
+    assert partial["tokens_in"] == 100 and partial["tokens_out"] == 10
+    assert partial["latency_ms_sum"] == 5
+    assert partial["usage_complete"] is False
+    assert "costs_partial" in by_turn["turn:1"]["quality_flags"]
+    # the unknown row's ids ride along — the subtotal is auditable
+    assert partial["logical_request_ids"] == ["lr-known", "lr-unknown"]
+    genuine = by_turn["turn:2"]["request_costs"]
+    assert genuine["tokens_in"] == 0 and genuine["tokens_out"] == 0
+    assert genuine["latency_ms_sum"] == 0
+    assert genuine["usage_complete"] is True
+    assert "costs_partial" not in by_turn["turn:2"]["quality_flags"]
+
+
+def test_missing_cost_attempts_flagged_against_expected(tmp_path):
+    """R-04 tail: when the boundary declares more provider requests than
+    the ledger recorded, the shortfall is flagged — a sink failure or a
+    cancelled retry must not silently shrink the aggregate."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    # fixture: turn 1 boundary declares provider_requests=1; keep ZERO
+    # ledger rows for d1 so recorded < expected
+    (run_dir / "llm_costs.jsonl").write_text("")
+    samples, _ = export(run_dir)
+    first = next(s for s in samples if s["segment_id"] == "turn:1")
+    assert first["request_costs"] is None  # no rows at all
+    # costs_attempts_missing fires on the row-level comparison instead
+    rows = [{"ts": "t", "agent_id": "a0", "player_id": 0,
+             "request_kind": "generation", "attempt": 0, "status_code": 200,
+             "latency_ms": 5, "model": "m", "payload_hash": "h1",
+             "input_tokens": 8, "output_tokens": 2,
+             "decision_id": "d1", "logical_request_id": "lr1",
+             "request_set_key": "h1:generation"}]
+    (run_dir / "llm_costs.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+    # turn 1 expects 1, has 1: clean; turn 2 boundary declares 0 but the
+    # fixture's d2 has no rows — expected 0 means nothing missing.
+    samples, _ = export(run_dir)
+    by_turn = {s["segment_id"]: s for s in samples}
+    assert "costs_attempts_missing" not in by_turn["turn:1"]["quality_flags"]
+    # now manufacture the shortfall: two declared, one recorded
+    events = [json.loads(line) for line
+              in (run_dir / "events.jsonl").read_text().splitlines()]
+    for e in events:
+        if e.get("audit") == "decision_boundary" and e.get("turn") == 1:
+            e["provider_requests"] = 2
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(e, sort_keys=True) for e in events) + "\n")
+    samples, _ = export(run_dir)
+    by_turn = {s["segment_id"]: s for s in samples}
+    first = by_turn["turn:1"]
+    assert first["request_costs"]["expected_attempts"] == 2
+    assert first["request_costs"]["attempts"] == 1
+    assert "costs_attempts_missing" in first["quality_flags"]
+
+
+def test_write_refuses_to_overwrite_source_evidence(tmp_path):
+    """R-03: the output path (and its manifest sibling) may never land on
+    a consumed artifact of the run the manifest names — direct path,
+    `..` spelling, or symlink alias all refuse, and the source bytes
+    survive untouched."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    samples, manifest = export(run_dir)
+    original = (run_dir / "events.jsonl").read_bytes()
+    for target in (run_dir / "events.jsonl",
+                   run_dir / "summary.json",
+                   run_dir / "llm_costs.jsonl",
+                   run_dir,  # the run dir itself would shadow the sources
+                   # alias spellings resolve to the same file
+                   run_dir / ".." / run_dir.name / "summary.json"):
+        with pytest.raises(ValueError, match="refusing to overwrite"):
+            write(samples, manifest, target)
+    # a symlink alias pointing at the source refuses too
+    alias = tmp_path / "alias.jsonl"
+    alias.symlink_to(run_dir / "events.jsonl")
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        write(samples, manifest, alias)
+    assert (run_dir / "events.jsonl").read_bytes() == original
+    assert (run_dir / "summary.json").exists()
+    # a legitimate out-of-run target still writes fine
+    write(samples, manifest, tmp_path / "out" / "dataset.jsonl")
+    assert (tmp_path / "out" / "dataset.jsonl").exists()
+    assert (tmp_path / "out" / "dataset.jsonl.manifest.json").exists()
+
+
+def test_driven_run_without_summary_refuses_controlled_export(tmp_path):
+    """R-03: summary.json carries the outcome record. Without it a driven
+    run's horizon/censoring are unknown — spectator data must not fall
+    into the controlled class merely because MATCH_START exists."""
+    run_dir = _write_run(tmp_path, spectate=False, with_ledger=True,
+                         with_boundaries=True)
+    (run_dir / "summary.json").unlink()
+    with pytest.raises(ValueError, match="no summary.json"):
+        export(run_dir)
