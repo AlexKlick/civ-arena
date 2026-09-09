@@ -29,10 +29,27 @@ _COST_FIELDS = ("ts", "request_kind", "attempt", "status_code", "latency_ms",
                 "model", "payload_hash", "input_tokens", "output_tokens",
                 # CAP-03 (F-07): logical identity for decision-level joins
                 "decision_id", "logical_request_id", "request_set_key")
+# CAR-003 seam (docs/car003-contract.md §8a): join identity the CLIENT
+# cannot know (it has no run, match or turn) and the sink composer can —
+# a row becomes joinable by (run_id, match_id, agent_id, turn,
+# decision_id) without run-wide occurrence competition. Recorded only
+# when supplied and well-typed; null otherwise, never a default. Rows
+# written before this seam lack the keys: absent == null == unknown.
+_ROW_IDENTITY_FIELDS = ("turn", "match_id", "run_id")
 
 
 def _utcnow() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _turn_or_none(turn: Any) -> int | None:
+    """A turn is an int >= 1 (runtime._turn == 0 means no turn begun;
+    bool is an int subclass and is not a turn)."""
+    return turn if type(turn) is int and turn >= 1 else None
+
+
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 class CostLedger:
@@ -41,9 +58,14 @@ class CostLedger:
     def __init__(self, run_dir: Path) -> None:
         self._path = Path(run_dir) / "llm_costs.jsonl"
 
-    def note(self, agent_id: str, player_id: int, record: dict[str, Any]) -> None:
+    def note(self, agent_id: str, player_id: int, record: dict[str, Any], *,
+             turn: int | None = None, match_id: str | None = None,
+             run_id: str | None = None) -> None:
         row = {"ts": record.get("ts", _utcnow()),
-               "agent_id": agent_id, "player_id": int(player_id)}
+               "agent_id": agent_id, "player_id": int(player_id),
+               "turn": _turn_or_none(turn),
+               "match_id": _str_or_none(match_id),
+               "run_id": _str_or_none(run_id)}
         for key in _COST_FIELDS:
             if key != "ts":
                 row[key] = record.get(key)

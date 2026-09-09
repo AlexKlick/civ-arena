@@ -28,6 +28,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -68,7 +69,9 @@ def _provider_request_audit(driver: LiveDriver) -> Any:
 
 
 def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
-                       run_dir: Path) -> None:
+                       run_dir: Path, *, match_id: str | None = None,
+                       run_id: str | None = None,
+                       turn_of: Callable[[], Any] | None = None) -> None:
     """Attach the run-dir ledgers to a model client: durable spend
     (spend.jsonl parity with the sim coordinator), the always-on
     per-attempt cost ledger, the opt-in wire transcript, and the existing
@@ -77,7 +80,13 @@ def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
 
     CAP-03: a ledger write failure must NEVER fail or retransmit the
     provider request — the fault is audited (ledger_write_failed, once per
-    sink) and the accounting gap stays visible; the request completes."""
+    sink) and the accounting gap stays visible; the request completes.
+
+    CAR-003 seam (docs/car003-contract.md §8a): ``match_id``/``run_id``
+    and the per-attempt ``turn_of()`` reading ride onto every cost row so
+    a row joins its decision by (run_id, match_id, agent_id, turn,
+    decision_id). Identity is best-effort: a raising ``turn_of`` records
+    null and the row still lands; nothing is defaulted."""
     if client is None or not hasattr(client, "on_post"):
         return
     from civ_arena.agents.llm.wire_log import CostLedger, WireLog
@@ -106,9 +115,20 @@ def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
 
     client.on_post = on_post
 
+    def _turn_now() -> Any:
+        if turn_of is None:
+            return None
+        try:
+            return turn_of()
+        except Exception:  # noqa: BLE001 — identity is best-effort, cost is not
+            return None
+
     def on_attempt(record: dict[str, Any]) -> None:
+        turn = _turn_now()
         _guarded("costs",
-                 lambda: costs.note(agent.agent_id, agent.player_id, record))
+                 lambda: costs.note(agent.agent_id, agent.player_id, record,
+                                    turn=turn, match_id=match_id,
+                                    run_id=run_id))
         if wire is not None:
             _guarded("wire", lambda: wire.note(record))
 
@@ -402,7 +422,8 @@ async def phase_dispatch(
     # strategy audit.
     _wire_client_sinks(getattr(runtime, "client", None), agent,
                        _provider_request_audit(driver),
-                       run_dir)
+                       run_dir, match_id=spec.match_id, run_id=run_dir.name,
+                       turn_of=lambda: getattr(runtime, "_turn", None))
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
     # Arena-owned services reach the runtime exactly as the coordinator
     # wires them (LLM runtimes read diary/strategy at turn start; without
@@ -981,8 +1002,12 @@ async def phase_dispatch_hotseat(
                     configure_pacing(recall_available=recall_available)
                     audit("turn_pacing", agent=agent.agent_id, mode="visible_briefing_v1",
                           recall_available=recall_available)
+                # the loop rebinds ``runtime`` per seat: bind it by default
+                # argument or every seat's rows would read the LAST seat's turn
                 _wire_client_sinks(getattr(runtime, "client", None), agent,
-                                   audit, run_dir)
+                                   audit, run_dir, match_id=spec.match_id,
+                                   run_id=run_dir.name,
+                                   turn_of=lambda rt=runtime: getattr(rt, "_turn", None))
             await adapter.setup({})
             caps = await adapter.inject_mod(mod_lua)
             audit("mod_capabilities", capabilities=caps)

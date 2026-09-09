@@ -146,6 +146,14 @@ def _encode(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+# CAR-003 seam (docs/car003-contract.md §8b): the audits that describe ONE
+# provider decision carry the decision id the ledger rows joined. Extend
+# the set (Lane D: strategy_failed, ...) rather than editing _emit; an
+# explicit decision_id kwarg (decision_boundary) always wins.
+_DECISION_STAMPED_AUDITS = frozenset({
+    'strategy_request', 'strategy_response_shape', 'strategy_decision'})
+
+
 @dataclass
 class StrategicController:
     match_id: str
@@ -163,6 +171,9 @@ class StrategicController:
     # CAP-03 (F-07): identity of the last ACCEPTED directive — quiet turns
     # re-execute it procedurally and their decision_boundary audits cite it.
     _directive_id: str | None = field(default=None, init=False)
+    # CAR-003: the decision currently being made — the turn-start mint or
+    # the economy-replacement mint, whichever is live; None outside a turn.
+    _decision_id: str | None = field(default=None, init=False)
     _last_turn: int = field(default=0, init=False)
     _last_decision: int = field(default=0, init=False)
     _previous: dict | None = field(default=None, init=False)
@@ -184,10 +195,12 @@ class StrategicController:
 
     def _emit(self, runtime: Any, kind: str, **payload: Any) -> None:
         if self.audit is not None:
+            stamp = ({'decision_id': self._decision_id}
+                     if kind in _DECISION_STAMPED_AUDITS else {})
             self.audit({'audit': kind, 'controller_version': 1,
                         'match_id': self.match_id, 'agent_id': runtime.profile.agent_id,
                         'player_id': runtime.profile.player_id, 'turn': runtime._turn,
-                        **copy.deepcopy(payload)})
+                        **stamp, **copy.deepcopy(payload)})
 
     @staticmethod
     def _facts(curator: ContextCurator) -> dict:
@@ -243,6 +256,7 @@ class StrategicController:
         # CAP-03 (F-07): one decision identity per turn — quiet procedural
         # turns get one too, so zero-request turns stay in the cost join.
         decision_id = uuid.uuid4().hex
+        self._decision_id = decision_id
         client = runtime.client
         if client is not None:
             client.decision_id = decision_id
@@ -726,6 +740,7 @@ class StrategicController:
                 # cite the directive actually running), and its own
                 # decision_boundary audit with an honest request count.
                 refresh_decision_id = uuid.uuid4().hex
+                self._decision_id = refresh_decision_id
                 refresh_client = runtime.client
                 if refresh_client is not None:
                     refresh_client.decision_id = refresh_decision_id
