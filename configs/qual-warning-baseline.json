@@ -1,0 +1,17 @@
+[
+  "Event log exceeds the read limit; this view is incomplete.",
+  "Event count limit reached; this view is incomplete.",
+  "Per-turn display limit reached; older items omitted.",
+  "Turn display limit reached; older turns omitted.",
+  "Response size limit reached; older turns omitted.",
+  "Spectator world record limit reached; older captures omitted.",
+  "Spectator economy row limit reached; later players in one capture omitted.",
+  "Researched name limit reached; later names omitted.",
+  "Research history limit reached; older rows omitted.",
+  "Research option limit reached; later options omitted.",
+  "Timeline row limit reached; older rows omitted.",
+  "Violation mark limit reached; older marks omitted.",
+  "Economy row limit reached; later rows omitted.",
+  "Reserved role limit reached; later roles omitted.",
+  "Directive field list limit reached; later fields omitted."
+]
