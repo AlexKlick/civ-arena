@@ -314,13 +314,17 @@ def test_baseline_matches_source_cap_constants_and_excludes_real_warnings():
                            "Event count limit reached; this view is incomplete.",
                            "Per-turn display limit reached; older items omitted.",
                            "Turn display limit reached; older turns omitted.",
-                           "Response size limit reached; older turns omitted."):
+                           # coordinator ruling 2026-09-09 on lane-A finding 3:
+                           # dashboard.py:622's comparison-rows cap string is the
+                           # same benign size-cap family as the turns variant
+                           "Response size limit reached; older turns omitted.",
+                           "Response size limit reached; older comparison rows omitted."):
         assert dashboard_only in baseline
     for real_problem in (dc.WORLD_INVALID,
                          "Partial trailing JSON ignored while log is written.",
                          dc.PACKET_UNBOUND, dc.STRATEGY_MALFORMED):
         assert real_problem not in baseline
-    assert len(baseline) == len(set(baseline)) == 15
+    assert len(baseline) == len(set(baseline)) == 16
 
 
 # -- CLI surface ----------------------------------------------------------------
