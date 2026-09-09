@@ -967,6 +967,185 @@ def test_coverage_input_hardlinked_by_an_output_is_refused(tmp_path, capsys):
     assert matrix.read_bytes() == before
 
 
+# -- r3 fix lane: the last viewer-routing bypass (finding 3) -------------------
+
+
+def test_negative_turn_baseline_cannot_bypass_world_validation(tmp_path):
+    """Codex r3 finding 3: dashboard_compare.py:561 drops `turn < 0` BEFORE it
+    calls validate_world(), so a negative-turn capture is never viewer-checked
+    however it is routed — and a 0x0 grid rides straight through a key-set
+    check. This is the exact failure class the harness exists to catch."""
+    run_dir = _write_qual_run(tmp_path, 1)
+
+    def gut(row):
+        row["turn"] = -1
+        row["world"]["grid"] = {"w": 0, "h": 0}
+
+    _edit_capture(run_dir, -1, gut)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == -1
+    reason = rejected[0]["reason"]
+    assert "turn -1" in reason and "negative" in reason
+    assert result["audit"]["after_seat_sequence"] == [0, 1]
+    assert any("row contract" in failure for failure in result["failures"])
+
+
+def test_every_counted_world_goes_through_the_viewer_validator(tmp_path):
+    """The audit validates each counted world DIRECTLY, never by hoping the
+    viewer looked at it."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 1,
+                  lambda row: row["world"].update({"grid": {"w": 0, "h": 0}}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 1
+    assert "validate_world" in rejected[0]["reason"]
+    assert "grid" in rejected[0]["reason"]
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+
+
+def test_the_baseline_sentinel_is_after_seat_not_turn(tmp_path):
+    """GUARD for the finding-3 wording: it is `after_seat` that carries the -1
+    sentinel. The baseline's TURN is the engine mirror (live_driver.py:995
+    passes adapter._turn_mirror), so rejecting negative turns must not reject a
+    conforming baseline."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    baseline = next(row for row in _read_rows(run_dir)
+                    if row.get("audit") == "spectator_world"
+                    and row["after_seat"] == -1)
+    assert baseline["after_seat"] == -1 and baseline["turn"] >= 0
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 0, result.get("failures")
+    assert result["audit"]["after_seat_sequence"] == [-1, 0, 1]
+
+
+# -- r3 fix lane: publication ownership, part 2 (findings 1, 2, 4, 5) ----------
+
+
+def _publish_argv(out: Path) -> list[str]:
+    return ["--json", str(out / "qualification.json"),
+            "--report", str(out / "report.md"),
+            "--export-out", str(out / "samples.jsonl")]
+
+
+def test_interrupted_publication_leaves_no_stale_pass_over_replaced_bytes(
+        tmp_path, capsys, monkeypatch):
+    """Codex r3 finding 1: with a previous generation present, replacing
+    samples and manifest and THEN failing the report leaves the old PASS
+    verdict describing bytes that are no longer there. Committing the verdict
+    last does not prevent that — the old verdict has to be invalidated before
+    the first artifact it references is replaced."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "gen"
+    argv = _publish_argv(out)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert qual.main([str(run_dir), "--rounds", "1", "--allow-fake",
+                          *argv]) == 0
+    assert json.loads((out / "qualification.json").read_text())["verdict"] == "PASS"
+    real_write = qual.atomic_write_text
+
+    def fail_on_report(path, text, **kwargs):
+        if Path(path).name == "report.md":
+            raise OSError(30, "Read-only file system")
+        return real_write(path, text, **kwargs)
+
+    monkeypatch.setattr(qual, "atomic_write_text", fail_on_report)
+    with contextlib.redirect_stdout(io.StringIO()):
+        code = qual.main([str(run_dir), "--rounds", "1", "--allow-fake", *argv])
+    assert code == 2
+    assert "Traceback" not in capsys.readouterr().err
+    survivor = out / "qualification.json"
+    assert not survivor.exists(), \
+        f"a stale verdict survived: {survivor.read_text()[:200]}"
+
+
+def test_a_second_publisher_cannot_interleave_with_the_first(tmp_path, capsys,
+                                                             monkeypatch):
+    """Bounded mitigation for Codex r3 finding 2: publication holds an
+    exclusive lock keyed on the verdict document, so two invocations cannot
+    interleave their members and leave A's PASS over B's samples. The loser is
+    refused; it does not wait and it does not mix generations."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    argv = _publish_argv(tmp_path / "lock")
+    real_publish, inner = qual.publish, {}
+
+    def publish_while_holding_the_lock(members):
+        if "started" not in inner:
+            inner["started"] = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                inner["code"] = qual.main([str(run_dir), "--rounds", "1",
+                                           "--allow-fake", *argv])
+        return real_publish(members)
+
+    monkeypatch.setattr(qual, "publish", publish_while_holding_the_lock)
+    with contextlib.redirect_stdout(io.StringIO()):
+        code = qual.main([str(run_dir), "--rounds", "1", "--allow-fake", *argv])
+    assert code == 0
+    assert inner.get("code") == 2, "the second publisher was not refused"
+    assert "another publication holds the lock" in capsys.readouterr().err
+
+
+def test_output_under_a_symlinked_parent_is_refused(tmp_path, capsys):
+    """Bounded mitigation for Codex r3 finding 4: a symlinked output parent can
+    be retargeted between the guard and the write. We refuse the whole shape at
+    guard time rather than pretend to win the race."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    real = tmp_path / "real-out"
+    real.mkdir()
+    link = tmp_path / "link-out"
+    link.symlink_to(real, target_is_directory=True)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--report", str(link / "report.md"))
+    assert code == 2 and result == {}
+    err = capsys.readouterr().err
+    assert "symlink" in err and "link-out" in err
+
+
+def test_staging_creation_failure_is_exit_2_without_a_traceback(tmp_path, capsys,
+                                                                monkeypatch):
+    """Codex r3 finding 5: mkdtemp() ran before the exception boundary."""
+    run_dir = _write_qual_run(tmp_path, 1)
+
+    def no_space(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(qual.tempfile, "mkdtemp", no_space)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 2 and result == {}
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "No space left on device" in err
+
+
+def test_publication_cannot_truncate_run_evidence_even_unguarded(tmp_path,
+                                                                 monkeypatch):
+    """The pin owed from round 3: canonical.atomic_write_text is mkstemp +
+    os.replace, so a hardlink planted at a destination AFTER guard_outputs ran
+    is unlinked by the replace, never truncated. Round 2's write_text primitive
+    destroyed the shared inode. Defence in depth for r1 finding 2."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "race"
+    out.mkdir()
+    report = out / "report.md"
+    sealed = (run_dir / "events.jsonl").read_bytes()
+    real_guard = qual.guard_outputs
+
+    def guard_then_lose_the_race(*args, **kwargs):
+        real_guard(*args, **kwargs)  # passes: nothing is planted yet
+        os.link(run_dir / "events.jsonl", report)
+
+    monkeypatch.setattr(qual, "guard_outputs", guard_then_lose_the_race)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--report", str(report),
+                              "--json", str(out / "q.json"),
+                              "--export-out", str(out / "s.jsonl"))
+    assert code == 0, result.get("failures")
+    assert (run_dir / "events.jsonl").read_bytes() == sealed
+    assert report.read_text().startswith("# Recording qualification report")
+
+
 def test_baseline_allowlist_is_code_owned_and_matches_the_shipped_json():
     from civ_arena import dashboard_compare as dc
 

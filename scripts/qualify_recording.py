@@ -43,14 +43,40 @@ Exit codes:
 The harness NEVER mutates the run dir: every output defaults to a sibling
 "<run>.qual/" directory, and any explicit output inside the run dir — or
 merely sharing an inode with one of its artifacts — is refused before any
-stage runs. A publication that fails part-way removes the outputs it
-created, so no success document outlives a failed write. No HTTP server is
-started; the viewer runs in-process.
+stage runs. No HTTP server is started; the viewer runs in-process.
+
+Threat model (be precise about what is and is not guaranteed):
+
+    ASSUMED: a single, non-adversarial invocation by one operator, over
+    stable output directories that contain no symlinks on their parent
+    chains. This is a single-user research harness, not a multi-tenant
+    service.
+
+    GUARANTEED under that model: the run directory is never written; an
+    output that aliases run evidence, the coverage input or another output
+    is refused before any stage runs; every artifact is generated into
+    invocation-owned staging and nothing reaches a destination until all of
+    them exist; the previous generation's success documents are invalidated
+    before any artifact they reference is replaced, so an interrupted
+    publication is DETECTABLE (missing verdict) rather than a stale PASS
+    over swapped bytes; and no traceback escapes — usage/IO faults exit 2.
+
+    NOT GUARANTEED: publication is four os.replace calls, not one
+    transaction (CAR-003 contract §5.3) — an interruption between members
+    leaves a detectable partial generation, never a success. A local actor
+    who can mutate the output tree DURING a run is out of scope: the
+    exclusive publication lock (keyed on the resolved verdict path) and the
+    refusal of symlinked output parents are mitigations for the accidental
+    cases, not defences against a deliberate mid-run retarget. Two
+    invocations that share only SOME outputs while naming different verdict
+    documents are not serialized. A lockfile left by a killed process is
+    stale and must be removed by the operator; the error names it.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -67,6 +93,7 @@ from civ_arena import dashboard_compare  # noqa: E402
 from civ_arena.canonical import atomic_write_text  # noqa: E402
 from civ_arena.dashboard import DashboardStore  # noqa: E402
 from civ_arena.game.civ6.validate_run import validate  # noqa: E402
+from civ_arena.minimap import validate_world  # noqa: E402
 from civ_arena.research.export_dataset import export, write  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -257,6 +284,15 @@ def world_envelope_reasons(record: dict, prev_turn: int | None) -> list[str]:
         if faults:
             reasons.append("roster row(s) malformed: "
                            f"{faults[:MAX_REPORTED_ROSTER_FAULTS]}")
+    # Codex r3 finding 3: the LAST viewer-routing bypass. Route and turn are
+    # both filters on dashboard_compare's side, so the audit runs the viewer's
+    # own validator here, directly, over every world it is about to count —
+    # never relying on the viewer having chosen to look.
+    try:
+        validate_world(world)
+    except (ValueError, TypeError, RecursionError) as exc:
+        reasons.append(f"validate_world rejects the payload: "
+                       f"{type(exc).__name__}: {exc}")
     outer, turn = record.get("after_seat"), record.get("turn")
     inner = world.get("after_seat")
     if inner != outer:
@@ -264,6 +300,13 @@ def world_envelope_reasons(record: dict, prev_turn: int | None) -> list[str]:
                        f"event after_seat {outer!r}")
     if type(turn) is not int:
         reasons.append(f"capture turn {turn!r} is not an integer")
+    elif turn < 0:
+        reasons.append(f"capture turn {turn} is negative; dashboard_compare "
+                       "drops turn < 0 before validate_world (:561), so a "
+                       "negative-turn capture can never be viewer-validated "
+                       "and must not count. NOTE: the baseline's -1 sentinel "
+                       "is its after_seat, not its turn (live_driver.py:995 "
+                       "passes the engine turn mirror)")
     elif prev_turn is not None and turn < prev_turn:
         reasons.append(f"capture turn {turn} precedes the previous capture's "
                        f"turn {prev_turn}")
@@ -790,6 +833,45 @@ def _manifest_sibling(export_out: Path) -> Path:
     return export_out.with_suffix(export_out.suffix + ".manifest.json")
 
 
+def _symlinked_ancestor(path: Path) -> Path | None:
+    """The first symlinked directory on an output's parent chain, if any."""
+    return next((parent for parent in path.parents if parent.is_symlink()), None)
+
+
+@contextlib.contextmanager
+def _publication_lock(verdict_path: Path):
+    """Serialize publication across invocations sharing a verdict document.
+
+    Bounded mitigation for Codex r3 finding 2 (see the module docstring's
+    threat model): an O_EXCL lockfile keyed on the RESOLVED verdict path
+    means two invocations cannot interleave their members and leave one
+    generation's PASS attached to another's samples. The loser is refused,
+    not queued. This does not serialize two invocations that share only
+    SOME outputs while naming different verdict documents.
+    """
+    key = hashlib.sha256(str(_resolve(verdict_path)).encode()).hexdigest()[:32]
+    lock = Path(tempfile.gettempdir()) / f"qualify-recording-{key}.lock"
+    try:
+        handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise QualificationError(
+            f"another publication holds the lock for {verdict_path} ({lock}); "
+            "two invocations must not interleave their artifacts. If no other "
+            "qualification is running, that lockfile is stale — remove it"
+        ) from exc
+    except OSError as exc:
+        raise QualificationError(
+            f"cannot take the publication lock {lock}: "
+            f"{type(exc).__name__}: {exc}") from exc
+    try:
+        with os.fdopen(handle, "w") as stream:
+            stream.write(f"{os.getpid()}\n")
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            lock.unlink(missing_ok=True)
+
+
 def guard_outputs(outputs: list[tuple[str, Path]], run_dir: Path,
                   coverage: Path | None = None) -> None:
     """Codex r1 findings 2+5 and r2 finding 6, applied ONCE up front to EVERY
@@ -814,6 +896,16 @@ def guard_outputs(outputs: list[tuple[str, Path]], run_dir: Path,
     sources[_resolve(run_dir)] = run_dir
     for label, path in outputs:
         _refuse_inside_run(path, run_dir, label)
+        # Bounded mitigation for Codex r3 finding 4: a symlinked output parent
+        # can be retargeted between this guard and the write, so the resolved
+        # path checked here is not the path written later. We refuse the shape
+        # outright rather than pretend to win that race (module docstring).
+        linked = _symlinked_ancestor(path)
+        if linked is not None:
+            raise QualificationError(
+                f"--{label} {path} has a symlink on its parent chain "
+                f"({linked}); an output directory that can be retargeted "
+                "mid-run cannot be guarded, so it is refused")
         alias = sources.get(_resolve(path))
         if alias is None and path.exists():
             alias = next((source for source in sources.values()
@@ -873,6 +965,22 @@ def publish(members: list[tuple[str, Path, Path]]) -> list[str]:
         except OSError as exc:
             raise QualificationError(
                 f"--{label} parent directory cannot be created: "
+                f"{type(exc).__name__}: {exc}; nothing was published") from exc
+    # Codex r3 finding 1: committing the verdict last does NOT stop an
+    # interrupted publication from leaving the PREVIOUS generation's PASS in
+    # place while the samples and manifest it names have already been
+    # replaced. The outgoing success documents are therefore invalidated
+    # first, under the publication lock, before any artifact they reference
+    # is touched: after this point a partial publication is missing its
+    # verdict, which every reader treats as an interrupted publication.
+    for label, _staged, dest in reversed(members):
+        if label not in ("json", "report"):
+            continue
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError as exc:
+            raise QualificationError(
+                f"the previous --{label} at {dest} cannot be invalidated: "
                 f"{type(exc).__name__}: {exc}; nothing was published") from exc
     committed: list[str] = []
     for label, staged, dest in members:
@@ -942,8 +1050,16 @@ def main(argv: list[str] | None = None) -> int:
     # destination exactly as it was found (no snapshot, no unlink, so no
     # concurrent invocation's artifacts and no previous generation are ever
     # destroyed).
-    staging = Path(tempfile.mkdtemp(prefix="qualify-recording-"))
+    staging = None
     try:
+        # Codex r3 finding 5: mkdtemp itself can fail (ENOSPC, EACCES), so it
+        # lives INSIDE the boundary and cleanup is conditional on it existing.
+        try:
+            staging = Path(tempfile.mkdtemp(prefix="qualify-recording-"))
+        except OSError as exc:
+            raise QualificationError(
+                f"cannot create the staging area: {type(exc).__name__}: "
+                f"{exc}") from exc
         staged_export = staging / "export" / export_out.name
         staged_export.parent.mkdir(parents=True, exist_ok=True)
         staged_json, staged_report = staging / "verdict.json", staging / "report.md"
@@ -972,7 +1088,8 @@ def main(argv: list[str] | None = None) -> int:
         members.append(("report", staged_report, report_path))
         # the verdict document is the success document: committed LAST
         members.append(("json", staged_json, json_path))
-        publish(members)
+        with _publication_lock(json_path):
+            publish(members)
     except (QualificationError, OSError, TypeError, ValueError, KeyError,
             AttributeError, IndexError) as exc:
         detail = (str(exc) if isinstance(exc, QualificationError)
@@ -981,7 +1098,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"qualification: {detail}", file=sys.stderr)
         return 2
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
     print(f"qualification: {qualification['verdict']} — {len(failures)} failure(s); "
           f"verdict {json_path}")
     for failure in failures:
