@@ -7,9 +7,12 @@ training, distillation, or evaluation: coverage, gaps, actor uncertainty, and th
 allowed-use list. It is written from the exporter source
 (`src/civ_arena/research/export_dataset.py`), not from a run.
 
-**Status: template + code-grounded contract. NO recording has been qualified yet.**
-Section 6 is the qualification procedure; its result table is empty on purpose.
-Nothing here asserts that a dataset exists or is fit for use.
+**Status: ONE recording qualified — `car003-sealed-20260909`, verdict PASS
+(2026-09-09).** Section 6 carries its filled result table. The allowed-use list
+in §5 is the general contract; §6's last row is what *this* recording may be
+used for, which is strictly narrower. Nothing here asserts that any other
+recording exists or is fit for use, and a corpus of one is not a training set —
+NEXT-07 deliberately waits for 2–3 qualified recordings.
 
 ## 1. Sample classes are strictly separated
 
@@ -169,7 +172,7 @@ mod version, and the mod gate refuses anything below 0.4.0.
 - Any use of a recording captured by a mod below 0.4.0 for owner-attributed
   work (see §4).
 
-## 6. Qualification procedure for a sealed recording — NOT YET RUN
+## 6. Qualification procedure for a sealed recording — RUN, PASS (2026-09-09)
 
 A recording becomes usable only after this sequence, on a **disposable** native
 scenario, with the exporter unchanged:
@@ -185,12 +188,37 @@ scenario, with the exporter unchanged:
 
 | Field | Value |
 |---|---|
-| Run id | *(pending)* |
-| Mod version | *(pending)* |
-| Samples by class | *(pending)* |
-| Ref-integrity failures | *(pending)* |
-| Flag histogram | *(pending)* |
-| Allowed uses for THIS recording | *(pending — the §5 list minus whatever its flags remove)* |
+| Run id | `car003-sealed-20260909` · match `live-hotseat-spectator-003` · game instance `live-hotseat-spectator-003-i1787530` · commit `c0fb406`, tree clean, `fake: false` |
+| Mod version | **0.4.0** (smoke S4, live) · `mod_sha256 79a69a7f0a6839c848b35f1bede1c1416a743af71421468d8926a1eaec1329c2` |
+| Samples by class | `controlled_decision: 6` · **no `spectator_interval` samples** — this is a driven hotseat recording with no spectate phase, so every §4 actor-uncertainty limit is moot here rather than satisfied |
+| Ref-integrity failures | **0** (144 refs checked) · `samples.jsonl` sha256 `434a7b42…`, bound in the verdict |
+| Flag histogram | `controlled_decision: pre_boundary_run × 6` — **every** sample. `request_costs` is `null` on all six, so `usage_complete` is absent, not false |
+| Allowed uses for THIS recording | Procedural / tool-call behaviour cloning of our own controller; outcome-horizon labelling (`outcome_horizon` present, `censoring` null); evaluation of capture fidelity itself. **NOT decision-cost analysis of any kind** — `pre_boundary_run` on all six samples means costs were never attached, and §5 forbids reading that as "costs happened to be zero". No spectate-derived use applies (no such samples). |
+
+**Why every sample is flagged.** `decision_id` is minted before dispatch but
+`decision_boundary` is only emitted after `_decide` returns, so a run whose
+ledger rows predate the boundary exports with `pre_boundary_run` and no
+`request_costs`. This is the known NEXT-04B gap, not a fault in this recording —
+the capture, audit, viewer and exporter all passed. Closing it is Lane D's work;
+until then this recording supports behaviour and outcome work but carries **no
+cost evidence at all**.
+
+**Qualification evidence** (`runs/car003-sealed-20260909.qual/`, files `0600`):
+`qualification.json` verdict **PASS**, `failures: []`; capture audit
+`after_seat_sequence [-1, 0, 1, 0, 1, 0, 1]`, 7 `spectator_world` rows, **0**
+`spectator_world_failed`, **0** rejected; `validate` PASS with 3 completed
+rounds / 6 completed seat turns and no errors; viewer `completed` with **zero**
+warnings (none, not merely baseline-matched); roster kinds named from the
+PLAYERROW wire only (`major 14`, `city_state 42`, `barbarian 7`); coverage
+matrix 869 rows, `errors: []`, digest bound to the exact bytes; run summary
+`clean: true`, `violations_total: 0`, 6/6 seat turns with non-zero
+`allowed_mutations`.
+
+One known gap, recorded rather than papered over: the exporter's
+`samples.jsonl.manifest.json` binds **input** digests only (`events`,
+`llm_costs`, `summary`) and carries no `samples_sha256`. The verdict recomputes
+the output digest after the fact, so the binding exists — but in the verdict,
+not in the manifest. Sealing that into the manifest is NEXT-03B/R1 (Lane E).
 
 The exporter refuses to write over its own sources (`events.jsonl`,
 `summary.json`, `llm_costs.jsonl`, the run dir itself) through resolved paths,
