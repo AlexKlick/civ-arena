@@ -952,8 +952,14 @@ def publish(members: list[tuple[str, Path, Path]]) -> list[str]:
     operations, not one transaction: each member lands via
     canonical.atomic_write_text (mkstemp + os.replace, which cannot follow a
     planted link), and an interruption between members is reported with the
-    members already committed — never as a success. Because the verdict
-    document is last, an interrupted publication can never expose a PASS.
+    members already committed — never as a success.
+
+    Committing the verdict last guarantees only that an interrupted generation
+    is MISSING ITS VERDICT, which is detectable. It does NOT guarantee that no
+    success text is on disk: the report is committed before the verdict and
+    also states the verdict, so a failure on the verdict document can leave a
+    published report reading PASS. An interrupted generation is therefore
+    incomplete and must not be read as its surviving members' apparent result.
     """
     for label, _staged, dest in members:
         if dest.is_dir():
@@ -989,9 +995,10 @@ def publish(members: list[tuple[str, Path, Path]]) -> list[str]:
         except OSError as exc:
             raise QualificationError(
                 f"publication interrupted at --{label} {dest}: "
-                f"{type(exc).__name__}: {exc}; committed before the "
-                f"interruption: {committed or 'nothing'} — the verdict document "
-                "is committed last, so no success document was exposed") from exc
+                f"{type(exc).__name__}: {exc}; this generation is INCOMPLETE "
+                "and its verdict document is absent. Already published, and "
+                "NOT to be read as this run's result (the report states a "
+                f"verdict of its own): {committed or 'nothing'}") from exc
         committed.append(str(dest))
     return committed
 
