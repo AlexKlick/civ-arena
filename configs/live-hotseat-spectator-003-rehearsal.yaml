@@ -1,0 +1,32 @@
+# OFFLINE rehearsal twin of live-hotseat-spectator-003.yaml (lane B, NEXT-05):
+# the IDENTICAL match: block — including `spectator_capture: true` and the
+# same seed — with the agents swapped for the planner/turtler pair from
+# live-hotseat-001.yaml. The `--fake` tuner fakes the TUNER, not the
+# provider: an llm policy would still hit api.minimax.io, so the rehearsal
+# rosters only non-LLM policies (planner must not reach a provider).
+# Proof target: a clean 3-round `--fake` dispatch whose events carry the
+# after_seat sequence [-1,0,1,0,1,0,1] (7 spectator_world audits) and a
+# validate_run --allow-fake PASS.
+match:
+  match_id: live-hotseat-spectator-003-rehearsal
+  seed: 271183
+  max_turns: 30
+  checkpoint_every: 5
+  adapter: firetuner
+  watchdog_mode: flag_and_continue
+  violation_limit: 10
+  completeness_gate: true
+  declare_own_endpath_drift: true
+  spectator_capture: true
+
+agents:
+  - agent_id: hotseat-planner
+    player_id: 0
+    policy: planner
+    seed: 7
+  - agent_id: hotseat-turtler
+    player_id: 1
+    policy: turtler
+    seed: 22
+
+chaos: []
