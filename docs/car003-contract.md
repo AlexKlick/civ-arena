@@ -376,6 +376,19 @@ guarantees that one is **detectable**: any missing member, missing marker or dig
 mismatch is "interrupted publication" and the reader refuses. `qualify_recording`'s
 final stage and any consumer verify all three digests before reading a sample.
 
+**File mode is `0600`, deliberately.** `atomic_write_text` creates its temp via
+`tempfile.mkstemp` (mode `0600`) and `os.replace` preserves it, so every sealed
+member lands `0600` rather than the `0644` a plain `open(...,"w")` would give.
+This is the mandated primitive's behaviour, it matches `scripts/fit_weights.py:350`,
+and it tightens rather than loosens access. Do **not** `chmod` it back or fork the
+primitive to avoid it — coordinator ruling, 2026-09-09, after Lane FIX surfaced the
+change while adopting §5.3.
+
+Note also that the primitive's O_EXCL temp is what defeats a link planted at the
+destination *after* a path guard has run (`canonical.py:67-75`); the pre-fix
+`write_text` idiom truncated the link target before any replace. Path guards and
+`atomic_write_text` are complementary — keep both.
+
 ## 6. Qualification-result interface (Lane E)
 
 ### 6.1 What `qualification.json` exposes
