@@ -42,7 +42,10 @@ qual = _harness()
 
 
 def _world(after_seat: int) -> dict:
-    """Minimal admitted spectator world (validate_world closed shape)."""
+    """An admitted spectator world carrying every key world_capture.package
+    emits unconditionally (Codex r2 finding 2: the fixture previously omitted
+    `owned_tiles_columns` and `palette_confirmed`, so it could not pin the
+    completeness the audit now requires)."""
     return {"schema": 1, "after_seat": after_seat,
             "contexts": {"roster": "gamecore", "tiles": "gamecore",
                          "palette": "ingame"},
@@ -50,9 +53,11 @@ def _world(after_seat: int) -> dict:
             "roster": [{"player_id": 0, "kind": "major"},
                        {"player_id": 1, "kind": "major"}],
             "players": [{"player_id": 0}, {"player_id": 1}], "cities": [],
+            "owned_tiles_columns": {},
             "fog_audit": {"requested": 0, "engine_visible": 0,
                           "engine_not_visible": 0, "unavailable": 0,
                           "disagree_coords": []},
+            "palette_confirmed": False,
             "truncated": {"tiles": False, "world": False}, "read_ms": 1.0}
 
 
@@ -633,7 +638,10 @@ def test_unreadable_events_jsonl_is_exit_2_without_a_traceback(tmp_path, capsys)
     assert not (out / "samples.jsonl").exists()
 
 
-def test_failed_report_write_removes_the_earlier_outputs(tmp_path, capsys):
+def test_an_unpublishable_destination_publishes_nothing(tmp_path, capsys):
+    """A destination that cannot receive its member is refused BEFORE any
+    member is published (r2 findings 3+4 replaced the round-2 write-then-
+    unlink model with invocation-owned staging), so the tree is untouched."""
     run_dir = _write_qual_run(tmp_path, 1)
     out = tmp_path / "boom"
     (out / "report.md").mkdir(parents=True)  # a DIRECTORY where the report goes
@@ -643,7 +651,8 @@ def test_failed_report_write_removes_the_earlier_outputs(tmp_path, capsys):
                                       "--report", str(out / "report.md"))
     assert code == 2 and result == {}
     err = capsys.readouterr().err
-    assert "Traceback" not in err and "IsADirectoryError" in err
+    assert "Traceback" not in err
+    assert "existing directory" in err and "nothing was published" in err
     assert not json_path.exists()
     assert not (out / "samples.jsonl").exists()
     assert not (out / "samples.jsonl.manifest.json").exists()
@@ -684,6 +693,278 @@ def test_supplied_baseline_cannot_whitelist_real_warnings(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "outside the code-owned benign-cap allowlist" in err
     assert dc.WORLD_INVALID in err and dc.PACKET_UNBOUND in err
+
+
+# -- r2 fix lane: capture binding (finding 1) ----------------------------------
+
+
+def test_later_round_captures_cannot_reuse_earlier_completed_turns(tmp_path):
+    """Codex r2 finding 1: retarget both round-2 captures onto turn 1. Each
+    still finds AN earlier completed_seat_turn row and the turns stay
+    non-decreasing, so an existence test PASSes a run that never captured
+    turn 2. A completed seat turn backs exactly one capture, bound in order."""
+    run_dir = _write_qual_run(tmp_path, 2)
+    rows = _read_rows(run_dir)
+    retargeted = 0
+    for row in rows:
+        if row.get("audit") == "spectator_world" and row["turn"] == 2:
+            row["turn"] = 1
+            retargeted += 1
+    assert retargeted == 2, "fixture shape changed"
+    _rewrite(run_dir, rows)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "2", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert [entry["after_seat"] for entry in rejected] == [0, 1]
+    assert all("completed_seat_turn" in entry["reason"] for entry in rejected)
+    assert all("turn 2" in entry["reason"] for entry in rejected)
+    # the two round-2 captures no longer count, so the contract fails too
+    assert result["audit"]["after_seat_sequence"] == [-1, 0, 1]
+    assert any("row contract" in failure for failure in result["failures"])
+
+
+def test_a_completed_seat_turn_backs_exactly_one_capture(tmp_path):
+    """A second capture inside the same completed-turn interval cannot bind
+    to a row an earlier capture already consumed."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    rows = _read_rows(run_dir)
+    index = next(i for i, row in enumerate(rows)
+                 if row.get("audit") == "spectator_world" and row["after_seat"] == 0)
+    rows.insert(index + 1, json.loads(json.dumps(rows[index])))
+    _rewrite(run_dir, rows)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 0
+    assert "already bound" in rejected[0]["reason"]
+    assert result["audit"]["after_seat_sequence"] == [-1, 0, 1]
+
+
+# -- r2 fix lane: viewer-independent world validation (finding 2) --------------
+
+
+def test_referee_scoped_capture_cannot_satisfy_the_row_contract(tmp_path):
+    """Codex r2 finding 2: dashboard_compare.spectator_world_records() skips
+    non-spectator events, so a referee-routed capture is never viewer-checked.
+    The audit must not count a world the viewer would not even inspect."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 1,
+                  lambda row: row.update({"visibility_scope": "referee"}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 1
+    assert "visibility_scope" in rejected[0]["reason"]
+    assert "'referee'" in rejected[0]["reason"]
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+
+
+def test_codex_r2_near_empty_referee_world_is_rejected(tmp_path):
+    """The exact r2 counterexample: a four-key world routed to the referee."""
+    run_dir = _write_qual_run(tmp_path, 1)
+
+    def gut(row):
+        row["visibility_scope"] = "referee"
+        row["world"] = {"schema": 1, "after_seat": 1, "roster": [], "read_ms": 0}
+
+    _edit_capture(run_dir, 1, gut)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 1
+    reason = rejected[0]["reason"]
+    assert "visibility_scope" in reason
+    for missing in ("contexts", "grid", "players", "cities", "fog_audit",
+                    "palette_confirmed", "truncated", "owned_tiles_columns"):
+        assert missing in reason, missing
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+    assert any("row contract" in failure for failure in result["failures"])
+
+
+@pytest.mark.parametrize("dropped", ["contexts", "grid", "players", "cities",
+                                     "owned_tiles_columns", "fog_audit",
+                                     "palette_confirmed", "truncated"])
+def test_every_unconditional_package_key_is_required(tmp_path, dropped):
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 1, lambda row: row["world"].pop(dropped))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1, result["failures"]
+    assert dropped in rejected[0]["reason"]
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+
+
+def test_owned_tiles_columns_may_be_absent_only_when_the_world_truncated(tmp_path):
+    """world_capture._bounded_json drops the territory block under the byte
+    cap and RECORDS it — absent-with-truncation is admissible, absent without
+    it is not (pinned by the parametrized test above)."""
+    run_dir = _write_qual_run(tmp_path, 1)
+
+    def cap(row):
+        row["world"].pop("owned_tiles_columns")
+        row["world"]["truncated"] = {"tiles": False, "world": True}
+
+    _edit_capture(run_dir, 1, cap)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 0, result.get("failures")
+    assert result["audit"]["spectator_world_rejected"] == []
+    assert result["audit"]["after_seat_sequence"] == [-1, 0, 1]
+
+
+def test_non_heartbeat_event_kind_is_rejected():
+    """The producer writes the capture as a HEARTBEAT (live_driver.py:831)."""
+    record = {"kind": "MATCH_END", "seq": 9, "turn": 1, "after_seat": -1,
+              "visibility_scope": "spectator", "world": _world(-1)}
+    reasons = qual.world_envelope_reasons(record, None)
+    assert any("kind" in reason and "'MATCH_END'" in reason for reason in reasons)
+
+
+# -- r2 fix lane: malformed roster rows (finding 5) ----------------------------
+
+
+def test_malformed_roster_pid_is_recorded_not_a_crash(tmp_path, capsys):
+    """Codex r2 finding 5: an unhashable player_id used to raise TypeError out
+    of the census, past the QualificationError-only boundary, as a traceback."""
+    run_dir = _write_qual_run(tmp_path, 0 + 1)
+    _edit_capture(run_dir, 0, lambda row: row["world"]["roster"].append(
+        {"player_id": [], "kind": "rebels"}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    assert "Traceback" not in capsys.readouterr().err
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 0
+    assert "player_id" in rejected[0]["reason"]
+    # the census still names the novel kind without crashing on the pid
+    assert any("'rebels'" in failure for failure in result["failures"])
+    assert result["audit"]["roster_kinds_observed"]["rebels"] == 1
+    assert result["audit"]["after_seat_sequence"] == [-1, 1]
+
+
+def test_unexpected_stage_error_is_exit_2_without_a_traceback(tmp_path, capsys,
+                                                              monkeypatch):
+    """Artifact-parsing exceptions normalize at the stage boundary."""
+    run_dir = _write_qual_run(tmp_path, 1)
+
+    def boom(*_args, **_kwargs):
+        raise TypeError("unhashable type: 'list'")
+
+    monkeypatch.setattr(qual, "stage_viewer", boom)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 2 and result == {}
+    err = capsys.readouterr().err
+    assert "TypeError" in err and "Traceback" not in err
+
+
+# -- r2 fix lane: publication ownership (findings 3 + 4) -----------------------
+
+
+def test_failed_publication_preserves_a_pre_existing_verdict_document(tmp_path,
+                                                                      capsys):
+    """Codex r2 finding 3: a failed publication must leave NO fresh PASS
+    document — least of all on top of a previous generation it destroyed."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "pub"
+    (out / "report.md").mkdir(parents=True)  # a DIRECTORY where the report goes
+    sentinel = '{"verdict": "FAIL", "generation": "previous"}\n'
+    (out / "qualification.json").write_text(sentinel)
+    code, _, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                         "--json", str(out / "qualification.json"),
+                         "--report", str(out / "report.md"),
+                         "--export-out", str(out / "samples.jsonl"))
+    assert code == 2
+    assert "Traceback" not in capsys.readouterr().err
+    # the previous generation survives byte-for-byte ...
+    assert (out / "qualification.json").read_text() == sentinel
+    # ... and not one member of the abandoned publication reached the tree
+    assert not (out / "samples.jsonl").exists()
+    assert not (out / "samples.jsonl.manifest.json").exists()
+
+
+def test_cleanup_never_deletes_another_invocations_artifacts(tmp_path,
+                                                             monkeypatch):
+    """Codex r2 finding 4: 'absent at start' is not ownership. A snapshots four
+    absent paths, B publishes to them, then A fails having created nothing —
+    A must not delete B's artifacts."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    run_b = _write_qual_run(tmp_path, 1, name="run-b")
+    run_a = _write_qual_run(tmp_path, 1, name="run-a")
+    argv = ["--json", str(shared / "qualification.json"),
+            "--report", str(shared / "report.md"),
+            "--export-out", str(shared / "samples.jsonl")]
+    real_audit, state, published = qual.stage_audit, {"done": False}, {}
+
+    def audit_then_publish_b(*args, **kwargs):
+        if state["done"]:
+            return real_audit(*args, **kwargs)
+        state["done"] = True
+        # invocation B publishes into the paths A has already snapshotted
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert qual.main([str(run_b), "--rounds", "1", "--allow-fake",
+                              *argv]) == 0
+        published.update({path.name: path.read_bytes()
+                          for path in sorted(shared.iterdir())})
+        raise qual.QualificationError("events.jsonl line 1 is not valid JSON: x")
+
+    monkeypatch.setattr(qual, "stage_audit", audit_then_publish_b)
+    with contextlib.redirect_stdout(io.StringIO()):
+        code = qual.main([str(run_a), "--rounds", "1", "--allow-fake", *argv])
+    assert code == 2
+    assert set(published) == {"qualification.json", "report.md", "samples.jsonl",
+                              "samples.jsonl.manifest.json"}, published
+    assert {path.name: path.read_bytes()
+            for path in sorted(shared.iterdir())} == published
+
+
+def test_no_artifact_is_published_until_every_one_is_staged(tmp_path):
+    """The verdict document is written LAST, after every other member."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "order"
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--json", str(out / "qualification.json"),
+                              "--report", str(out / "report.md"),
+                              "--export-out", str(out / "samples.jsonl"))
+    assert code == 0, result.get("failures")
+    members = ["samples.jsonl", "samples.jsonl.manifest.json", "report.md",
+               "qualification.json"]
+    assert sorted(path.name for path in out.iterdir()) == sorted(members)
+    mtimes = [(out / name).stat().st_mtime_ns for name in members]
+    assert mtimes == sorted(mtimes), dict(zip(members, mtimes, strict=True))
+    # nothing of the staging area survives next to the published artifacts
+    assert not any(path.name.endswith(".tmp") for path in out.iterdir())
+
+
+# -- r2 fix lane: the coverage input is a protected input (finding 6) ----------
+
+
+def test_coverage_input_aliased_by_an_output_is_refused(tmp_path, capsys):
+    """Codex r2 finding 6: coverage_section() hashes the matrix, then
+    publication overwrote it — the PASS document's matrix_sha256 no longer
+    described matrix_path."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    matrix = tmp_path / "matrix.tsv"
+    matrix.write_text("sample\tcovered\na\t1\n")
+    before = matrix.read_bytes()
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--coverage", str(matrix), "--json", str(matrix))
+    assert code == 2 and result == {}
+    assert "aliases the --coverage input" in capsys.readouterr().err
+    assert matrix.read_bytes() == before
+
+
+def test_coverage_input_hardlinked_by_an_output_is_refused(tmp_path, capsys):
+    run_dir = _write_qual_run(tmp_path, 1)
+    matrix = tmp_path / "matrix.tsv"
+    matrix.write_text("sample\tcovered\na\t1\n")
+    linked = tmp_path / "linked-matrix.tsv"
+    os.link(matrix, linked)
+    before = matrix.read_bytes()
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--coverage", str(matrix), "--report", str(linked))
+    assert code == 2 and result == {}
+    assert "aliases the --coverage input" in capsys.readouterr().err
+    assert matrix.read_bytes() == before
 
 
 def test_baseline_allowlist_is_code_owned_and_matches_the_shipped_json():

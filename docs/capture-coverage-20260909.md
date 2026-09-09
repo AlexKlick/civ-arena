@@ -46,9 +46,12 @@ source: economy rows, cities, territory columns and palette entries are
 attributed to a class by resolving their pid through the SAME event's
 roster, and a pid that event's roster does not name is attributed to no
 class. `free_city` is emitted for symmetry with the arena class model
-but no producer can ever name it (the strict parser rejects the kind),
-so it is a permanent GAP row — present, zero, never inferred. A roster
-row that DOES name a kind outside the wire-admitted set
+but no producer can ever name it (the strict parser rejects the kind), so
+in any **wire-conforming** recording it is a permanent GAP row — present,
+zero, never inferred. It is not zero by construction: a hand-edited or
+corrupt log that names `free_city` is counted as observed AND reported in
+`errors` (below), so the discrepancy is visible rather than silently
+absorbed. A roster row that DOES name a kind outside the wire-admitted set
 (`major`/`city_state`/`barbarian` — `world_capture.parse_roster`) is
 recorded in the matrix's top-level `errors` list and in the markdown's
 `## Errors` section: an explicit coverage error, never a silent
