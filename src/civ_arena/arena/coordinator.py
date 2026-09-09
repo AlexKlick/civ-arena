@@ -10,7 +10,7 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from civ_arena.agents.runtime import AgentProfile, build_runtime
+from civ_arena.agents.runtime import AgentProfile, build_runtime, strategy_audit_event
 from civ_arena.arena.checkpoints import CheckpointManager, CheckpointState
 from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
@@ -133,11 +133,13 @@ class Arena:
                     policy=agent_spec.policy, seed=agent_spec.seed,
                     model=agent_spec.model, llm=agent_spec.llm,
                     proposer=agent_spec.proposer,
-                    case_base=agent_spec.case_base,
+                    case_base=agent_spec.case_base, decision_mode=agent_spec.decision_mode,
+                    growth_autopilot=agent_spec.growth_autopilot,
                 )
                 self.runtimes[agent_spec.player_id] = build_runtime(
                     profile, telemetry=self.telemetry, diary=self.diary,
-                    strategy=self.strategy,
+                    strategy=self.strategy, match_id=spec.match_id,
+                    audit=self._strategic_audit,
                     on_post=(self._spend_sink(agent_spec)
                              if agent_spec.policy == "llm"
                              or agent_spec.proposer is not None else None))
@@ -165,6 +167,9 @@ class Arena:
         crash_after_turn: int | None = None,
     ) -> dict[str, Any]:
         spec = self.spec
+        if resume_state is not None and any(
+                agent.decision_mode == "strategic_autopilot" for agent in spec.agents):
+            raise ValueError("strategic_autopilot resume is unsupported; start a fresh match")
         if resume_state is None:
             await self.adapter.setup({"seed": spec.seed, "chaos_director": self.chaos})
             (self.run_dir / "init.json").write_text(json.dumps(
@@ -245,6 +250,11 @@ class Arena:
         (self.run_dir / "summary.json").write_text(json.dumps(summary, sort_keys=True))
         self.log.close()
         return summary
+
+    def _strategic_audit(self, payload: dict) -> None:
+        self.log.write("HEARTBEAT", game_instance_id=self.game_instance_id,
+                       phase_player_id=payload["player_id"], visibility_scope="referee",
+                       **strategy_audit_event(payload))
 
     def _spend_sink(self, agent_spec: Any) -> Any:
         """Durable per-attempt spend record for one LLM agent."""

@@ -16,6 +16,8 @@ import copy
 import enum
 from typing import Any
 
+from civ_arena.game.terrain_metadata import terrain_fields
+
 BILATERAL_STUB: dict[str, Any] = {"status": "stub", "participants": []}
 
 
@@ -28,7 +30,8 @@ class Scope(enum.StrEnum):
 
 # Field allowlists for foreign (non-owned) entities.
 FOREIGN_UNIT_FIELDS = frozenset(
-    {"unit_id", "type", "coord", "owner_id", "hp_bucket", "strength", "ranged_strength"}
+    {"unit_id", "type", "coord", "owner_id", "hp_bucket", "strength", "ranged_strength",
+     "is_barbarian"}
 )
 FOREIGN_CITY_FIELDS = frozenset({"city_id", "name", "coord", "owner_id", "hp", "population"})
 
@@ -106,10 +109,7 @@ class VisibilityPolicy:
                 sees = key in observable
                 if not (sees or key in remembered):
                     continue
-                entry: dict[str, Any] = {
-                    "coord": key,
-                    "terrain": tile["terrain"],
-                }
+                entry: dict[str, Any] = {"coord": key, **terrain_fields(tile)}
                 if sees:
                     entry["owner_id"] = tile["owner"]
                     entry["city_id"] = tile["city"]
@@ -121,6 +121,9 @@ class VisibilityPolicy:
                 "you": self._own_player(doc, player_id),
                 "public": self._public_match(doc),
             }
+        if kind == 'available_research' and isinstance(doc, dict):
+            from civ_arena.game.civ6.research_briefing import project
+            return project(doc, player_id)
         # available_research / available_production are already player-derived
         return doc
 
@@ -128,6 +131,11 @@ class VisibilityPolicy:
     def _unit(self, u: dict[str, Any], player_id: int,
               observable: frozenset[str]) -> dict[str, Any] | None:
         key = f"{u['q']},{u['r']}"
+        metadata = ({"is_barbarian": u["is_barbarian"]}
+                    if type(u.get("is_barbarian")) is bool else {})
+        health = ({"max_hp": u["max_hp"], "health_valid": u["health_valid"]}
+                  if "max_hp" in u and type(u.get("health_valid")) is bool else {})
+        hp_bucket = u["hp"] // 25 if type(u.get("hp")) is int else None
         if u["owner"] == player_id:
             return {
                 "unit_id": u["unit_id"],
@@ -135,12 +143,14 @@ class VisibilityPolicy:
                 "type": u["type"],
                 "coord": key,
                 "hp": u["hp"],
-                "hp_bucket": u["hp"] // 25,
+                "hp_bucket": hp_bucket,
+                **health,
                 "movement": u["movement"],
                 "max_movement": u["max_movement"],
                 "strength": u["strength"],
                 "ranged_strength": u["ranged_strength"],
                 "fortified": u["fortified"],
+                **metadata,
             }
         if key not in observable:
             return None  # hidden: absent, not masked
@@ -150,12 +160,13 @@ class VisibilityPolicy:
             "type": u["type"],
             "coord": key,
             "hp": u["hp"],
-            "hp_bucket": u["hp"] // 25,
+            "hp_bucket": hp_bucket,
             "movement": u["movement"],
             "max_movement": u["max_movement"],
             "strength": u["strength"],
             "ranged_strength": u["ranged_strength"],
             "fortified": u["fortified"],
+            **metadata,
         }
         return {k: v for k, v in full.items() if k in self.foreign_unit_fields}
 
@@ -174,29 +185,51 @@ class VisibilityPolicy:
         # post-spike refinement.
         if key not in observable:
             return None
-        full = {
+        # M4: every extended key is CONDITIONAL — the parser no longer
+        # synthesizes hp/bucket/building placeholders, so each candidate
+        # rides only when the omniscient doc actually carries it (contract
+        # §6: conditional hp, never assumed). The foreign allowlist then
+        # strips everything but the closed public set.
+        full: dict[str, Any] = {
             "city_id": c["city_id"],
             "name": c["name"],
             "coord": key,
             "owner_id": c["owner"],
-            "hp": c["hp"],
             "population": c["population"],
-            "production_queue": c["production_queue"],
-            "food_bucket": c["food_bucket"],
-            "production_bucket": c["production_bucket"],
-            "buildings": c["buildings"],
         }
+        for optional in ("hp", "production_queue", "food_bucket",
+                         "production_bucket", "buildings"):
+            if optional in c:
+                full[optional] = c[optional]
         return {k: v for k, v in full.items() if k in self.foreign_city_fields}
 
     def _own_player(self, doc: dict[str, Any], player_id: int) -> dict[str, Any]:
         p = doc["players"][str(player_id)]
-        return {
+        out: dict[str, Any] = {
             "player_id": p["player_id"],
             "civ_name": p["civ_name"],
             "gold": p["gold"],
             "researched": list(p["researched"]),
             "researching": p["researching"],
         }
+        # M4 (contract §6): the OVX|2 economy keys pass through for SELF
+        # ONLY — never to public/other players; the CONTEXT layer gates
+        # whether the model ever sees them (LLMSpec.own_economy_context).
+        # Amendment 3 item 3: this projection is the model-bound surface
+        # (the curator passes its `you()` projection through here). The
+        # opt-in flag is propagated via the curator's selection; this
+        # layer keeps emitting the keys when present in `p` so an
+        # opted-in caller still gets the full economy. The curator's
+        # cache-time gate is the byte-identical default guarantee; if
+        # a caller bypasses the curator and calls _own_player directly,
+        # the keys only reach the model if `p` already carries them.
+        for key in ("science", "culture", "faith", "gold_per_turn", "upkeep",
+                    "era", "progressing_civic", "civic_progress", "civic_cost"):
+            if key in p:
+                out[key] = p[key]
+        if "civics" in p:
+            out["civics"] = list(p["civics"])
+        return out
 
     # NOTE: own-entity projections deep-copy nested lists so an agent
     # mutating a returned observation cannot reach live game state.

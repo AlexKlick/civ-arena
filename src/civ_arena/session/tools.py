@@ -44,7 +44,12 @@ async def get_visible_map(ctx: SessionCtx) -> dict:
     return await ctx.referee.observe(ctx, ObserveKind.VISIBLE_MAP)
 
 
-async def get_available_research(ctx: SessionCtx) -> list[dict]:
+async def get_available_research(ctx: SessionCtx, *, research_building_briefing: bool = False):
+    if type(research_building_briefing) is not bool:
+        raise ValueError('research briefing opt-in must be boolean')
+    if research_building_briefing:
+        return await ctx.referee.observe(ctx, ObserveKind.AVAILABLE_RESEARCH,
+                                        research_building_briefing=True)
     return await ctx.referee.observe(ctx, ObserveKind.AVAILABLE_RESEARCH)
 
 
@@ -98,10 +103,13 @@ async def set_research(ctx: SessionCtx, tech_id: str,
 
 
 async def set_city_production(ctx: SessionCtx, city_id: str, item_id: str,
+                              dest: str | None = None,
                               *, idempotency_key: str | None = None) -> dict:
+    args = {"city_id": city_id, "item_id": item_id}
+    if dest is not None:
+        args["dest"] = dest
     return await ctx.referee.execute(
-        ctx, "set_city_production", {"city_id": city_id, "item_id": item_id},
-        client_key=idempotency_key)
+        ctx, "set_city_production", args, client_key=idempotency_key)
 
 
 async def purchase(ctx: SessionCtx, city_id: str, item_id: str,

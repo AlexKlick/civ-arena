@@ -1,0 +1,1087 @@
+{
+  "claim_bearing_docs": 24,
+  "documents": [
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/browser-match-room.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 40,
+          "message": "Referenced evidence path does not exist: runs/dashboard-evidence-20260905/server-process.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 53,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/live-terminal-audit.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 59,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-development-20260905/pytest-reviewed.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 65,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/pytest-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 66,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/ruff-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 67,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/source-identity.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 76,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/browser-result.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 77,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/desktop.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 78,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/graph-details.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 79,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/mobile.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 86,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/incremental-result.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 89,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/monitor-browser.png"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/civgraph-program.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 627,
+          "message": "Referenced evidence path does not exist: runs/exp20c-prod/exp20c-results.json"
+        },
+        {
+          "code": "blocker-taxonomy",
+          "line": 1,
+          "message": "Blocker wording appears without a BLOCKED status; preserve blocked checks instead of converting to PASS/FAIL."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/context-decision-packet.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 85,
+          "message": "Referenced evidence path does not exist: runs/context-packet-evidence-20260906/"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 99,
+          "message": "Referenced evidence path does not exist: runs/context-packet-evidence-20260906/opening-policy-audit.json"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "provider-model"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/dependency-catalog-next-step.md",
+      "warnings": [
+        {
+          "code": "provider-claim-needs-status",
+          "line": 1,
+          "message": "Provider/model readiness claim should cite status endpoint output, response evidence, or exact model diagnostics."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/design-notes.md",
+      "warnings": [
+        {
+          "code": "date-needed",
+          "line": 172,
+          "message": "Current/live verified claim should include a concrete date or timestamp."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/graph-lane.md",
+      "warnings": []
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "host-only"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/live-goody-reward-receipts.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 85,
+          "message": "Referenced evidence path does not exist: runs/60-round-live-20260906T172847Z/poststop-native-subtype.log"
+        },
+        {
+          "code": "blocker-taxonomy",
+          "line": 1,
+          "message": "Blocker wording appears without a BLOCKED status; preserve blocked checks instead of converting to PASS/FAIL."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "provider-model"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/live-resume-diagnosis-20260905.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 14,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-resume-20260905T004340Z/events.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 17,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-resume-20260905T004340Z/wire.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 36,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-resume-20260905T004340Z/summary.json"
+        },
+        {
+          "code": "provider-claim-needs-status",
+          "line": 1,
+          "message": "Provider/model readiness claim should cite status endpoint output, response evidence, or exact model diagnostics."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/live-speedup-60.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 21,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/cross-vm-id-probe.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 31,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/hex-row-frame-probe.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 32,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/map-frame-odd-row-final.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 47,
+          "message": "Referenced evidence path does not exist: ../runs/llm-pacing-evidence-20260905T013048Z/"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 55,
+          "message": "Referenced evidence path does not exist: ../runs/planner-identity-evidence-20260905T014039Z/"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 67,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/provider-probe.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 78,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/release-final-summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 80,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/ruff-odd-row-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 81,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/odd-row-peer-review.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 120,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T020306Z/startup-terminal-validation.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 121,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T020306Z/launcher.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 131,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/roster-focused.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 143,
+          "message": "Referenced evidence path does not exist: ../runs/minimax60-20260905T022327Z-startup/major-census.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 144,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T022327Z/analysis.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 160,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T022327Z/advisor-postmortem-close.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 161,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T022327Z/turn-seven-recovery.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 162,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T022327Z/advisor-native-probe.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 169,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T022327Z/corrected-city-queue-read.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 177,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/restore-speed-evidence/"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 192,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T031207Z/analysis.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 193,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T031207Z/launch.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 202,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/silent-hooks-reviewed-focused.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 222,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-review/civ-strategy-browser-review-chrome-final.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 251,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-release/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 252,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-release-ruff-final.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 253,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategy-dashboard-format-focused.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 260,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-provider-probe-live-freeze.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 277,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T041339Z/analysis.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 288,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T041339Z/poststop-operations.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 289,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T041339Z/unit-operation-source-review.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 299,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T041339Z/poststop-freeze-handoff.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 321,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/guarded-handoff-release/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 322,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/guarded-handoff-release-ruff.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 323,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T041339Z/guarded-handoff-evidence/"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 338,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-live-20260905T044417Z/final-analysis.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 374,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-response-release/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 375,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-response-release-ruff.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 376,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-response-review-binding.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 385,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/strategic-response-provider-probe.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 405,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260905T052156Z/final-independent-audit.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 415,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260905T052156Z/growth-boundary-summary.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 423,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260905T052156Z/goody-native-source.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 424,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260905T052156Z/poststop-reward-capabilities.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 445,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/native-reward-final-release/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 446,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/native-reward-final-release-ruff.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 451,
+          "message": "Referenced evidence path does not exist: ../runs/sixty-round-development-20260905/native-reward-provider-probe.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 460,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260905T052156Z/civ-sumeria-camp-exact-source.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 461,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260905T052156Z/poststop-camp-api.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 488,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260906T172847Z/independent-audit-compact.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 498,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260906T172847Z/poststop-native-subtype.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 499,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260906T172847Z/native-reward-terminal.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 509,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260906T172847Z/browser-proof/verified-browser-checkpoint.md"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 510,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260906T172847Z/observation-map-prototype/index.html"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 519,
+          "message": "Referenced evidence path does not exist: ../runs/60-round-live-20260906T172847Z/opening-policy-audit.json"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/live-startup-followup-20260904.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 14,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/preserved-saves.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 34,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/host-diagnosis.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 36,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/sdl-readonly.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 43,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/virtual-monitor-probe.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 61,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/launcher-tests-final.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 63,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/ruff-final.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 66,
+          "message": "Referenced evidence path does not exist: ../runs/live-startup-followup-20260904/live-display-preflight.log"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/live-turn-pacing.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 12,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/outcome.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 64,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-resume-20260905T004340Z/summary.json"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/live-validation.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 770,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/pytest-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 771,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/launcher-reviewed-tests.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 772,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/ruff.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 773,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/provider-preflight.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 774,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/rehearsal-launch.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 774,
+          "message": "Referenced evidence path does not exist: ../runs/rehearsal-20260904T214144Z-startup/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 775,
+          "message": "Referenced evidence path does not exist: ../runs/rehearsal-20260904T214144Z-startup/events.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 776,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/preserved-saves.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 783,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/baseline-failure.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 794,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/custody.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 795,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/review.md"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 796,
+          "message": "Referenced evidence path does not exist: ../runs/reliability-evidence-20260904/live-outcome.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 866,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/provider-probe.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 872,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/game-launcher.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 879,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/staging-resized.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 880,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/game-entered.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 881,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/startup-failure.png"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 886,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/start-button-adjustment.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 887,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/quicksave-adjustment.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 892,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/terminal-audit.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 893,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260904T234254Z-startup/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 894,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260904T234254Z-startup/events.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 895,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/outcome.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 897,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/saves-after.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 918,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/custody.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 926,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/launcher.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 963,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/resolution-tests.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 964,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/resolution-ruff.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 965,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/resolution-review.md"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 966,
+          "message": "Referenced evidence path does not exist: ../runs/direct-minimax-20260904T234254Z/resolution-verification.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 986,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/launcher.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 987,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260905T000405Z-startup/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 992,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260905T000405Z-startup/window-normalization-031d8c6849914ab3809890c0260d31b5.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 993,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260905T000405Z-startup/window-normalization-dfd83a371f114dd680c4aff72a20fe6d.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1001,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/census-2.txt"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1006,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260905T000405Z/events.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1007,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260905T000405Z/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1008,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-watch-20260905T000405Z/wire.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1013,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/terminal-audit.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1014,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/outcome.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1015,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/saves-after.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1056,
+          "message": "Referenced evidence path does not exist: ../runs/launch-evidence-20260905T000405Z/custody.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1088,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-resume-20260905T004340Z/events.jsonl"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1089,
+          "message": "Referenced evidence path does not exist: ../runs/minimax-resume-20260905T004340Z/summary.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1090,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/live-terminal-audit.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1123,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/pytest-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1124,
+          "message": "Referenced evidence path does not exist: ../runs/dashboard-evidence-20260905/ruff-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 1140,
+          "message": "Referenced evidence path does not exist: runs/restart-evidence-20260905T002948Z/resume-command.json"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "host-only",
+        "provider-model"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/llm-lane.md",
+      "warnings": []
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/production-roster-targets.md",
+      "warnings": [
+        {
+          "code": "date-needed",
+          "line": 91,
+          "message": "Current/live verified claim should include a concrete date or timestamp."
+        },
+        {
+          "code": "date-needed",
+          "line": 124,
+          "message": "Current/live verified claim should include a concrete date or timestamp."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/recall-lane.md",
+      "warnings": []
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/scouting-nonprogress-feedback.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 5,
+          "message": "Referenced evidence path does not exist: runs/60-round-live-20260905T052156Z/scouting-audit.md"
+        },
+        {
+          "code": "date-needed",
+          "line": 7,
+          "message": "Current/live verified claim should include a concrete date or timestamp."
+        },
+        {
+          "code": "blocker-taxonomy",
+          "line": 1,
+          "message": "Blocker wording appears without a BLOCKED status; preserve blocked checks instead of converting to PASS/FAIL."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/scouting-standing-intent.md",
+      "warnings": [
+        {
+          "code": "blocker-taxonomy",
+          "line": 1,
+          "message": "Blocker wording appears without a BLOCKED status; preserve blocked checks instead of converting to PASS/FAIL."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/spectator-popups.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 39,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/host-preflight.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 64,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/pytest-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 65,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/ruff-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 66,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/popup-focused.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 67,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/integrated-focused.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 93,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/provider-preflight.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 98,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/provider-diagnostic.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 117,
+          "message": "Referenced evidence path does not exist: ../runs/spectator-popup-20260904T230258Z/custody-final.json"
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/strategic-autopilot.md",
+      "warnings": [
+        {
+          "code": "blocker-taxonomy",
+          "line": 1,
+          "message": "Blocker wording appears without a BLOCKED status; preserve blocked checks instead of converting to PASS/FAIL."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/strategy-benchmark-pilot.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 92,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/benchmark-development.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 104,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/benchmark-development/results.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 105,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/benchmark-development/manifest.json"
+        },
+        {
+          "code": "provider-claim-needs-status",
+          "line": 1,
+          "message": "Provider/model readiness claim should cite status endpoint output, response evidence, or exact model diagnostics."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/strategy-lane.md",
+      "warnings": []
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/strategy-next-experiment.md",
+      "warnings": []
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/strategy-program-kickoff.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 91,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/benchmark-development.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 91,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/benchmark-development/results.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 93,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/custody-check.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 99,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/benchmark-custody-check.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 113,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/pytest-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 114,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/ruff-release.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 115,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/release-outcome.json"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 169,
+          "message": "Referenced evidence path does not exist: ../runs/strategy-kickoff-20260904T222910Z/qa-normalize-final.log"
+        },
+        {
+          "code": "provider-claim-needs-status",
+          "line": 1,
+          "message": "Provider/model readiness claim should cite status endpoint output, response evidence, or exact model diagnostics."
+        }
+      ]
+    },
+    {
+      "claim_bearing": true,
+      "lanes": [
+        "browser-visible",
+        "host-only",
+        "provider-model",
+        "repo-proof"
+      ],
+      "path": "civ-arena-production-targets-20260906/docs/terrain-fidelity.md",
+      "warnings": [
+        {
+          "code": "missing-evidence-path",
+          "line": 70,
+          "message": "Referenced evidence path does not exist: runs/terrain-fidelity-evidence-20260906/map-axis-source-proof.log"
+        },
+        {
+          "code": "missing-evidence-path",
+          "line": 88,
+          "message": "Referenced evidence path does not exist: runs/terrain-fidelity-evidence-20260906/summary.json"
+        }
+      ]
+    }
+  ],
+  "markdown_files_scanned": 24,
+  "normalization_warnings": 165,
+  "root": "/home/alexk"
+}

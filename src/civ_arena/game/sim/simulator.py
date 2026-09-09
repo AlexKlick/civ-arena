@@ -122,7 +122,11 @@ class SimulatorAdapter:
             # order does not survive checkpoint round-trips. DEEP copies:
             # observations handed to agents must never alias live state.
             return sorted(
-                (copy.deepcopy(u) for u in state.units.values()),
+                # The simulator's run_ambient explicitly caps unit HP at100.
+                # Observation metadata only: never alter simulator state/hash.
+                ({**copy.deepcopy(u), "max_hp": 100,
+                  "health_valid": type(u["hp"]) is int and 0 <= u["hp"] <= 100}
+                 for u in state.units.values()),
                 key=lambda u: int(u["unit_id"][1:]),
             )
         if req.kind is ObserveKind.CITIES:
@@ -136,6 +140,8 @@ class SimulatorAdapter:
                 "tiles": {k: copy.deepcopy(v) for k, v in state.tiles.items()},
             }
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
+            if req.research_building_briefing:
+                raise ValueError('native research-building briefing unsupported in simulator')
             return available_research(state, req.player_id)
         if req.kind is ObserveKind.AVAILABLE_PRODUCTION:
             if req.subject_id is None:

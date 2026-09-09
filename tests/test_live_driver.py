@@ -107,8 +107,8 @@ def test_translator_mod_commands():
     assert lua_translator.set_puppet(0, True) == "Puppeteer.SetPuppet(0, true)"
     assert lua_translator.set_puppet(1, False) == \
         "Puppeteer.SetPuppet(1, false)"
-    assert lua_translator.restore_unit("u7") == "Puppeteer.RestoreUnit(7)"
-    assert lua_translator.restore_unit("c3") == "Puppeteer.RestoreUnit(3)"
+    assert "Puppeteer.RestoreUnit(7, 0)" in lua_translator.restore_unit("u0:7")
+    assert "Puppeteer.RestoreUnit(3, 1)" in lua_translator.restore_unit("u1:3")
     assert "ACTION_ENDTURN" in lua_translator.request_end_turn(0)
     assert "SetCivic" not in lua_translator.request_end_turn(0)
 
@@ -210,7 +210,7 @@ async def test_turn_mismatch_is_loud():
     server = FakeTunerServer(mod=FakeMod())
     port = await server.start()
     adapter = FireTunerAdapter("127.0.0.1", port, simulate_hook=ahead_hook,
-                               poll_timeout_s=1.0)
+                               poll_timeout_s=1.0, turn_wait_s=1.0)
     try:
         await adapter.setup({})
         with pytest.raises(RuntimeError, match="timed out"):
@@ -234,7 +234,7 @@ async def test_lease_for_the_wrong_player_is_refused():
     port = await server.start()
     adapter = FireTunerAdapter("127.0.0.1", port,
                                simulate_hook=wrong_player_hook,
-                               poll_timeout_s=1.0)
+                               poll_timeout_s=1.0, turn_wait_s=1.0)
     try:
         await adapter.setup({})
         with pytest.raises(RuntimeError,
@@ -381,11 +381,9 @@ def _cmd(tool: str, args: dict, player_id: int = 0) -> ActionCommand:
 
 
 def test_axial_offset_roundtrip():
-    """The odd-q hypothesis is at least a bijection for the whole map range
-    (which stagger parity is RIGHT is the live-dispatch question; a wrong
-    parity only yields rejected moves)."""
-    for x in range(0, 24):
-        for y in range(0, 24):
+    """The host-verified odd-row frame round-trips, including negative axes."""
+    for x in range(-24, 24):
+        for y in range(-24, 24):
             q, r = lua_translator.xy_to_axial(x, y)
             assert lua_translator.axial_to_xy(q, r) == (x, y)
 
@@ -395,12 +393,12 @@ def test_translator_act_routing_pins():
     token; set_research is the inverse. The standing SetCivic prohibition
     (permanently breaks AI civics) covers the whole module."""
     ingame = {
-        "move_unit": lua_translator.move_unit("u1", "2,3"),
-        "attack": lua_translator.attack("u1", "u2"),
-        "fortify": lua_translator.fortify("u1"),
-        "found_city": lua_translator.found_city("u1"),
-        "set_city_production": lua_translator.set_city_production("c1", "WARRIOR"),
-        "purchase": lua_translator.purchase("c1", "MONUMENT"),
+        "move_unit": lua_translator.move_unit("u0:1", "2,3"),
+        "attack": lua_translator.attack("u0:1", "u0:2"),
+        "fortify": lua_translator.fortify("u0:1"),
+        "found_city": lua_translator.found_city("u0:1"),
+        "set_city_production": lua_translator.set_city_production("c0:1", "WARRIOR"),
+        "purchase": lua_translator.purchase("c0:1", "MONUMENT"),
     }
     for tool, lua in ingame.items():
         assert "RequestOperation" in lua or "RequestCommand" in lua, tool
@@ -428,12 +426,12 @@ def test_act_args_injection_guard():
     from civ_arena.game.civ6.firetuner import _arg_violation
 
     assert _arg_violation("set_research", {"tech_id": "MINING"}) is None
-    assert _arg_violation("move_unit", {"unit_id": "u7", "dest": "-3,4"}) is None
+    assert _arg_violation("move_unit", {"unit_id": "u0:7", "dest": "-3,4"}) is None
     for tool, bad in (
         ("set_research", {"tech_id": "MINING'] Evil() --"}),
-        ("move_unit", {"unit_id": "u7", "dest": "1,2); Evil("}),
-        ("attack", {"unit_id": "u7'", "target_id": "u1"}),
-        ("purchase", {"city_id": "c1", "item_id": "lower_case"}),
+        ("move_unit", {"unit_id": "u0:7", "dest": "1,2); Evil("}),
+        ("attack", {"unit_id": "u7'", "target_id": "u0:1"}),
+        ("purchase", {"city_id": "c0:1", "item_id": "lower_case"}),
     ):
         assert _arg_violation(tool, bad) is not None, (tool, bad)
 
@@ -511,22 +509,36 @@ async def test_observes_over_fake_and_foreign_projection():
         assert any(u["type"] == "SETTLER" for u in units)
         cities = await adapter.observe(
             ObserveRequest(kind=ObserveKind.CITIES, player_id=0))
-        assert cities and cities[0]["city_id"] == "c1"
+        assert cities and cities[0]["city_id"] == "c0:1"
         research = await adapter.observe(
             ObserveRequest(kind=ObserveKind.AVAILABLE_RESEARCH, player_id=0))
         assert {"tech_id": "MINING", "cost": 25} in research
         production = await adapter.observe(ObserveRequest(
             kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=0,
-            subject_id="c1"))
+            subject_id="c0:1"))
         assert {"item_id": "MONUMENT", "cost": 60, "turns": 10,
                 "kind": "building"} in production
         vmap = await adapter.observe(
             ObserveRequest(kind=ObserveKind.VISIBLE_MAP, player_id=0))
         assert vmap["tiles"], "M17c: the revealed-tiles read is real"
-        for tile in vmap["tiles"].values():
-            # visible: terrain+owner+city; fog: terrain ONLY (the wire
-            # never reads fog ownership)
-            assert set(tile) in ({"terrain"}, {"terrain", "owner", "city"})
+        observable, remembered = adapter.visibility_for(0)
+        for key, tile in vmap["tiles"].items():
+            # Native terrain and the M4 STATIC keys (feature/river) are
+            # static evidence; ownership and every DYNAMIC key remain
+            # visible-only (widened from the pre-M4 {terrain,
+            # native_terrain} pin).
+            base = {"terrain", "native_terrain"}
+            allowed_static = {"feature", "river"}
+            dynamics = {"resource", "improvement", "district", "appeal",
+                        "engine_visible"}
+            assert set(tile["native_terrain"]) == {"type", "biome", "hills"}
+            if key in observable:
+                assert base | {"owner", "city"} <= set(tile), key
+                assert set(tile) <= base | allowed_static | dynamics | {
+                    "owner", "city"}, (key, set(tile))
+            else:
+                assert set(tile) <= base | allowed_static, (key, set(tile))
+                assert not set(tile) & dynamics, key
         # the projection with the adapter's own visibility ground truth
         policy = VisibilityPolicy()
         observable, remembered = adapter.visibility_for(0)
@@ -542,7 +554,7 @@ async def test_observes_over_fake_and_foreign_projection():
             if key in observable:
                 assert "owner_id" in tile
             else:
-                assert set(tile) == {"coord", "terrain"}
+                assert set(tile) == {"coord", "terrain", "native_terrain"}
     finally:
         await server.stop()
 
@@ -559,11 +571,11 @@ async def test_act_accepted_books_commanded_rows_and_refreshes_digest():
         _ = received_callbacks, commands
         pre_hash = adapter.state_hash()
         res = await adapter.act(_cmd("move_unit", {
-            "unit_id": "u2", "dest": "5,4"}))
+            "unit_id": "u0:2", "dest": "5,4"}))
         assert res.status == "accepted", res
         kinds = [(m.kind, m.entity_id) for m in res.mutations]
-        assert ("unit.moved", "u2") in kinds, kinds
-        assert ("unit.moves", "u2") in kinds, kinds
+        assert ("unit.moved", "u0:2") in kinds, kinds
+        assert ("unit.moves", "u0:2") in kinds, kinds
         # the journal holds THE SAME records (allowed == actual multiset)
         drained = adapter.drain_mutations()
         assert [(m.kind, m.entity_id, m.attr, m.before, m.after)
@@ -589,7 +601,7 @@ async def test_act_rejected_refreezes_and_books_nothing():
         await adapter.begin_phase(0, 1)
         pre_hash = adapter.state_hash()
         res = await adapter.act(_cmd("move_unit", {
-            "unit_id": "u999", "dest": "5,4"}))
+            "unit_id": "u0:999", "dest": "5,4"}))
         assert res.status == "rejected" and res.rejection == "unknown_entity"
         assert res.mutations == () and adapter.drain_mutations() == []
         assert adapter.state_hash() == pre_hash
@@ -606,7 +618,7 @@ async def test_act_out_of_phase_refused():
     adapter, server = await _adapter_with()
     try:
         await adapter.setup({})
-        res = await adapter.act(_cmd("fortify", {"unit_id": "u2"}))
+        res = await adapter.act(_cmd("fortify", {"unit_id": "u0:2"}))
         assert res.status == "rejected" and res.rejection == "no_lease"
         # unknown tool with a VALID open phase -> not_implemented (the
         # no-lease guard is checked first by design)
@@ -791,16 +803,12 @@ def test_llm_client_string_content_normalizes():
     assert _normalize_blocks(None) is None
 
 
-def test_set_city_production_readback_requires_hash_match():
-    """B2: the readback uses GetCurrentProductionTypeHash and OK requires
-    cur == item.Hash — the old GetCurrentProductionType chain never
-    existed in shipped Lua (cur stayed -1, every submission "passed",
-    and housekeeping overwrote the agent's choice ten turns running)."""
-    lua = lua_translator.set_city_production("c1", "MONUMENT")
-    assert "GetCurrentProductionTypeHash" in lua
-    assert "GetCurrentProductionType(" not in lua
-    assert "cur ~= item.Hash" in lua          # 0 (nothing set) FAILS now
-    assert "engine-did-not-set" in lua
+def test_set_city_production_submits_hash_for_subsequent_readback():
+    """The engine applies requests after the Lua chunk; the adapter verifies later."""
+    lua = lua_translator.set_city_production("c0:1", "MONUMENT")
+    assert "PRODUCTION_REQUEST|" in lua
+    assert "tostring(item.Hash)" in lua
+    assert "GetCurrentProductionTypeHash" not in lua
 
 
 def test_cities_read_uses_production_type_hash():
@@ -816,7 +824,7 @@ def test_cities_read_uses_production_type_hash():
 def test_current_production_read_shape():
     """B2: the housekeeping gate read — CURPROD|<hash>, 0 = idle,
     -1 = unknown city."""
-    lua = lua_translator.current_production_read("c1")
+    lua = lua_translator.current_production_read("c0:1")
     assert "CURPROD|" in lua
     assert "GetCurrentProductionTypeHash" in lua
 
@@ -842,4 +850,4 @@ def test_fake_mod_curprod_tracks_queue():
                 " tParams)")
     city["queue"] = "MONUMENT"   # the act handler's effect, set directly
     rows = mod.respond(read)
-    assert rows and rows[0] == "CURPROD|4242"
+    assert rows and rows[0] == f"CURPROD|{mod._production_hash('MONUMENT')}"

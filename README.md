@@ -7,21 +7,35 @@ arena process owns the single game connection, referees turn leases and action
 legality, enforces per-player visibility (fog of war), logs every action with
 before/after state, checkpoints, and replays.
 
-**The spike control plane is complete**: under adversarial injection it proves
-exclusive control, visibility isolation, idempotency, crash-resume, and replay
-with deterministic scripted policies. **The LLM lane is live**: a
-model-driven agent (`policy: llm`) plays through the same 15-tool surface
-against the scripted bots, with a bounded per-turn diary as its only
-cross-turn memory — see `docs/llm-lane.md` for the proven wire facts and the
-MiniMax setup. The live Civ VI (FireTuner) leg remains a skeleton plus a
-manual validation protocol (`docs/live-validation.md`).
+The simulator control plane supports exclusive turn leases, visibility
+isolation, idempotency, crash-resume, and deterministic replay. Scripted,
+planner, and LLM agents share the referee-controlled tool surface. The LLM
+lane includes diary, strategy, and recall services; see
+[`docs/llm-lane.md`](docs/llm-lane.md) for recorded provider evidence.
+
+The Civ VI FireTuner implementation includes bounded hotseat recovery and
+terminal run auditing. Two consecutive live 30-round matches remain unproven;
+the latest monitor game completed three rounds before a unit-identity
+accounting defect stopped it. See
+[`docs/live-validation.md`](docs/live-validation.md) for the evidence boundary
+and [`docs/strategy-program-kickoff.md`](docs/strategy-program-kickoff.md) for
+the parallel reliability, evaluation, and strategy work. A separate CAR-M1
+worktree contains the V2 turn-control candidate; it is not integrated here.
+The hotseat driver also checks and dismisses allowlisted informational popups
+for spectators; see [Moonlight viewing and popup handling](docs/spectator-popups.md).
+
+The [browser match room](docs/browser-match-room.md) shows each model's recorded
+plans, clickable action sequences, results and timings at `http://127.0.0.1:8788/`.
+It follows the event log without connecting to the game. Forecast and dependency
+graph work is planned in [live-turn-pacing.md](docs/live-turn-pacing.md).
 
 ## Layout
 
 - `src/civ_arena/arena/` — coordinator, referee, watchdog, leases, event log,
   checkpoints, idempotency, diary, telemetry, visibility scopes.
 - `src/civ_arena/game/` — the `GameAdapter` seam; `sim/` deterministic
-  simulator; `civ6/` FireTuner adapter skeleton over a vendored wire layer.
+  simulator; `civ6/` FireTuner adapter, hotseat driver, UI control, and run audit
+  over a vendored wire layer.
 - `src/civ_arena/agents/` — `AgentRuntime` protocol, scripted bots, and
   `llm/` (Messages client, prompts, tool schemas, `LLMAgentRuntime`).
 - `src/civ_arena/session/` — the agent-visible tool surface (15 tools; no
@@ -39,6 +53,7 @@ uv run python scripts/llm_ping.py                       # prove the model wire
 uv run python -m civ_arena.match configs/llm-vs-turtler.yaml  # LLM vs bot
 uv run python -m civ_arena.report runs/<match_id>       # telemetry summary
 uv run python -m civ_arena.replay runs/<match_id>       # verify replay == live
+uv run python -m civ_arena.dashboard --runs-root runs  # local browser match room
 uv run pytest                                            # full local gate
 uv run ruff check .
 ```

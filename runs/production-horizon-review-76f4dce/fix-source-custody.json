@@ -1,0 +1,24 @@
+{
+  "worktree": "/home/alexk/civ-arena-production-targets-20260906",
+  "base": "dca206832de0e44f2c96bd6d8dbcec7d377d5b6e",
+  "date": "2026-09-06",
+  "files_sha256": {
+    "src/civ_arena/agents/production_policy.py": "2d0b90d1b4cd1047a0acf2e616f9531f80bfe7be5fa851ed0d01ba12908caecd",
+    "src/civ_arena/agents/strategy_directive.py": "8d33eca1f3472ee6aac42680499625ad9fd42790f5dfc7a58ba3f148d49104a2",
+    "src/civ_arena/agents/llm/strategic_controller.py": "90a74558011154619e64d644a8b27660977a19854954eb8904de9155c7e324cd",
+    "tests/test_production_policy.py": "d2908096d191adaa467cbc73a98fd1eca768b0ef0fb67060d9d6239bde35f226",
+    "tests/test_strategic_controller.py": "d96bc4845b3ed2ff95c5446d5ff95ee25dae2a4c18f71a188abed9a1dd907913",
+    "tests/test_strategy_directive.py": "df0e66d005a3c4b0a438d067782021e164858a119c027ddb9d9ae6c31abda44b"
+  },
+  "focused": {
+    "passed": 187,
+    "failed": 0,
+    "skipped": 0,
+    "deselected": 0,
+    "seconds": 0.3,
+    "log": "runs/production-horizon-review-76f4dce/opaque-queue-focused-final.log"
+  },
+  "ruff": "runs/production-horizon-review-76f4dce/opaque-queue-ruff-final.log",
+  "native_live_actions": "none",
+  "snapshot_design": "proposal_only"
+}

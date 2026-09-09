@@ -1,0 +1,17 @@
+{
+  "base_commit": "fdeaae2",
+  "full_gate": "1993 passed, 1 skipped in 812.83s (pytest-full.log)",
+  "head": "a754387135a40d8f4e716056c51bad052c27589c",
+  "lane": "spectator-capture-20260907",
+  "new_test_files": [
+    "test_config_spectate",
+    "test_spectate_events",
+    "test_fake_mod_spectate",
+    "test_spectate_capture",
+    "test_live_spectate",
+    "test_spectate_rehearsal",
+    "test_llm_wire_log"
+  ],
+  "review_status": "pending Codex round",
+  "ruff": "clean (ruff.log)"
+}

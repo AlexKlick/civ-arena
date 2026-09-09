@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[1]
 STATUS_DIGEST = [
     (0, "Puppeteer.Status",
      ["TURN|1", "PUPPET_ACTIVE|false", "LEASE_PLAYER|-1", "LEASE_TURN|-1"]),
-    (0, "Puppeteer.Digest", ["DIGEST|canned-board"]),
+    (0, "Puppeteer.Digest", ["DIGEST|p0|0|-1"]),
 ]
 
 
@@ -41,7 +41,7 @@ async def test_mod_handshake_gate_passes():
         await adapter.setup({})
         doc = await adapter.require_mod()
         assert doc["present"] is True
-        assert doc["mod_version"] == "0.3.0-rehearsal"
+        assert doc["mod_version"] == "0.4.0"
         assert doc["supports_freeze"] and doc["supports_ledger"]
         assert doc["supports_command_diff"], "M14d: DiffSinceLast required"
         await adapter.teardown()
@@ -108,13 +108,19 @@ def test_parse_handshake_fail_closed():
     assert doc == {"present": False, "mod_version": None,
                    "supports_freeze": False, "supports_ledger": False,
                    "supports_digest": False,
-                   "supports_command_diff": False}
+                   "supports_command_diff": False, "supports_guarded_handoff": False,
+                   "supports_reward_receipts": False,
+                   # v0.4.0 spectate caps fail closed like the rest
+                   "supports_ambient_windows": False,
+                   "supports_roster": False}
     # MOD_PRESENT true but a capability merely missing => still False
     doc = parse_handshake(["MOD_PRESENT|true", "MOD_VERSION|0.3.0",
                            "SUPPORTS_FREEZE|true"])
     assert doc["present"] is True
     assert doc["supports_freeze"] is True
     assert doc["supports_ledger"] is False  # absent, not defaulted
+    assert doc["supports_ambient_windows"] is False
+    assert doc["supports_roster"] is False
 
 
 def test_translator_mod_entries_guarded_and_terminated():

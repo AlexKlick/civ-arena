@@ -1,0 +1,632 @@
+:root {
+  color-scheme:dark;
+  font-family:Inter,ui-sans-serif,system-ui,sans-serif;
+  color:var(--ink);
+  background:var(--bg);
+  font-size:14px;
+}
+* {
+  box-sizing:border-box;
+}
+body {
+  margin:0;
+}
+header {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:26px 32px 20px;
+  border-bottom:1px solid var(--line);
+}
+h1 {
+  font-size:32px;
+  letter-spacing:-1px;
+  margin:6px 0;
+}
+p {
+  line-height:1.5;
+  color:var(--muted);
+  margin:8px 0;
+}
+.eyebrow {
+  font-size:10px;
+  letter-spacing:2px;
+  color:var(--eyebrow);
+  font-weight:700;
+}
+.badge {
+  border:1px solid var(--badge_line);
+  color:var(--badge_ink);
+  border-radius:20px;
+  padding:9px 15px;
+  font-size:10px;
+  letter-spacing:1px;
+}
+main {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 340px;
+  gap:22px;
+  padding:24px 32px;
+}
+.board,aside {
+  min-width:0;
+}
+.toolbar {
+  display:flex;
+  gap:8px;
+  align-items:end;
+  flex-wrap:wrap;
+}
+label {
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  font-size:10px;
+  letter-spacing:.5px;
+  color:var(--muted);
+}
+select,button {
+  background:var(--panel2);
+  color:var(--ink2);
+  border:1px solid var(--line2);
+  border-radius:5px;
+  padding:9px;
+  font:inherit;
+  font-size:12px;
+}
+button {
+  cursor:pointer;
+}
+button:hover,select:hover {
+  border-color:var(--eyebrow);
+}
+button:focus-visible,select:focus-visible,svg [tabindex]:focus-visible {
+  outline:2px solid var(--focus);
+}
+#status {
+  font-size:12px;
+  min-height:36px;
+}
+.map-wrap {
+  position:relative;
+  height:560px;
+  background:radial-gradient(ellipse at center,var(--bg3),var(--bg2));
+  border:1px solid var(--line);
+  border-radius:8px;
+  overflow:hidden;
+}
+#map {
+  width:100%;
+  height:100%;
+  touch-action:none;
+  cursor:grab;
+}
+#map:active {
+  cursor:grabbing;
+}
+#world .tile {
+  stroke:var(--hex_stroke);
+  stroke-width:.9;
+}
+#world .tile:hover {
+  stroke:var(--ink3);
+  stroke-width:2;
+}
+#world .actor {
+  cursor:pointer;
+}
+#world text {
+  fill:var(--halo);
+  font-size:9px;
+  text-anchor:middle;
+  pointer-events:none;
+  paint-order:stroke;
+  stroke:var(--halo_dark);
+  stroke-width:2.5px;
+  stroke-linejoin:round;
+}
+#world text.label {
+  font-size:7px;
+  stroke-width:2px;
+}
+#world text.barbarian {
+  fill:var(--coral);
+  font-size:9px;
+  font-weight:700;
+}
+/* Badges: light surface ring, dark stroke, dark glyph ink — legible on every terrain fill. */
+.badge-halo {
+  fill:var(--halo);
+  stroke:none;
+  opacity:.92;
+}
+.badge-shape {
+  stroke:var(--mark_stroke);
+  stroke-width:1.5;
+}
+.badge-shape.dashed {
+  stroke-dasharray:2 1.5;
+}
+text.badge-glyph,#world text.badge-glyph {
+  fill:var(--glyph_ink);
+  stroke:none;
+  font-size:7px;
+  font-weight:700;
+  letter-spacing:-.2px;
+  paint-order:normal;
+}
+text.city-pop,#world text.city-pop {
+  font-size:8px;
+}
+.hp-seg {
+  fill:none;
+  stroke-width:1.6;
+  stroke-linecap:round;
+}
+.hp-seg.empty {
+  stroke:var(--halo);
+  opacity:.45;
+}
+.fortified {
+  fill:none;
+  stroke:var(--mark_stroke);
+  stroke-width:.9;
+}
+/* Elevation marks are paths: dark ink over a light halo. */
+.elev-halo {
+  fill:none;
+  stroke:var(--halo);
+  stroke-width:3.2;
+  stroke-linejoin:round;
+  stroke-linecap:round;
+  opacity:.85;
+}
+.elev-ink {
+  fill:none;
+  stroke:var(--glyph_ink);
+  stroke-width:1.4;
+  stroke-linejoin:round;
+  stroke-linecap:round;
+}
+.elev-mountain .elev-ink {
+  fill:var(--glyph_ink);
+  stroke-width:.6;
+}
+.elev-mountain .elev-halo {
+  stroke-width:2.6;
+}
+.elev,.layer-elevation,.layer-borders,.layer-tints {
+  pointer-events:none;
+}
+.elev[data-stale="1"] {
+  opacity:.5;
+}
+.border {
+  fill:none;
+  stroke-linecap:butt;
+  stroke-linejoin:round;
+  pointer-events:none;
+}
+.border[data-stale="1"],.tint[data-stale="1"] {
+  opacity:.5;
+}
+.tint {
+  pointer-events:none;
+}
+/* Spectator territory layer (M4): omniscient capture between the observed
+   tints and the observed borders. The frontier is slightly heavier than the
+   observed 2.2 so the two provenances stay visually distinct, and the layer
+   toggles as a whole (never per owner) from the legend checkbox. Colours are
+   runtime rgb() strings from engine palette ints — data, not CSS literals. */
+.border.world {
+  stroke-width:2.6;
+}
+.tint.world {
+  pointer-events:none;
+}
+.layer-world.off {
+  display:none;
+}
+.world-capital {
+  fill:var(--ink3);
+  stroke:var(--halo_dark);
+  stroke-width:.8;
+}
+.world-city text.label {
+  font-size:7px;
+}
+.legend-check {
+  margin:0;
+}
+.roster {
+  font-size:12px;
+}
+.roster p {
+  font-size:11px;
+  margin:3px 0 8px;
+}
+.roster-row {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:baseline;
+  gap:6px;
+  padding:5px 8px;
+  margin:3px 0;
+  background:var(--panel3);
+  border-left:2px solid var(--card_line);
+  border-radius:3px;
+  font-size:11px;
+}
+.roster-row strong {
+  font-size:11px;
+  color:var(--ink2);
+}
+.roster-row.dead {
+  opacity:.55;
+}
+.roster-id {
+  color:var(--dim);
+  font-size:10px;
+  letter-spacing:.5px;
+}
+.roster-leader,.roster-kind,.roster-suzerain,.roster-alive {
+  color:var(--muted);
+  font-size:10px;
+}
+.roster-alive {
+  margin-left:auto;
+}
+/* Recorded decision overlay: the candidate polygon is the hit target, so it is the
+   only part of the group that takes pointer events. Outline width carries the
+   recorded selection weight; hatch carries exclusion; one solid edge carries the
+   recorded chosen move. Legend swatches reuse the same classes, so the key cannot
+   drift from the map. The label rule repeats itself under #world because the
+   id-scoped `#world text` rule would otherwise win on specificity. */
+.decision {
+  pointer-events:none;
+}
+.decision .candidate,.swatch .candidate {
+  fill:none;
+  stroke-linejoin:round;
+}
+/* `all`, not `auto`: an unfilled outline would otherwise only be hit on its 1-4px
+   stroke and the tile beneath would take the click. The whole candidate hex is the
+   hit target. */
+.decision .candidate {
+  pointer-events:all;
+  cursor:pointer;
+}
+.decision .candidate.excluded,.swatch .candidate.excluded {
+  fill:url(#decision-hatch);
+  stroke:var(--dim);
+  stroke-dasharray:2 2;
+}
+.decision .candidate.focus,.decision .candidate:focus-visible {
+  stroke:var(--focus);
+  outline:none;
+}
+.decision .origin-ring {
+  fill:none;
+  stroke-width:2;
+}
+.decision .decision-alt {
+  stroke-width:.8;
+  stroke-opacity:.45;
+}
+.decision .decision-alt.excluded {
+  stroke:var(--dim);
+}
+.decision .decision-edge,.swatch .decision-edge {
+  stroke-width:2.5;
+  stroke-linecap:round;
+}
+.decision-labels {
+  pointer-events:none;
+}
+.decision-labels .decision-label,#world .decision-labels .decision-label {
+  font-size:8px;
+  fill:var(--ink3);
+  paint-order:stroke;
+  stroke:var(--halo_dark);
+  stroke-width:2.5;
+  text-anchor:middle;
+}
+.decision-hatch-line {
+  stroke:var(--dim);
+  stroke-width:1.2;
+}
+.card[data-dest] {
+  cursor:pointer;
+}
+.card[data-dest]:focus-visible {
+  outline:2px solid var(--focus);
+}
+.card.focus {
+  outline:1px solid var(--focus);
+}
+.compass {
+  position:absolute;
+  top:17px;
+  left:18px;
+  color:var(--compass);
+  pointer-events:none;
+  font-size:19px;
+}
+.compass small {
+  display:block;
+  font-size:9px;
+  color:var(--compass2);
+}
+.mini-wrap {
+  position:absolute;
+  right:14px;
+  bottom:42px;
+  width:178px;
+  height:114px;
+  border:1px solid var(--line3);
+  background:var(--mini_bg);
+  border-radius:5px;
+  padding:7px;
+}
+.mini-wrap span {
+  font-size:8px;
+  letter-spacing:1.5px;
+  color:var(--muted2);
+}
+#mini {
+  width:100%;
+  height:86px;
+  cursor:crosshair;
+}
+#viewport {
+  fill:var(--viewport_fill);
+  stroke:var(--viewport_stroke);
+  stroke-width:2;
+  pointer-events:none;
+}
+.hint {
+  position:absolute;
+  bottom:5px;
+  left:12px;
+  font-size:10px;
+  pointer-events:none;
+}
+/* The key is generated from the palette with the map's own drawing functions. */
+.legend {
+  margin:12px 0 4px;
+  font-size:10px;
+  color:var(--muted2);
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:6px 12px 10px;
+}
+.legend summary {
+  font-size:10px;
+  letter-spacing:1.5px;
+  color:var(--eyebrow);
+  font-weight:700;
+  cursor:pointer;
+}
+.legend-groups {
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
+  gap:8px 18px;
+  margin-top:6px;
+}
+.legend-group h4 {
+  font-size:9px;
+  letter-spacing:1.5px;
+  color:var(--eyebrow);
+  margin:8px 0 4px;
+  font-weight:700;
+}
+.legend-item {
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-width:0;
+  margin:3px 0;
+}
+.legend-label {
+  line-height:1.35;
+}
+.swatch {
+  width:24px;
+  height:24px;
+  flex:none;
+  overflow:visible;
+}
+.swatch-blank {
+  display:inline-block;
+  border:1px dashed var(--line2);
+  border-radius:4px;
+}
+.swatch .tile {
+  stroke:var(--hex_stroke);
+  stroke-width:.9;
+}
+.notice {
+  font-size:11px;
+  border-left:2px solid var(--notice);
+  padding-left:12px;
+}
+aside {
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:20px;
+  align-self:start;
+  max-height:850px;
+  overflow:auto;
+}
+h2 {
+  font-size:20px;
+  margin:10px 0;
+}
+h3 {
+  font-size:13px;
+  margin-top:24px;
+  color:var(--heading);
+}
+aside label select {
+  max-width:100%;
+}
+pre {
+  font:11px/1.55 ui-monospace,monospace;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  color:var(--muted3);
+  background:var(--pre_bg);
+  padding:12px;
+  border-radius:5px;
+}
+.facts {
+  margin:8px 0;
+  font-size:12px;
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  gap:4px 10px;
+}
+.facts dt {
+  color:var(--dim);
+  font-size:10px;
+  letter-spacing:.5px;
+  text-transform:uppercase;
+  padding-top:2px;
+}
+.facts dd {
+  margin:0;
+  overflow-wrap:anywhere;
+}
+.card {
+  padding:10px;
+  margin:8px 0;
+  background:var(--panel3);
+  border-left:2px solid var(--card_line);
+  border-radius:3px;
+  font-size:12px;
+}
+.card p {
+  font-size:11px;
+  margin:4px 0;
+}
+.card.selected {
+  border-left-color:var(--card_selected);
+}
+.card.excluded {
+  opacity:.65;
+}
+details {
+  margin-top:20px;
+  font-size:11px;
+}
+summary {
+  cursor:pointer;
+  color:var(--summary);
+}
+#custody {
+  overflow-wrap:anywhere;
+}
+.graph-arrow {
+  color:var(--arrow);
+  font-size:18px;
+  padding-left:10px;
+}
+@media(max-width:1050px) {
+  main {
+    grid-template-columns:minmax(0,1fr) 280px;
+    padding:18px;
+    gap:14px;
+  }
+  .map-wrap {
+    height:530px;
+  }
+  header {
+    padding:20px;
+  }
+}
+@media(max-width:760px) {
+  header {
+    display:block;
+  }
+  header .badge {
+    display:inline-block;
+    margin-top:12px;
+  }
+  main {
+    display:block;
+    padding:12px;
+  }
+  aside {
+    margin-top:18px;
+    max-height:none;
+  }
+  .map-wrap {
+    height:490px;
+  }
+  h1 {
+    font-size:28px;
+  }
+  .mini-wrap {
+    width:135px;
+    height:98px;
+  }
+  #mini {
+    height:70px;
+  }
+  .toolbar label {
+    max-width:49%;
+  }
+  .toolbar select {
+    max-width:100%;
+  }
+  .hint {
+    max-width:180px;
+  }
+  #status {
+    min-height:52px;
+  }
+  .legend-groups {
+    grid-template-columns:1fr;
+  }
+}
+/* Research block: packet-scoped facts, chips only for recorded observed options. */
+.research {
+  font-size:12px;
+}
+.research h4 {
+  font-size:9px;
+  letter-spacing:1.5px;
+  color:var(--eyebrow);
+  margin:14px 0 4px;
+  font-weight:700;
+}
+.research p {
+  font-size:11px;
+  margin:3px 0;
+}
+.research ul {
+  margin:4px 0;
+  padding-left:18px;
+  color:var(--muted3);
+}
+.research details {
+  margin-top:4px;
+}
+.research .chip {
+  display:inline-block;
+  border:1px solid var(--line2);
+  border-radius:12px;
+  padding:2px 8px;
+  margin:4px 4px 0 0;
+  font-size:10px;
+  color:var(--ink2);
+}
+.production-marker {
+  fill:var(--district_fill);
+  stroke:var(--district);
+  stroke-width:1.7;
+  stroke-dasharray:3 2;
+  cursor:pointer;
+}
+#production-window {font-size:11px;}

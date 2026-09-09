@@ -49,6 +49,8 @@ for i, p in ipairs(ps) do
     .. "|pause=" .. pause)
 end
 print(table.concat(out, "\\n"))
+print("CENSUS_END|" .. tostring(#out))
+print("---END---")
 """
 
 

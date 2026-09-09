@@ -96,6 +96,48 @@ print("launchgame-called")
 print("{SENTINEL}")
 """
 
+# StagingRoom.OnShow -> RealizeGameSetup can reapply map defaults AFTER HostGame.
+# Bind the actual button before returning to the desktop launcher. Hotseat skips
+# the native countdown, so this is its final synchronous launch boundary.
+UI_START_GUARD_LUA = f"""
+if type(RealizeGameSetup) ~= "function" or type(CivArenaVerifyMajorSlots) ~= "function"
+    or Controls == nil or Controls.ReadyButton == nil or Controls.ReadyCheck == nil
+    or Mouse == nil or Mouse.eLClick == nil then
+  error("hotseat start guard UI dependencies unavailable")
+end
+CIV_ARENA_START_GUARD_STATUS = "armed"
+local function CivArenaGuardedStart()
+  if CIV_ARENA_START_GUARD_STATUS == "launched" then return end
+  local ok, reason = pcall(function()
+    if not Network.IsGameHost() or not Network.IsSessionActive()
+        or not GameConfiguration.IsHotseat() then
+      error("hotseat start guard requires the active host session")
+    end
+    -- Let native setup adopt the map's major/minor limits and city-state defaults.
+    RealizeGameSetup()
+    PlayerConfigurations[0]:SetReady(true)
+    PlayerConfigurations[1]:SetReady(true)
+    CivArenaCloseExtraMajorSlots()
+    -- A second native refresh must leave this roster intact. Verification here
+    -- has no repair side effects: unstable setup refuses to launch.
+    RealizeGameSetup()
+    CivArenaVerifyMajorSlots()
+    CIV_ARENA_START_GUARD_STATUS = "verified"
+    print("UI_START_ROSTER|0,1|verified_after_native_refresh")
+    Network.LaunchGame()
+    CIV_ARENA_START_GUARD_STATUS = "launched"
+  end)
+  if not ok then
+    CIV_ARENA_START_GUARD_STATUS = "failed:" .. tostring(reason)
+    print("UI_START_ROSTER|failed|" .. tostring(reason))
+  end
+end
+Controls.ReadyButton:RegisterCallback(Mouse.eLClick, CivArenaGuardedStart)
+Controls.ReadyCheck:RegisterCallback(Mouse.eLClick, CivArenaGuardedStart)
+print("UI_START_GUARD|bound_ready_controls")
+print("{SENTINEL}")
+"""
+
 # M18 rung 4: HostGame(SERVER_TYPE_HOTSEAT) kills the FireTuner listener
 # for the whole process (live-proven twice 2026-09-02) — but Network.LoadGame
 # is a different engine path. Load the hotseat AUTOsave back with the tuner
@@ -251,7 +293,8 @@ def find_state_sync(states: dict[int, str], name: str) -> int | None:
 
 async def run_full(host: str, port: int, state: str,
                    empty_passwords: bool = False,
-                   transition_timeout: float = 180.0) -> int:
+                   transition_timeout: float = 180.0,
+                   ui_start: bool = False) -> int:
     """The whole hotseat launch on ONE tuner connection, held open across
     the HostGame transition (the disconnect is what the degraded-boot
     pathology punishes — and an idle unjoined staging session has exited
@@ -266,11 +309,30 @@ async def run_full(host: str, port: int, state: str,
         # 1. seat + verify (live_newgame's proven Lua, same read-backs)
         idx = await find_state(conn, state)
         assert idx is not None
-        for ln in await run_lua(conn, idx, config_lua):
+        configured = await run_lua(conn, idx, config_lua)
+        for ln in configured:
             print(ln)
+        if 'MAJOR_ROSTER|0,1|humans=true|extra_slots=closed' not in configured:
+            print('FAILED: pre-host major roster not verified')
+            return 12
         # 2. host the hotseat staging session
-        for ln in await run_lua(conn, idx, HOST_HOTSEAT_LUA):
+        host_lua = HOST_HOTSEAT_LUA
+        if ui_start:
+            host_lua = host_lua.replace(f'print("{SENTINEL}")', UI_START_GUARD_LUA)
+        hosted = await run_lua(conn, idx, host_lua)
+        for ln in hosted:
             print(ln)
+        if 'POSTHOST_ROSTER|two_humans_no_extra_major_slots' not in hosted:
+            print('FAILED: post-host major roster not verified')
+            return 12
+        if ui_start:
+            # Architecture-1 starts through the staging UI; this session's
+            # tuner is known to disappear. Do not spend 180s rediscovering it.
+            if 'UI_START_GUARD|bound_ready_controls' not in hosted:
+                print('FAILED: final UI launch roster guard was not bound')
+                return 12
+            print('UI_START_READY|posthost_roster_verified', flush=True)
+            return 0
         # 3. wait out the front-end transition ON THIS SOCKET, polling the
         #    state list until StagingRoom re-registers (index may change).
         deadline = asyncio.get_event_loop().time() + transition_timeout
@@ -313,6 +375,8 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=0.0)
     ap.add_argument("--empty", action="store_true",
                     help="with --full/--complete: empty hotseat passwords")
+    ap.add_argument("--ui-start", action="store_true",
+                    help="with --full: return after post-host roster verification for UI start")
     ap.add_argument("--reflag-seat", type=int, default=1,
                     help="seat to re-flag human for --reflag")
     ap.add_argument("--save-name", default=SAVE_NAME_DEFAULT)
@@ -350,7 +414,7 @@ def main() -> int:
         if opts.full:
             return asyncio.run(
                 run_full(opts.host, opts.port, opts.state or "StagingRoom",
-                         empty_passwords=opts.empty))
+                         empty_passwords=opts.empty, ui_start=opts.ui_start))
         if opts.save:
             lua = save_lua(opts.save_name)
         elif opts.reflag:

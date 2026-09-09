@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import zlib
 
 from civ_arena.game.civ6 import lua_translator
 from civ_arena.game.civ6.vendor import tuner_client
@@ -59,15 +60,21 @@ class FakeMod:
 
     def __init__(
         self,
-        version: str = "0.3.0-rehearsal",
+        version: str = "0.4.0",
         has_status: bool = True,
         has_digest: bool = True,
         has_command_diff: bool = True,
         supports_freeze: bool = True,
         supports_ledger: bool = True,
+        supports_ambient_windows: bool = True,
+        supports_roster: bool = True,
         auto_ambient: tuple | None = None,
         injected: bool = True,
         hotseat: list[int] | None = None,
+        spectate: dict | None = None,
+        ambient_diffs: bool = False,
+        minors: bool = False,
+        fail_spectator: bool = False,
     ) -> None:
         self.version = version
         self.has_status = has_status
@@ -75,9 +82,31 @@ class FakeMod:
         self.has_command_diff = has_command_diff
         self.supports_freeze = supports_freeze
         self.supports_ledger = supports_ledger
+        # v0.4.0 spectate capabilities — False models an older mod so the
+        # phase's fail-closed gate is exercisable
+        self.supports_ambient_windows = supports_ambient_windows
+        self.supports_roster = supports_roster
+        # M4: player 12 city-state (one city + one unit, IsMajor false,
+        # never in the OVX majors) — the default-off knob keeps every
+        # legacy fixture byte-identical.
+        self.minors = {12} if minors else set()
+        # M4: the SPECW world reads raise (rehearses the
+        # spectator_world_failed path — the match must continue).
+        self.fail_spectator = fail_spectator
         # M18 hotseat mode: the driven players hand the turn to each other
         # (release of the round's last player advances the game turn)
         self.hotseat = list(hotseat) if hotseat else []
+        # Spectator-capture mode: a POLL-DRIVEN engine timeline (the
+        # spectate driver only polls — Status, Trace, Digest, observes —
+        # so the fake advances the game on Status polls). Keys:
+        # human_seat, ai_seats, polls_per_human_turn, ai_effect (callable,
+        # optional), mutate_during_census (bool, optional).
+        self.spectate = spectate
+        self.ambient_diffs = ambient_diffs  # real Begin/End window diffs
+        self._ambient_windows: dict[int, dict[str, object]] = {}
+        self._spectate_polls = 0
+        self._spectate_started = False
+        self._advance_pending = False  # deact_only_advance split state
         # engine effect that lands inside every ambient window:
         # (kind, entity_type, numeric_id, attr, before, after)
         self.auto_ambient = auto_ambient
@@ -102,15 +131,124 @@ class FakeMod:
         self.trace: list[str] = []
         self.pending_blockers: list[str] = []
         self._restored: set[int] = set()
+        self._handoff_receipts: set[tuple[int, int, int]] = set()
         self.act_log: list[tuple[str, str]] = []  # (tool, status) per command
         self.reset_board()
 
+    def _switch_local_player(self, player: int) -> None:
+        """Engine boundary exposed so tests can model native nonlocal actions."""
+        self.local_player = player
+
+    # -- spectator-capture engine timeline -----------------------------------
+
+    def _spectate_poll_tick(self, source: str = "status") -> None:
+        """Advance the fake game on the configured poll types (CAP-01
+        adversarial timeline: ``advance_on`` defaults to ["status"], but
+        tests can make Trace or Digest polls advance the game so
+        interleavings the Status-only timeline cannot produce are
+        exercisable). First poll establishes the attach state —
+        mid-human-turn by default (its HOOK_ENTER in the ring as history),
+        or between-turns with ``attach_turn_active: False`` (stale ring
+        history stays for the driver's drain logic, no fresh ENTER)."""
+        if self.spectate is None:
+            return
+        advance_on = self.spectate.get("advance_on", ["status"])
+        if not self._spectate_started:
+            self._spectate_started = True
+            human = self.spectate["human_seat"]
+            self._switch_local_player(human)
+            if self.spectate.get("attach_turn_active", True):
+                self.turn_active = True
+                # attach-mid-turn: the hook fired before we attached —
+                # UNLESS attach_seed_enter is False, which models a ring
+                # whose history predates the recorder (fresh injection or
+                # a wrap took the ENTER): nothing to keep
+                if self.spectate.get("attach_seed_enter", True):
+                    self._spectate_trace_append(
+                        f"{self.turn}|HOOK_ENTER|{human}")
+            return
+        if source not in advance_on:
+            return
+        self._spectate_polls += 1
+        if self._spectate_polls < int(self.spectate.get("polls_per_human_turn", 3)):
+            return
+        self._spectate_polls = 0
+        self._spectate_advance()
+
+    def _spectate_trace_append(self, entry: str) -> None:
+        """Append to the hook ring, honoring the optional ``trace_ring_cap``
+        knob — the REAL mod's ring is a bounded window (64 entries) that
+        evicts from the front; the cap lets tests reproduce wrap gaps."""
+        self.trace.append(entry)
+        cap = int(self.spectate.get("trace_ring_cap", 0)) if self.spectate else 0
+        if cap > 0 and len(self.trace) > cap:
+            self.trace = self.trace[-cap:]
+
+    def _spectate_advance(self) -> None:
+        human = self.spectate["human_seat"]
+        # deact_only_advance: split the round boundary from the AI turns —
+        # the human DEACT lands alone and the ring PARKS on it (a window
+        # the live engine genuinely has: AI turns take seconds); the AI
+        # hooks + next ENTER arrive on the following advance. Exercises
+        # the END boundary-state corroboration both ways.
+        if self.spectate.get("deact_only_advance") \
+                and not self._advance_pending:
+            self._advance_pending = True
+            self.turn_active = False
+            self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
+            return
+        self._advance_pending = False
+        self.turn_active = False
+        self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{human}")
+        for ai in self.spectate.get("ai_seats", []):
+            self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{ai}")
+            self._spectate_ai_effect(ai)
+            self._spectate_trace_append(f"{self.turn}|HOOK_DEACT|{ai}")
+        self._advance_turn_effects()
+        self.turn += 1
+        # the engine refreshes every unit's movement at the new turn —
+        # without this the AI effect could only ever fire once
+        for unit in self.units.values():
+            unit["moves"] = 2
+        self.turn_active = True
+        self._spectate_trace_append(f"{self.turn}|HOOK_ENTER|{human}")
+
+    def _spectate_ai_effect(self, ai: int) -> None:
+        """The engine AI's turn action — a REAL mini-engine mutation so the
+        omniscient census, digest, and ambient windows all observe it."""
+        effect = self.spectate.get("ai_effect") if self.spectate else None
+        if callable(effect):
+            effect(self)
+            return
+        for uid in sorted(self.units):
+            u = self.units[uid]
+            if u["owner"] == ai and u["moves"] > 0:
+                u["x"] += 1
+                u["moves"] = 0
+                break
+
+    def _production_hash(self, item: str) -> int:
+        prefix = "UNIT_" if self.BUILDABLE.get(item, (0, "building"))[1] == "unit" \
+            else "BUILDING_"
+        raw = (~zlib.crc32((prefix + item).encode())) & 0xFFFFFFFF
+        return raw if raw < 2**31 else raw - 2**32
+
     # -- the mini engine ---------------------------------------------------
     def reset_board(self) -> None:
+        self.humans = {pid: True for pid in (self.hotseat or [0, 1])}
         self.players = {
             0: {"gold": 100, "researching": "", "researched": []},
             1: {"gold": 100, "researching": "", "researched": []},
         }
+        # spectate mode may observe more seats than the 2-major mini
+        # engine models (the live config declares the game's full major
+        # set) — seed any extra observed seats so window snapshots and
+        # censuses work; default (non-spectate) fixtures stay unchanged.
+        if self.spectate:
+            for pid in ([self.spectate.get("human_seat", 0)]
+                        + list(self.spectate.get("ai_seats", []))):
+                self.players.setdefault(
+                    pid, {"gold": 100, "researching": "", "researched": []})
         self.units: dict[int, dict] = {
             # owner 0: a far settler (founds turn 1), a warrior (fortifies),
             # a near settler (marches), an archer (attack-path tests)
@@ -130,6 +268,18 @@ class FakeMod:
                 "pop": 1, "queue": ""},
         }
         self.next_city_id = 2
+        # M4 minors: the city-state seat (roster row kind=city_state, one
+        # city + one unit) — its rows ride UNITS/CITIES/SPECW reads, never
+        # the OVX majors.
+        for pid in self.minors:
+            self.players.setdefault(
+                pid, {"gold": 20, "researching": "", "researched": []})
+            self.units[900 + pid] = {
+                "owner": pid, "type": "WARRIOR", "x": 8, "y": 8,
+                "moves": 2, "damage": 0, "fortified": False}
+            self.cities[90 + pid] = {
+                "owner": pid, "name": "CITYSTATE", "x": 8, "y": 8,
+                "pop": 2, "queue": ""}
 
     # -- the M17c targeted map read ----------------------------------------
 
@@ -163,32 +313,32 @@ class FakeMod:
                 continue
             b = b_units.get(uid)
             if b is None:
-                rows.append(f"LEDGER|unit.spawned|unit|u{uid}|exists"
+                rows.append(f"LEDGER|unit.spawned|unit|u{pid}:{uid}|exists"
                             f"|false|true")
                 continue
             if (u["x"], u["y"]) != (b[0], b[1]):
-                rows.append(f"LEDGER|unit.moved|unit|u{uid}|pos|{b[0]},{b[1]}"
+                rows.append(f"LEDGER|unit.moved|unit|u{pid}:{uid}|pos|{b[0]},{b[1]}"
                             f"|{u['x']},{u['y']}")
             if u["moves"] != b[2]:
-                rows.append(f"LEDGER|unit.moves|unit|u{uid}|moves|{b[2]}"
+                rows.append(f"LEDGER|unit.moves|unit|u{pid}:{uid}|moves|{b[2]}"
                             f"|{u['moves']}")
             if u["damage"] != b[3]:
-                rows.append(f"LEDGER|unit.damage|unit|u{uid}|damage|{b[3]}"
+                rows.append(f"LEDGER|unit.damage|unit|u{pid}:{uid}|damage|{b[3]}"
                             f"|{u['damage']}")
         for uid in sorted(set(b_units) - {u for u, x in self.units.items()
                                           if x["owner"] == pid}):
-            rows.append(f"LEDGER|unit.despawned|unit|u{uid}|exists|true|false")
+            rows.append(f"LEDGER|unit.despawned|unit|u{pid}:{uid}|exists|true|false")
         for cid, c in sorted(self.cities.items()):
             if c["owner"] != pid:
                 continue
             if cid not in b_cities:
-                rows.append(f"LEDGER|city.founded|city|c{cid}|exists|false|true")
+                rows.append(f"LEDGER|city.founded|city|c{pid}:{cid}|exists|false|true")
             elif c["pop"] != b_cities[cid]:
-                rows.append(f"LEDGER|city.growth|city|c{cid}|population|"
+                rows.append(f"LEDGER|city.growth|city|c{pid}:{cid}|population|"
                             f"{b_cities[cid]}|{c['pop']}")
         for cid in sorted(set(b_cities) - {c for c, x in self.cities.items()
                                            if x["owner"] == pid}):
-            rows.append(f"LEDGER|city.lost|city|c{cid}|exists|true|false")
+            rows.append(f"LEDGER|city.lost|city|c{pid}:{cid}|exists|true|false")
         gold = self.players[pid]["gold"]
         res = self.players[pid]["researching"]
         if gold != b_gold:
@@ -204,10 +354,10 @@ class FakeMod:
     def _digest(self) -> str:
         rows = []
         for uid, u in sorted(self.units.items()):
-            rows.append(f"u{uid}|{u['owner']}|{u['x']}|{u['y']}"
+            rows.append(f"u{u['owner']}:{uid}|{u['owner']}|{u['x']}|{u['y']}"
                         f"|{u['moves']}|{u['damage']}")
         for cid, c in sorted(self.cities.items()):
-            rows.append(f"c{cid}|{c['owner']}|{c['pop']}")
+            rows.append(f"c{c['owner']}:{cid}|{c['owner']}|{c['pop']}")
         for pid, p in sorted(self.players.items()):
             rows.append(f"p{pid}|{p['gold']}|{p['researching'] or -1}")
         rows.append(f"nonce{self.state_nonce}")
@@ -249,7 +399,7 @@ class FakeMod:
         me = self.local_player
 
         def dec(num: int) -> int:
-            return num % 65536
+            return num
 
         if tool == "move_unit":
             uid = num(r"UnitManager\.GetUnit\(me, (\d+)\)")
@@ -314,6 +464,29 @@ class FakeMod:
                 b for b in self.pending_blockers
                 if not b.endswith("ENDTURN_BLOCKING_RESEARCH")]
             return [f"ACT|set_research|OK|{tech}", "---END---"]
+        if tool == "set_city_production" and "-- arena:productive=" in code:
+            family, item, x, y = re.search(
+                r"-- arena:productive=(district|project)\|([A-Z0-9_]+)\|(-?\d+)\|(-?\d+)",
+                code).groups()
+            cid = int(re.search(r"CityManager.GetCity\(me,(\d+)\)", code).group(1))
+            city = self.cities.get(cid)
+            row = getattr(self, "productive_options", {}).get(item)
+            if city is None or city["owner"] != me:
+                return ["ACT|set_city_production|ERR|NOT_YOUR_CITY|productive-refused", "---END---"]
+            if city.get("queue"):
+                return ["ACT|set_city_production|ERR|ALREADY|productive-refused", "---END---"]
+            if row is None or row["kind"] != family:
+                return ["ACT|set_city_production|ERR|PREREQ_UNMET|productive-refused", "---END---"]
+            q, r = _ax(int(x), int(y))
+            if family == "district" and f"{q},{r}" not in row["placements"]:
+                return ["ACT|set_city_production|ERR|ILLEGAL_DEST|productive-refused", "---END---"]
+            city["queue"] = item
+            index, dtype = ((row["plot_index"], row["district_index"])
+                            if family == "district" else (-1, -1))
+            city["productive_placement"] = (index, dtype)
+            return [f"PRODUCTIVE_REQUEST|{family}|{item}|"
+                    f"{self._production_hash(item)}|{index}|{dtype}",
+                    f"ACT|set_city_production|OK|{item}", "PRODUCTIVE_REQUEST_END|1", "---END---"]
         if tool == "set_city_production":
             cid = dec(num(r"CityManager\.GetCity\(me, (\d+)\)"))
             item = token(r"GameInfo\.Units\['UNIT_([A-Z0-9_]+)'\]") or \
@@ -326,7 +499,8 @@ class FakeMod:
                 return [f"ACT|set_city_production|ERR|ARGS_INVALID|{item}",
                         "---END---"]
             c["queue"] = item
-            return [f"ACT|set_city_production|OK|{item}|10", "---END---"]
+            return [f"PRODUCTION_REQUEST|{self._production_hash(item)}",
+                    f"ACT|set_city_production|OK|{item}|10", "---END---"]
         if tool == "purchase":
             cid = dec(num(r"CityManager\.GetCity\(me, (\d+)\)"))
             item = token(r"GameInfo\.Units\['UNIT_([A-Z0-9_]+)'\]") or \
@@ -350,10 +524,81 @@ class FakeMod:
         # game-level probes (the fake IS the whole game, mod included)
         if 'print("TS|1")' in code:
             return [f"TURN|{self.turn}", "LOCAL|0", "PUPPET_ACTIVE|false"]
+        # M4: the spectator world reads rehearse their FAILURE path too
+        if self.fail_spectator and 'print("SPECW|' in code:
+            return ["ERR:FAKE spectator world disabled"]
+        # -- M4 observes over the mini engine (new markers, new dispatch;
+        # every legacy marker's response bytes stay untouched) --
+        if 'print("OVX|2")' in code:
+            rows = [f"TURN|{self.turn}"]
+            for pid, p in sorted(self.players.items()):
+                if pid in self.minors:
+                    continue  # city-states never ride the majors read
+                rows.append(
+                    f"OVROW|{pid}|CIVILIZATION_FAKE{pid}|{p['gold']}"
+                    f"|{p['researching'] or '-'}"
+                    f"|{10 + pid}|{8 + pid}|{5 + pid}|{2 + pid}|{1 + pid}"
+                    f"|{pid}|CIVIC_FAKE|{7 + pid}|{60 + pid}")
+                if p["researched"]:
+                    rows.append("OVRESEARCHED|" + str(pid) + "|"
+                                + ";".join(sorted(p["researched"])))
+                rows.append(f"OVCIVICS|{pid}|CIVIC_FAKE")
+            rows.append("OVERA|ERA_FAKE")
+            return rows + ["---END---"]
+        if 'print("CITIES|2")' in code:
+            rows = []
+            for cid, c in sorted(self.cities.items()):
+                q, r = _ax(c["x"], c["y"])
+                major = "false" if c["owner"] in self.minors else "true"
+                capital = "true" if cid == 1 else "false"
+                buildings = "BUILDING_MONUMENT" if cid == 1 else "-"
+                districts = "DISTRICT_CITY_CENTER" if cid == 1 else "-"
+                prodturns = "10" if c["queue"] else "-1"
+                rows.append(
+                    f"CITYROW|c{c['owner']}:{cid}"
+                    f"|{c['owner']}|{c['name']}|{q}|{r}"
+                    f"|{c['pop']}|{c['queue'] or '-'}|{major}|{capital}"
+                    f"|200|200|{10 + cid}|{15 + cid}|3|5|{prodturns}"
+                    f"|{buildings}|{districts}")
+            return ["CITIES|2", *rows, "---END---"]
+        if 'print("SPECW|1|roster")' in code:
+            rows = []
+            for pid in sorted(self.players):
+                major = "false" if pid in self.minors else "true"
+                kind = "city_state" if pid in self.minors else "major"
+                rows.append(f"PLAYERROW|{pid}|CIVILIZATION_FAKE{pid}"
+                            f"|LEADER_FAKE{pid}|{major}|false|true"
+                            f"|?|{kind}|-1")
+            return ["SPECW|1|roster", *rows, "---END---"]
+        if 'print("SPECW|1|tiles")' in code:
+            owned: dict[tuple[int, int], int] = {}
+            centres = {_ax(c["x"], c["y"]) for c in self.cities.values()}
+            for c in sorted(self.cities.values(), key=lambda city: city["x"]):
+                cq, cr = _ax(c["x"], c["y"])
+                for dq, dr in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1),
+                               (1, -1), (-1, 1)):
+                    key = (cq + dq, cr + dr)
+                    owned.setdefault(key, c["owner"])
+            rows = []
+            for (q, r), owner in sorted(owned.items()):
+                terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
+                district = ("DISTRICT_CITY_CENTER" if (q, r) in centres
+                            else "-")
+                resource = "RESOURCE_IRON" if (q * 7 + r * 13) % 11 == 5 else "-"
+                rows.append(f"OWNEDROW|{q}|{r}|{owner}|{terrain}|-|{resource}"
+                            f"|-|{district}|false|-1")
+            return ["SPECW|1|tiles", "GRID|40|40|1600", *rows,
+                    f"TILES_END|{len(rows)}", "---END---"]
+        if 'print("SPECW|1|palette")' in code:
+            rows = [f"COLORROW|{pid}|{-1000000 - pid}|{-2000000 - pid}"
+                    for pid in sorted(self.players) if pid not in self.minors]
+            return ["SPECW|1|palette", *rows, "---END---"]
         # -- M14d observes over the mini engine --
         if 'print("OVX|1")' in code:
             rows = [f"TURN|{self.turn}"]
             for pid, p in sorted(self.players.items()):
+                if pid in self.minors:
+                    continue  # city-states never ride the majors read
                 rows.append(f"OVROW|{pid}|CIVILIZATION_FAKE{pid}|{p['gold']}"
                             f"|{p['researching'] or '-'}")
                 if p["researched"]:
@@ -361,6 +606,10 @@ class FakeMod:
                                 + ";".join(sorted(p["researched"])))
             return rows + ["---END---"]
         if 'print("UNITS|1")' in code:
+            if self.spectate and self.spectate.get("mutate_during_census"):
+                # census-drift knob: the board moves between the digest
+                # bracket reads — exercises the consistency retry
+                self.state_nonce += 1
             rows = []
             for uid, u in sorted(self.units.items()):
                 q, r = _ax(u["x"], u["y"])
@@ -368,7 +617,7 @@ class FakeMod:
                     (15, 15) if u["type"] == "ARCHER" else (0, 0)
                 # composite id (Codex P1-11): uid + owner*65536
                 rows.append(
-                    f"UNITROW|{uid + u['owner'] * 65536}|{u['owner']}"
+                    f"UNITROW|u{u['owner']}:{uid}|{u['owner']}"
                     f"|{u['type']}|{q}|{r}"
                     f"|{100 - u['damage']}|{u['moves']}|2|{combat}|{ranged}"
                     f"|{str(u['fortified']).lower()}")
@@ -376,22 +625,22 @@ class FakeMod:
         if 'print("CITIES|1")' in code:
             rows = []
             for cid, c in sorted(self.cities.items()):
+                if c["owner"] in self.minors:
+                    continue  # the lite read enumerates majors only
                 q, r = _ax(c["x"], c["y"])
-                rows.append(f"CITYROW|{cid + c['owner'] * 65536}"
+                rows.append(f"CITYROW|c{c['owner']}:{cid}"
                             f"|{c['owner']}|{c['name']}|{q}|{r}"
                             f"|{c['pop']}|{c['queue'] or '-'}")
             return ["CITIES|1", *rows, "---END---"]
-        if 'print("VMAP|3")' in code:
-            # the targeted read: the adapter derived the visible set and
-            # asks for exactly those axial coords (offset-encoded in the
-            # Lua as {q, r + floor(q / 2)}). Answer only what was asked —
-            # a row for an unrequested tile would enter the belief as
-            # sight it does not have.
+        if 'print("VMAP|4")' in code:
+            # M4 targeted read: same derived-visible coords as VMAP|3, but
+            # the 13-field row. Dynamic fields are deterministic so the
+            # parser/fog-audit paths rehearse non-trivial shapes; engvis
+            # disagrees on every 5th column (the audit must REPORT that).
             coords = re.findall(r"\{(-?\d+),(-?\d+)\}", code)
             rows = []
             for x_s, y_s in coords:
-                q, y = int(x_s), int(y_s)
-                r = y - (q - (q % 2)) // 2
+                q, r = _ax(int(x_s), int(y_s))
                 terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
                 owner = -1
                 city = ""
@@ -399,7 +648,36 @@ class FakeMod:
                     cq, cr = _ax(c["x"], c["y"])
                     if (cq, cr) == (q, r):
                         owner = c["owner"]
-                        city = f"c{cid + c['owner'] * 65536}"
+                        city = f"c{c['owner']}:{cid}"
+                feature = "FEATURE_FOREST" if (q * 5 + r * 3) % 9 == 2 else "-"
+                resource = "RESOURCE_IRON" if (q * 7 + r * 13) % 11 == 5 else "-"
+                improvement = "IMPROVEMENT_FARM" if (q * 3 + r) % 13 == 4 else "-"
+                district = "DISTRICT_CITY_CENTER" if city else "-"
+                river = "true" if (q + r) % 7 == 0 else "false"
+                appeal = str((q * 7 + r * 13) % 101)
+                engvis = "false" if q % 5 == 0 else "true"
+                rows.append(f"TILEROW|{q}|{r}|{terrain}|true|{owner}|{city}"
+                            f"|{feature}|{resource}|{improvement}|{district}"
+                            f"|{river}|{appeal}|{engvis}")
+            return ["VMAP|4", f"TURN|{self.turn}", *rows, "---END---"]
+        if 'print("VMAP|3")' in code:
+            # the targeted read: the adapter derived the visible set and
+            # asks for exactly those axial coords (offset-encoded in the
+            # Lua as {q + floor(r / 2), r}). Answer only what was asked —
+            # a row for an unrequested tile would enter the belief as
+            # sight it does not have.
+            coords = re.findall(r"\{(-?\d+),(-?\d+)\}", code)
+            rows = []
+            for x_s, y_s in coords:
+                q, r = _ax(int(x_s), int(y_s))
+                terrain = self._FAKE_TERRAINS[(q * 31 + r * 17) % 8]
+                owner = -1
+                city = ""
+                for cid, c in self.cities.items():
+                    cq, cr = _ax(c["x"], c["y"])
+                    if (cq, cr) == (q, r):
+                        owner = c["owner"]
+                        city = f"c{c['owner']}:{cid}"
                 rows.append(f"TILEROW|{q}|{r}|{terrain}|true|{owner}|{city}")
             return ["VMAP|3", f"TURN|{self.turn}", *rows, "---END---"]
         if 'print("VMAP|1")' in code:
@@ -410,16 +688,31 @@ class FakeMod:
             rows = [f"TECHROW|{t}|{cost}" for t, cost in sorted(self.TECHS.items())
                     if t not in p["researched"]]
             return ["AVRES|1", *rows, "---END---"]
+        if "-- arena:productive_readback=" in code:
+            cid = int(re.search(r"CityManager.GetCity\(me,(\d+)\)", code).group(1))
+            city = self.cities.get(cid)
+            if city is None or city["owner"] != self.local_player:
+                return ["ERROR:productive readback owner unavailable"]
+            index, dtype = city.get("productive_placement", (-1,-1))
+            district = index >= 0
+            owner, belongs = (city["owner"], "true") if district else (-1, "false")
+            h = self._production_hash(city["queue"]) if city.get("queue") else 0
+            return [f"PRODUCTIVE_STATE|{h}|{index}|{dtype}|{owner}|{belongs}|{belongs}",
+                    "PRODUCTIVE_STATE_END|1", "---END---"]
         if 'print("AVPROD|1")' in code:
             rows = [f"ITEMROW|{kind}|{item}|{cost}|10"
                     for item, (cost, kind) in sorted(self.BUILDABLE.items())]
-            return ["AVPROD|1", *rows, "---END---"]
+            for item, row in sorted(getattr(self, "productive_options", {}).items()):
+                extra = "|" + ";".join(row["placements"]) if row["kind"] == "district" else ""
+                rows.append(f"ITEMROW|{row['kind']}|{item}|54|10{extra}")
+            return ["AVPROD|1", *rows, "PRODUCTIVE_OPTIONS_END|1", "---END---"]
         # -- M14d acts (the translator's inert marker identifies the tool) --
         m = re.search(r"-- arena:tool=(\w+)", code)
         if m is not None:
             out = self._act(m.group(1), code)
             if out is not None:
-                self.act_log.append((m.group(1), out[0].split("|")[2]))
+                verdict = next(row for row in out if row.startswith("ACT|"))
+                self.act_log.append((m.group(1), verdict.split("|")[2]))
                 return out
         if "PUPPET_PLAYERS = {}" in code:
             # the injected mod source (D9): execution succeeds silently, and
@@ -440,7 +733,12 @@ class FakeMod:
                 f"SUPPORTS_FREEZE|{str(self.supports_freeze).lower()}",
                 f"SUPPORTS_LEDGER|{str(self.supports_ledger).lower()}",
                 "SUPPORTS_DIGEST|true",
+                "SUPPORTS_GUARDED_HANDOFF|true",
+                "SUPPORTS_REWARD_RECEIPTS|true",
                 f"SUPPORTS_COMMAND_DIFF|{str(self.has_command_diff).lower()}",
+                f"SUPPORTS_AMBIENT_WINDOWS|"
+                f"{str(self.supports_ambient_windows).lower()}",
+                f"SUPPORTS_ROSTER|{str(self.supports_roster).lower()}",
             ]
         if "Puppeteer.Status" in code and not self.injected:
             return ["MOD_STATUS|unavailable"]
@@ -454,11 +752,65 @@ class FakeMod:
             if not enabled and self.lease and self.lease["player"] == pid:
                 self.lease = None
             return [f"PUPPET_SET|{pid}|{str(enabled).lower()}"]
+        m = re.search(r"Puppeteer\.GuardedHandoff\((\d+), (\d+), (\d+)\)", code)
+        if m:
+            pid, turn, nxt = (int(x) for x in m.groups())
+            prefix = f"HANDOFF|{pid}|{turn}|{nxt}|"
+            key = (pid, turn, nxt)
+            if key in self._handoff_receipts:
+                return [prefix + "duplicate|already_sent", "---END---"]
+            if self.lease != {"player": pid, "turn": turn}:
+                return [prefix + "rejected|wrong_lease", "---END---"]
+            if self.local_player != pid or self.turn != turn:
+                return [prefix + "rejected|wrong_local_or_turn", "---END---"]
+            if nxt == pid or not self.puppets.get(nxt) or nxt not in self.players:
+                return [prefix + "rejected|invalid_next", "---END---"]
+            for unit in self.units.values():
+                if unit["owner"] == pid:
+                    unit["moves"] = 0
+            self._switch_local_player(nxt)
+            # Keep the rolling mark: all actual outgoing drift is still audited.
+            if self.mark is not None:
+                self.ledger_rows.extend(self._diff(pid, self.mark))
+            self.lease = None
+            self.mark = None
+            self._diff_cache = None
+            self.turn_active = False
+            if self.hotseat and pid in self.hotseat:
+                self._hotseat_next(pid)
+            self._handoff_receipts.add(key)
+            return [prefix + "accepted|frozen_then_switched", "---END---"]
+        m = re.search(r"-- arena:human_handoff=(activate|reflag|verify|end),"
+                      r"(\d+),(\d+),([0-9a-f]{32})", code)
+        if m:
+            operation, pid, turn, token = m.groups()
+            pid, turn = int(pid), int(turn)
+            roster = re.search(r"local seats=\{([0-9,]+)\}", code)
+            seats = [int(p) for p in roster.group(1).split(',')] if roster else []
+            if self.turn != turn or self.lease != {'player': pid, 'turn': turn}:
+                return ['HUMAN_HANDOFF_REJECTED|wrong_turn_or_lease']
+            if operation in {'activate', 'verify', 'end'} and not all(
+                    self.humans.get(p) is True for p in seats):
+                return ['HUMAN_HANDOFF_REJECTED|nonhuman_seat']
+            if operation == 'activate':
+                if self.local_player != pid:
+                    outgoing = self.local_player
+                    self._switch_local_player(pid)
+                    self.humans[outgoing] = False
+            elif self.local_player != pid:
+                return ['HUMAN_HANDOFF_REJECTED|wrong_local']
+            if operation == 'reflag':
+                for p in seats:
+                    if p != pid:
+                        self.humans[p] = True
+            elif operation == 'end':
+                self.respond('UI.RequestAction(ActionTypes.ACTION_ENDTURN)')
+            return [f'HUMAN_HANDOFF|{token}|{operation}|{pid}|{turn}|observed']
         m = re.search(r"SetLocalPlayerAndObserver\(\s*(\d+)\s*\)", code)
         if m:
             # A2: the driver's lease-engagement local-player switch — the
             # fake answers with the read-back the driver's Lua prints.
-            self.local_player = int(m.group(1))
+            self._switch_local_player(int(m.group(1)))
             return [f"LOCAL_SWITCHED|{self.local_player}|{self.local_player}",
                     "---END---"]
         if "SetWantsPause(false)" in code:
@@ -471,19 +823,21 @@ class FakeMod:
             # B2: the in-progress production hash (0 = nothing). The fake
             # maps a non-empty queue to a non-zero hash so housekeeping
             # skips cities with a build in progress.
-            cid = int(m.group(1)) % 65536
+            cid = int(m.group(1))
             c = self.cities.get(cid)
             if c is None or c["owner"] != self.local_player:
                 return ["CURPROD|-1", "---END---"]
-            h = 4242 if c.get("queue") else 0
+            h = self._production_hash(c["queue"]) if c.get("queue") else 0
             return [f"CURPROD|{h}", "---END---"]
         if "Puppeteer.Status" in code:
             if not self.has_status:
                 return ["MOD_STATUS|unavailable"]
+            self._spectate_poll_tick("status")
             return self._status_rows()
         if "Puppeteer.Digest" in code:
             if not self.has_digest:
                 return ["MOD_DIGEST|unavailable"]
+            self._spectate_poll_tick("digest")
             return [self._digest()]
         if "NotificationManager.GetList" in code:
             if self.pending_blockers:
@@ -502,7 +856,21 @@ class FakeMod:
         if "Puppeteer.Trace" in code:
             # the mod v0.3.1 hook ring (minimal model: the turn-start /
             # lease / deactivate events the driver's targeting reads)
+            self._spectate_poll_tick("trace")
             return ["\n".join(self.trace)] if self.trace else ["---END---"]
+        match = re.search(r"Puppeteer.BeginRewardCommand\(\d+, \d+, \d+, '([0-9a-f]{64})'", code)
+        if match:
+            return [f"REWARD_BEGIN|{match[1]}|accepted"]
+        match = re.search(r"Puppeteer.CancelRewardCommand\('([0-9a-f]{64})'\)", code)
+        if match:
+            return [f"REWARD_CANCEL|{match[1]}"]
+        match = re.search(
+            r"Puppeteer.FinishRewardCommand\('([0-9a-f]{64})', '([^']*)', (\d+)\)", code)
+        if match:
+            nonce, attrs, seq = match.groups()
+            rows = self.respond(f"Puppeteer.DiffSinceLast('{attrs}', {seq})")
+            return [f"REWARD_FINISH|{nonce}|{seq}",
+                    f"REWARD_OBSERVATION|{nonce}|0|0|0|no_matching_event", *rows]
         if "Puppeteer.DiffSinceLast" in code:
             if not self.has_command_diff:
                 return ["MOD_DIFF|unavailable"]
@@ -553,24 +921,28 @@ class FakeMod:
                 self._diff_cache = None
             return ["PUPPET_ACTIVE|false"]
         if "Puppeteer.FreezeUnit" in code:
-            m = re.search(r"Puppeteer\.FreezeUnit\(\s*(\d+)\s*\)", code)
-            if m:
+            m = re.search(r"Puppeteer\.FreezeUnit\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
+            if m and self.lease and self.lease["player"] == int(m.group(2)):
                 u = self.units.get(int(m.group(1)))
                 if u is not None:
                     u["moves"] = 0
             return []  # silent, like the mod (it prints FROZEN| live)
         if "Puppeteer.RestoreUnit" in code:
-            m = re.search(r"Puppeteer\.RestoreUnit\(\s*(\d+)\s*\)", code)
-            if m and self.lease is not None:
-                uid = int(m.group(1))
-                # once per unit per lease (Codex P1-1): the SECOND restore
-                # for the same unit in one lease is a no-op
-                if uid not in self._restored:
-                    u = self.units.get(uid)
-                    if u is not None:
-                        u["moves"] = 2
+            m = re.search(r"Puppeteer\.RestoreUnit\(\s*(\d+)\s*,\s*(\d+)\s*\)", code)
+            if m is None:
+                return []
+            uid, owner = int(m.group(1)), int(m.group(2))
+            status = "wrong_lease"
+            if self.lease is not None and self.lease["player"] == owner:
+                if uid in self._restored:
+                    status = "already_restored"
+                elif uid not in self.units or self.units[uid]["owner"] != owner:
+                    status = "unknown_entity"
+                else:
+                    self.units[uid]["moves"] = 2
                     self._restored.add(uid)
-            return []  # silent, like the mod
+                    status = "restored"
+            return [f"RESTORE_UNIT|{owner}|{uid}|{status}"]
         m = re.search(r"Puppeteer\.FinishAllMoves\(\s*(\d+)\s*\)", code)
         if m:
             # D7-H2 rehearsal, now the M18 hotseat pre-end path too:
@@ -612,18 +984,53 @@ class FakeMod:
             return ["PUPPET_ACTIVE|false", "ENDTURN_SENT|0"]
         m = re.search(r"Puppeteer\.BeginAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
-            return [f"AMBIENT_WINDOW|open|{m.group(1)}"]
+            pid = int(m.group(1))
+            rebase = pid in self._ambient_windows
+            if self.ambient_diffs:
+                # real window semantics: snapshot now, diff at End (per
+                # player — v0.4.0 mod parity; a double-Begin rebases)
+                self._ambient_windows[pid] = self._snapshot(pid)
+            return [f"AMBIENT_WINDOW|{'rebase' if rebase else 'open'}|{pid}"]
         m = re.search(r"Puppeteer\.EndAmbientWindow\(\s*(\d+)\s*\)", code)
         if m:
-            # engine effects land inside the window (auto_ambient fixture):
-            # the window diff books them as DECLARED ambient rows
-            if self.auto_ambient is not None:
+            pid = int(m.group(1))
+            snap = self._ambient_windows.pop(pid, None) \
+                if self.ambient_diffs else None
+            if snap is not None:
+                # same parity as the mod: window diffs are AMBIENT rows
+                # (7-field LEDGER shape with the AMBIENT prefix)
+                for row in self._diff(pid, snap):
+                    self.ambient_rows.append(
+                        "AMBIENT|" + row.split("|", 1)[1])
+            elif self.auto_ambient is not None:
+                # engine effects land inside the window (auto_ambient
+                # fixture): the window diff books them as DECLARED rows
                 kind, etype, num, attr, before, after = self.auto_ambient
                 prefix = "c" if etype == "city" else "u"
                 self.ambient_rows.append(
-                    f"AMBIENT|{kind}|{etype}|{prefix}{num}"
+                    f"AMBIENT|{kind}|{etype}|{prefix}{m.group(1)}:{num}"
                     f"|{attr}|{before}|{after}")
-            return [f"AMBIENT_WINDOW|closed|{m.group(1)}"]
+            # v0.4.0 mod parity: End-without-Begin is an honest stale
+            # receipt with NO fabricated diff (the auto_ambient fixture
+            # shape stays "closed" — it never tracked a window)
+            receipt = ("closed_stale" if self.ambient_diffs and snap is None
+                       else "closed")
+            return [f"AMBIENT_WINDOW|{receipt}|{pid}"]
+        if "Puppeteer.Roster" in code:
+            # v0.4.0: ALL players with classes — the discovery truth every
+            # other read (OVX) cannot provide (alive-majors-only there).
+            # Codex r1 finding 7: ONE classification source — the
+            # spectate knob AND M4's minors flag both feed it, so a
+            # FakeMod(minors=True) roster agrees with its SPECW roster
+            # (discovery must not report a city-state as an
+            # unconfigured major).
+            minors = set(self.spectate.get("minor_seats", [])) \
+                if self.spectate else set()
+            minors |= self.minors
+            rows = [f"ROSTER|{pid}|"
+                    f"{'minor' if pid in minors else 'major'}"
+                    for pid in sorted(self.players)]
+            return rows or ["ROSTER|none"]
 
         # -- Simulate.*: FAKE-ONLY (the live driver must never send these) --
         m = re.search(r"Simulate\.TurnStart\(\s*(\d+)\s*\)", code)

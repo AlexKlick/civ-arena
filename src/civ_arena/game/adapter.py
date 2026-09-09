@@ -31,6 +31,7 @@ class ObserveRequest:
     kind: ObserveKind
     player_id: int  # supplied by PlayerSession (bound) or Referee (referee scope)
     subject_id: str | None = None  # city_id for AVAILABLE_PRODUCTION
+    research_building_briefing: bool = False  # controller-owned optional research metadata
 
 
 @dataclass(frozen=True)

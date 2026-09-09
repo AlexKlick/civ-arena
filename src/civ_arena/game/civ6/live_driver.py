@@ -22,13 +22,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
+import signal
+import subprocess
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from civ_arena.agents.runtime import AgentProfile, build_runtime
+from civ_arena.agents.runtime import AgentProfile, build_runtime, strategy_audit_event
 from civ_arena.arena.diary import DiaryStore
 from civ_arena.arena.events import EventLog
 from civ_arena.arena.referee import MatchAborted, Referee, RefereeConfig
@@ -36,13 +40,79 @@ from civ_arena.arena.telemetry import TelemetryRegistry
 from civ_arena.arena.visibility import VisibilityPolicy
 from civ_arena.config import AgentSpec, MatchSpec, load_config
 from civ_arena.game.adapter import ActionCommand, ObserveKind, ObserveRequest
-from civ_arena.game.civ6 import lua_translator, response_parser
+from civ_arena.game.civ6 import lua_translator, response_parser, ui_control, world_capture
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
+from civ_arena.game.civ6.spectate_capture import (
+    SpectateLimits,
+    SpectateTransport,
+    SpectatorCensus,
+    TurnWatch,
+)
+from civ_arena.game.civ6.spectator import PopupMonitor
 from civ_arena.game.civ6.vendor.connection import GameConnection
 from civ_arena.session.player_session import PlayerSession
 from civ_arena.session.tools import SessionCtx
 from civ_arena.strategy.store import StrategyStore
+
+
+def _provider_request_audit(driver: LiveDriver) -> Any:
+    """The (event, **payload)-shaped audit closure the client sinks call —
+    same HEARTBEAT shape as the hotseat closure. Kept module-level so the
+    single-seat call site and tests share the exact production callable
+    (F-04: the previous direct lambda passed _strategic_audit's one-dict
+    signature where (tag, **fields) was invoked)."""
+    def audit(event: str, **payload: Any) -> None:
+        driver._write("HEARTBEAT", turn=0, audit=event, **payload)  # noqa: SLF001
+    return audit
+
+
+def _wire_client_sinks(client: Any, agent: AgentSpec, audit: Any,
+                       run_dir: Path) -> None:
+    """Attach the run-dir ledgers to a model client: durable spend
+    (spend.jsonl parity with the sim coordinator), the always-on
+    per-attempt cost ledger, the opt-in wire transcript, and the existing
+    provider_request audit — composed instead of clobbering whichever
+    callback happened to be set last.
+
+    CAP-03: a ledger write failure must NEVER fail or retransmit the
+    provider request — the fault is audited (ledger_write_failed, once per
+    sink) and the accounting gap stays visible; the request completes."""
+    if client is None or not hasattr(client, "on_post"):
+        return
+    from civ_arena.agents.llm.wire_log import CostLedger, WireLog
+    from civ_arena.arena.spend import SpendLedger
+
+    spend = SpendLedger(run_dir / "spend.jsonl")
+    costs = CostLedger(run_dir)
+    wire = None
+    if agent.llm is not None and agent.llm.wire_log:
+        wire = WireLog(run_dir, agent.agent_id, agent.player_id, agent.llm)
+    sink_failed: set[str] = set()
+
+    def _guarded(sink: str, write) -> None:
+        if sink in sink_failed:
+            return
+        try:
+            write()
+        except Exception:  # noqa: BLE001 — isolation is the contract
+            sink_failed.add(sink)
+            with contextlib.suppress(Exception):  # the audit is best-effort
+                audit("ledger_write_failed", agent=agent.agent_id, sink=sink)
+
+    def on_post(client=client, aid=agent.agent_id) -> None:
+        _guarded("spend", lambda: spend.note(aid, agent.player_id))
+        audit("provider_request", agent=aid, posts_sent=client.posts_sent)
+
+    client.on_post = on_post
+
+    def on_attempt(record: dict[str, Any]) -> None:
+        _guarded("costs",
+                 lambda: costs.note(agent.agent_id, agent.player_id, record))
+        if wire is not None:
+            _guarded("wire", lambda: wire.note(record))
+
+    client.on_attempt = on_attempt
 
 
 class TapConnection(GameConnection):
@@ -111,6 +181,11 @@ class LiveDriver:
                 "flag_and_continue (docs/design-notes.md: live Civ cannot "
                 "roll back)")
         self.log = EventLog(run_dir / "events.jsonl")
+        self._ended = False
+        # CAP-02 (F-06): frozen once at capture time; the summary reports
+        # it as launch_identity with the closeout identity SEPARATELY — a
+        # later commit must never rewrite what launched the run.
+        self.launch_identity: dict[str, Any] | None = None
         self.telemetry = TelemetryRegistry()
         self.referee = Referee(
             adapter, VisibilityPolicy(), self.log, self.telemetry,
@@ -134,6 +209,12 @@ class LiveDriver:
             agent_id=agent_id, visibility_scope=visibility_scope, **payload,
         )
 
+    def cached_hash(self):
+        try:
+            return self.adapter.state_hash()
+        except RuntimeError:
+            return None
+
     async def match_start(self) -> None:
         self._write(
             "MATCH_START", turn=0,
@@ -144,8 +225,17 @@ class LiveDriver:
                 "watchdog_mode": self.spec.watchdog_mode,
                 "adapter": self.spec.adapter,
             },
-            initial_state_hash=self.adapter.state_hash(),
+            initial_state_hash=self.cached_hash(),
         )
+
+    def capture_launch_identity(self, mod_lua: str) -> dict[str, Any]:
+        """Freeze the launch identity ONCE (CAP-02 / F-06). The
+        run_identity audit event records it immutably at attach; the
+        summary carries it as launch_identity, with the repo state at
+        match_end recorded separately as closeout_identity."""
+        if self.launch_identity is None:
+            self.launch_identity = implementation_identity(self.spec, mod_lua)
+        return self.launch_identity
 
     async def match_end(self, final_turn: int, extra: dict[str, Any]) -> None:
         # Arena.run envelope parity (Codex P2-6): replay reads
@@ -153,21 +243,51 @@ class LiveDriver:
         # carry the same keys (scores stay empty until the sim-shaped
         # observe surface lands in M14c; live matches are not corpus
         # members, so projection tolerates the empty civ table).
+        if self._ended:
+            raise RuntimeError("MATCH_END already recorded")
+        extra = dict(extra)
+        # CAP-02 (F-06): a phase's end-of-run `identity` becomes the
+        # closeout identity. The FROZEN launch identity is reported
+        # separately; the legacy `identity` key aliases launch (falling
+        # back to closeout when no capture happened) so existing
+        # consumers keep working unchanged.
+        closeout_identity = extra.pop("identity", None)
         summary = {
             "match_id": self.spec.match_id,
             "game_instance_id": self.game_instance_id,
             "final_turn": final_turn,
             "aborted": None,
             "violations_total": self.referee.violation_count(),
-            "final_state_hash": self.adapter.state_hash(),
+            "final_state_hash": self.cached_hash(),
             "telemetry": self.telemetry.snapshot(),
             "scores": {},
+            "launch_identity": self.launch_identity,
+            "closeout_identity": closeout_identity,
+            "identity": (self.launch_identity if self.launch_identity is not None
+                         else closeout_identity),
             **extra,
         }
         self._write("MATCH_END", turn=final_turn, summary=summary)
+        self._ended = True
         (self.run_dir / "summary.json").write_text(
             json.dumps(summary, sort_keys=True))
         self.log.close()
+        # CAP-02: completed-manifest trust root — expected per-kind counts
+        # + byte length + digest over the sealed records, retained for
+        # tamper detection. Proves properties of the SUPPLIED records
+        # only; it is NOT proof that the engine emitted nothing we failed
+        # to observe. Absent manifest (older runs) simply validates
+        # without this check.
+        try:
+            from civ_arena.spectate_audit import build_manifest
+            raw = (self.run_dir / "events.jsonl").read_bytes()
+            records = [json.loads(line) for line in
+                       raw.decode("utf-8").splitlines() if line.strip()]
+            (self.run_dir / "manifest.json").write_text(json.dumps(
+                build_manifest(records, raw), sort_keys=True))
+        except (OSError, ValueError) as exc:
+            print(f"manifest write skipped (validators will run without "
+                  f"it): {type(exc).__name__}", flush=True)
 
 
 MOD_DEFAULT = (Path(__file__).resolve().parents[4] / "mods" / "PuppeteerMod"
@@ -270,9 +390,19 @@ async def phase_dispatch(
     run_dir.mkdir(parents=True, exist_ok=True)
     agent = spec.agents[0]
     profile = _agent_profile(agent)
-    runtime = build_runtime(profile)
     driver = LiveDriver(spec, adapter, run_dir,
                         f"{spec.match_id}-i{os.getpid()}")
+    runtime = build_runtime(profile, match_id=spec.match_id,
+                            audit=lambda payload: _strategic_audit(driver, payload),
+                            opening_units_frozen=adapter._simulate is None)
+    # the sinks call audit(event, **payload) — the (tag, **fields) shape the
+    # hotseat closure uses. _strategic_audit takes ONE payload dict; passing
+    # it here meant the first provider POST raised TypeError (Exchange-2
+    # finding F-04). The provider-request audit is a driver HEARTBEAT, not a
+    # strategy audit.
+    _wire_client_sinks(getattr(runtime, "client", None), agent,
+                       _provider_request_audit(driver),
+                       run_dir)
     session = PlayerSession(driver.referee, agent.player_id, agent.agent_id)
     # Arena-owned services reach the runtime exactly as the coordinator
     # wires them (LLM runtimes read diary/strategy at turn start; without
@@ -365,7 +495,9 @@ async def phase_dispatch(
                 await driver.referee.begin_turn(
                     agent.player_id, agent.agent_id, turn)
             digest_open = await adapter.refresh_digest()
-            await _resolve_blockers(adapter, agent.player_id, turn)
+            await _resolve_blockers(
+                adapter, agent.player_id, turn,
+                defer_economy=agent.decision_mode == "strategic_autopilot")
             # Housekeeping mutations are DRIVER-commanded, not
             # agent-commanded — they must not read as uncommanded drift in
             # the session's watchdog window. The civic/policy resolutions
@@ -460,6 +592,12 @@ _BUILD_PREFERENCE = ["MONUMENT", "WALLS", "WARRIOR", "GRANARY", "SETTLER",
                      "SCOUT", "SLINGER", "BARRACKS"]
 
 
+def _strategic_audit(driver: LiveDriver, payload: dict) -> None:
+    doc = strategy_audit_event(payload)
+    doc.pop("match_id")  # LiveDriver binds its own match identity.
+    driver._write("HEARTBEAT", **doc)
+
+
 def _agent_profile(agent: AgentSpec) -> AgentProfile:
     """The ONE AgentSpec -> AgentProfile mapping for every live dispatch
     path (M14d single-seat and M18 hotseat). Both paths MUST go through
@@ -471,230 +609,931 @@ def _agent_profile(agent: AgentSpec) -> AgentProfile:
         agent_id=agent.agent_id, player_id=agent.player_id,
         policy=agent.policy, seed=agent.seed, model=agent.model,
         llm=agent.llm, proposer=agent.proposer,
-        case_base=agent.case_base)
+        case_base=agent.case_base, decision_mode=agent.decision_mode,
+        growth_autopilot=agent.growth_autopilot)
+
+
+@dataclass(frozen=True)
+class HotseatLimits:
+    startup: float = 2700
+    match: float = 7200
+    agent_turn: float = 600
+    recovery: float = 180
+    sweeps: int = 8
+    cleanup: float = 20
+    # M4: budget for one spectator_world capture (baseline + one per
+    # completed seat turn); additive — __post_init__ covers it.
+    spectator: float = 20.0
+
+    def __post_init__(self):
+        if any(v <= 0 for v in asdict(self).values()):
+            raise ValueError("hotseat limits must be positive")
+
+
+class RecoveryEpisode:
+    """One budget spans release and engagement; only engagement resets it."""
+    def __init__(self, limits: HotseatLimits, controller, audit, run_dir: Path,
+                 popup_check=None):
+        self.limits, self.controller, self.audit = limits, controller, audit
+        self.run_dir = run_dir
+        self.started = None
+        self.attempts = 0
+        self.total_attempts = 0
+        self.next_sweep = 0.0
+        self.popup_check = popup_check
+
+    def start(self):
+        if self.started is None:
+            self.started = time.monotonic()
+            self.next_sweep = self.started + 15
+
+    def remaining(self):
+        self.start()
+        remaining = self.limits.recovery - (time.monotonic() - self.started)
+        if remaining <= 0:
+            raise TimeoutError("recovery episode deadline expired")
+        return remaining
+
+    def engaged(self):
+        self.audit("engaged", attempts=self.attempts,
+                   elapsed_s=0 if self.started is None else time.monotonic() - self.started)
+        self.started = None
+        self.attempts = 0
+
+    async def sweep(self, probe, *, keys=("Return", "Escape", "Escape")):
+        self.remaining()
+        if self.attempts >= self.limits.sweeps:
+            raise RuntimeError("recovery exhausted: sweep limit")
+        self.attempts += 1
+        self.total_attempts += 1
+        self.audit("recovery_sweep", attempt=self.attempts)
+        async with asyncio.timeout(self.remaining()):
+            if await probe():
+                return True
+            if self.popup_check is not None and await self.popup_check():
+                # The semantic handler belongs to this sweep's same budget.
+                # Do not also send blind keys into a newly advanced UI queue.
+                progress = await probe()
+                self.next_sweep = time.monotonic() + 5
+                return progress
+            for index, key in enumerate((*keys, None)):
+                if await probe():
+                    return True
+                result = await self.controller.action(
+                    key=key, banner=key is None, timeout=min(15, self.remaining()),
+                    evidence=self.run_dir / "recovery" /
+                    f"sweep-{self.total_attempts}-action-{index}.png")
+                self.audit("recovery_input", attempt=self.attempts, key=key,
+                           outcome=asdict(result))
+                # A sent helper is not a successful recovery. Re-poll after
+                # EVERY action and stop inputs at the first observed progress.
+                if await probe():
+                    return True
+                if result.status == "failed":
+                    raise RuntimeError(f"recovery helper failed: {result.diagnostic}")
+        self.next_sweep = time.monotonic() + 5
+        return False
+
+
+class CompletedTurns:
+    def __init__(self, order):
+        self.order = sorted(order)
+        if len(self.order) != 2 or len(set(self.order)) != 2:
+            raise ValueError("hotseat requires two distinct seats")
+        self.rows = []
+        self.first_turn = None
+
+    def expected(self):
+        index = len(self.rows)
+        return (None if self.first_turn is None else self.first_turn + index // 2,
+                self.order[index % 2])
+
+    def check(self, turn, player):
+        expected_turn, expected_player = self.expected()
+        if player != expected_player or (expected_turn is not None and turn != expected_turn):
+            raise RuntimeError(f"out-of-order seat turn {(turn, player)}; "
+                               f"expected {(expected_turn, expected_player)}")
+
+    def append(self, row, lease):
+        self.check(row["turn"], row["player"])
+        if not lease.released:
+            raise RuntimeError("agent returned with an open lease")
+        if self.first_turn is None:
+            self.first_turn = row["turn"]
+        self.rows.append(row)
+
+    @property
+    def rounds(self):
+        return len(self.rows) // 2
+
+
+def implementation_identity(spec, mod_lua):
+    repo = Path(__file__).resolve().parents[4]
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True,
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+    return {"commit": git("rev-parse", "HEAD"),
+            "tree": git("rev-parse", "HEAD^{tree}"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+            "config": asdict(spec),
+            "mod_sha256": hashlib.sha256(mod_lua.encode()).hexdigest()}
+
+
+async def _attach_initial_hotseat_turn(adapter, player: int, audit) -> None:
+    """Acquire an already-active fresh turn once; never skip the first seat.
+
+    Fake games acquire leases through their simulated engine hooks. Live
+    attachment requires the mod's guarded operation and an observed lease.
+    """
+    if adapter._simulate is not None:
+        return
+    async with asyncio.timeout(12):
+        before = await adapter.poll_status()
+        if before.get("PUPPET_ACTIVE") is True or before.get("TURN_ACTIVE") is not True:
+            return
+        turn = before.get("TURN")
+        if type(turn) is not int or turn != 1:
+            raise RuntimeError("initial hotseat attachment requires fresh engine turn 1")
+        conn = adapter._conn
+        async with conn._lock:
+            state = conn.gamecore_index
+            if (not conn.is_connected or state is None
+                    or conn.lua_states.get(state) != "GameCore_Tuner"):
+                raise RuntimeError("initial hotseat attachment has no GameCore connection")
+            # Bypass reconnect/retry: a lost response must not repeat mutation.
+            lines = await conn._locked_execute(
+                state, lua_translator.attach_current_turn(player, turn), 8.0)
+        receipts = [line.strip() for block in lines for line in block.splitlines()
+                    if line.strip().startswith("ATTACH_CURRENT|")]
+        audit("initial_turn_attach", player=player, expected_turn=turn,
+              receipts=[ui_control.redact(row) for row in receipts])
+        if len(receipts) != 1:
+            raise RuntimeError("initial hotseat attachment receipt missing or duplicated")
+        parts = receipts[0].split("|")
+        if (len(parts) != 5 or parts[1] not in ("accepted", "duplicate")
+                or parts[2:4] != [str(player), str(turn)]):
+            raise RuntimeError(
+                f"initial hotseat attachment refused: {ui_control.redact(receipts[0])}")
+        after = await adapter.poll_status()
+        audit("initial_turn_attach_observed", status=after)
+        if (after.get("PUPPET_ACTIVE") is not True
+                or after.get("LEASE_PLAYER") != player
+                or after.get("LEASE_TURN") != turn
+                or after.get("TURN") != turn):
+            raise RuntimeError("initial hotseat attachment did not establish the expected lease")
 
 
 async def phase_dispatch_hotseat(
     spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
-    rounds: int, strategy: str, mod_lua: str,
+    rounds: int, strategy: str, mod_lua: str, *,
+    limits: HotseatLimits | None = None, controller=None, pace_llm_turns: bool = True,
 ) -> int:
-    """M18: the hotseat 1v1 — EVERY seat is driven, the engine's own AI is
-    out of the game (the class of engine hangs that ends long games dies
-    with it). The engine hands the turn between human seats; the loop
-    routes each turn to the agent whose lease engaged (LEASE_PLAYER). One
-    round = every driven seat played once; ``rounds`` bounds the match."""
-    events = run_dir / "events.jsonl"
-    _refuse_rerun(events)
+    """Drive and account for two ordered, completed seats per engine turn."""
+    _refuse_rerun(run_dir / "events.jsonl")
     run_dir.mkdir(parents=True, exist_ok=True)
-    driver = LiveDriver(spec, adapter, run_dir,
-                        f"{spec.match_id}-i{os.getpid()}")
-    seats: dict[int, dict[str, Any]] = {}
-    for agent in spec.agents:
-        profile = _agent_profile(agent)
-        runtime = build_runtime(profile)
-        bind = getattr(runtime, "bind_services", None)
-        if bind is not None:
-            from civ_arena.planner.journal import PlannerJournal
+    driver = LiveDriver(spec, adapter, run_dir, f"{spec.match_id}-i{os.getpid()}")
+    limits = limits or HotseatLimits()
+    controller = controller or (ui_control.FakeController() if adapter._simulate is not None
+                                else ui_control.Controller())
+    seats = {}
+    ledger = CompletedTurns([a.player_id for a in spec.agents])
+    lease = None
+    status = None
+    failure = None
+    stage = "startup"
+    began = time.monotonic()
+    identity = None
+    cleanup = {"status": "unavailable"}
 
-            journal = (PlannerJournal(run_dir / "planner"
-                                      / f"p{agent.player_id}-journal.jsonl")
-                       if agent.policy == "planner" else None)
-            if journal is not None:
-                bind(diary=driver.referee.diary,
-                     strategy=driver.referee.strategy, journal=journal)
-            else:
-                bind(diary=driver.referee.diary,
-                     strategy=driver.referee.strategy)
-        seats[agent.player_id] = {
-            "agent": agent, "runtime": runtime,
-            "session": PlayerSession(driver.referee, agent.player_id,
-                                     agent.agent_id),
-        }
-    await adapter.setup({})
-    await adapter.inject_mod(mod_lua)
-    # ARM A PUPPET PER DRIVEN SEAT: each hotseat hand-off fires the next
-    # player's hook — every seat must be puppeted or its turn is skipped
-    for pid in seats:
-        await adapter.read_raw(lua_translator.set_puppet(pid, True))
-    # seed the digest BEFORE match_start (its state_hash needs one): on a
-    # freshly-attached game the mod is injected only just now, so setup()'s
-    # own seeding no-opped — the runner's smoke step used to hide this by
-    # injecting first (salvage-path dispatch exposed it, 2026-09-03)
-    await adapter.refresh_digest()
-    await driver.match_start()
-    per_turn: list[dict[str, Any]] = []
-    driven_rounds = 0
-    seat_pid: int = -1
-    between_wait_s = 0.0
-    try:
-        while driven_rounds < rounds:
-            status = await adapter.poll_status()
-            seat_pid = status.get("LEASE_PLAYER", -1)
-            if seat_pid not in seats:
-                if per_turn:
-                    # engine processing between seats (or pre-first-hook).
-                    # Live-proven 2026-09-03 (llm-minimax2-003): a seat's
-                    # turn-close popup (Ur production choice at the t3
-                    # hand-off) holds the rollover open indefinitely —
-                    # after ~15s of no-seat processing, sweep the modal
-                    # keys; the engine then rolls and the next hook fires.
-                    if between_wait_s >= 15.0:
-                        await _dismiss_popups(
-                            int(status.get("TURN", 0)),
-                            ("Return", "Escape", "Escape"))
-                        between_wait_s = 0.0
-                    await asyncio.sleep(1.0)
-                    between_wait_s += 1.0
-                    continue
-                # COLD START: no seat has engaged yet. The lease only
-                # appears once a begin_phase fires the seat's hook
-                # (rehearsal) or the engine starts the turn naturally
-                # (live) — waiting for LEASE_PLAYER would deadlock. Target
-                # the first seat's next turn exactly as the single-seat
-                # dispatch does.
-                seat_pid = min(seats)
-                turn = _target_turn(
-                    status, seat_pid, -1,
-                    _last_deact_turn(await adapter.read_trace()))
-            else:
-                turn = int(status.get("LEASE_TURN", status.get("TURN", 0)))
-            between_wait_s = 0.0
-            seat = seats[seat_pid]
-            agent = seat["agent"]
-            adapter.expect_turn(turn)
-            # A3-smoke live lesson (2026-09-03): grant the lease only
-            # AFTER begin_turn engages — a begin that times out and
-            # recovers into the other seat's slice must not leave a
-            # dangling LEASE_GRANT in the trust root.
-            try:
-                await driver.referee.begin_turn(
-                    agent.player_id, agent.agent_id, turn)
-            except RuntimeError as e:
-                if "cannot begin turn" in str(e):
-                    # the engine has not closed the PREVIOUS seat's phase
-                    # yet (a turn-close popup held the t3 hand-off open,
-                    # live 2026-09-03) — sweep the modals and re-target
-                    # from a fresh poll
-                    await _dismiss_popups(
-                        turn, ("Return", "Escape", "Escape"))
-                    await asyncio.sleep(5)
-                    continue
-                if "lease to engage" not in str(e):
-                    raise
-                await _recover_stall(adapter, agent.player_id, turn,
-                                     keys=("Return", "Escape", "Escape"))
-                # HOTSEAT: the recovery's ended parked turn hands the
-                # NEXT slice to the OTHER seat (proven live: p0@2 timed
-                # out while the engine sat in p1's turn-1 slice with the
-                # mod's lease engaged for p1) — retrying our own
-                # (seat, turn) deadlocks. Re-poll: if another seat's
-                # lease engaged, let the loop drive it; retry inline
-                # only when OUR seat engaged (the SP shape).
-                status = await adapter.poll_status()
-                engaged = status.get("LEASE_PLAYER", -1)
-                if engaged in seats and engaged != agent.player_id:
-                    continue
-                adapter.expect_turn(turn)
-                await driver.referee.begin_turn(
-                    agent.player_id, agent.agent_id, turn)
-            lease = driver.referee.grant_lease(
-                agent.player_id, agent.agent_id, turn)
-            # A2 (live-proven A1): on the NONE-load path the engine waits
-            # on a re-flagged human seat WITHOUT making it local — switch
-            # the local player to the lease-holder so every
-            # GetLocalPlayer()-bound act builder and the InGame ENDTURN
-            # act as the driven seat. Codex r1 P2-10: the read-back is
-            # GATED — a missing or ineffective switch must fail loudly,
-            # not send acts through the wrong seat. The un-pause is
-            # stall-path insurance (idempotent).
-            sw = await adapter.read_raw(
-                lua_translator.switch_local_player(agent.player_id))
-            want = f"LOCAL_SWITCHED|{agent.player_id}|{agent.player_id}"
-            if not any(ln.strip() == want for ln in sw):
-                raise RuntimeError(
-                    f"local-player switch to p{agent.player_id} did not "
-                    f"take: {sw!r} — refusing to act as the wrong seat")
-            await adapter.read_raw(lua_translator.unpause_local())
-            digest_open = await adapter.refresh_digest()
-            await _resolve_blockers(adapter, agent.player_id, turn)
-            housekept = adapter.drain_mutations()
-            driver.referee._ls.acknowledged.extend(housekept)  # noqa: SLF001
-            allowed_open = len(driver.referee._ls.allowed)  # noqa: SLF001
-            begin_hook = getattr(seat["runtime"], "begin_turn", None)
-            if begin_hook is not None:
-                begin_hook(turn)
-            # M18 both-seats (live-proven 2026-09-03): end this seat's
-            # turn with local ALREADY switched to the NEXT seat in order —
-            # a local seat's slice only holds when local is that seat at
-            # the boundary (p0 auto-passed turns 2-3 with local=p1).
-            order = sorted(seats)
-            nxt = order[(order.index(seat_pid) + 1) % len(order)]
-            adapter.set_pre_end_switch(nxt)
-            try:
-                await seat["session"].take_turn(lease, seat["runtime"])
-            finally:
-                adapter.set_pre_end_switch(None)
-            digest_close = adapter.state_hash()
-            allowed = driver.referee._ls.allowed[allowed_open:]  # noqa: SLF001
-            row = {
-                "turn": turn, "player": agent.player_id,
-                "agent": agent.agent_id,
-                "allowed_mutations": len(allowed),
-                "digest_changed": digest_open != digest_close,
-                "mutated": bool(allowed),
-                "violations": driver.referee.violation_count(),
-            }
-            row["unexpected"] = (row["digest_changed"]
-                                 and not (row["mutated"] or housekept))
-            per_turn.append(row)
-            print(f"hotseat turn {turn} p{agent.player_id} "
-                  f"({agent.agent_id}): allowed={row['allowed_mutations']} "
-                  f"digest_changed={row['digest_changed']} "
-                  f"violations={row['violations']}")
-            if seat_pid == max(seats):
-                driven_rounds += 1
-            if row["unexpected"] or row["violations"]:
-                print("ANOMALY — stopping (record dated in §6)")
-                break
-        final_turn = per_turn[-1]["turn"] if per_turn else 0
-        ok = bool(per_turn) and all(
-            not r["unexpected"] and r["violations"] == 0 for r in per_turn) \
-            and driven_rounds == rounds
-        await driver.match_end(final_turn, {
-            "phase": "dispatch-hotseat", "strategy": strategy,
-            "per_turn": per_turn, "clean": ok,
-        })
-        print(f"HOTSEAT {'CLEAN' if ok else 'ANOMALOUS'} "
-              f"({driven_rounds}/{rounds} rounds, "
-              f"{len(per_turn)} driven turns, "
-              f"violations={driver.referee.violation_count()})")
-        return 0 if ok else 1
-    except MatchAborted as exc:
-        # A2: the aborting agent id is recoverable from the last lease —
-        # match_end still writes so replay/labels can consume the record.
-        abort_agent = (seats.get(seat_pid, {}).get("agent", {}).agent_id
-                       if isinstance(seat_pid, int) and seats else None)
-        if abort_agent is not None:
-            await driver.referee.abort_cleanup(abort_agent)
-        await driver.match_end(per_turn[-1]["turn"] if per_turn else 0, {
-            "phase": "dispatch-hotseat", "strategy": strategy,
-            "per_turn": per_turn, "clean": False, "aborted": str(exc),
-        })
-        print(f"HOTSEAT ABORTED: {exc}")
-        return 2
-    finally:
+    def audit(event, **payload):
+        driver._write("HEARTBEAT", turn=int((status or {}).get("TURN", 0)),
+                      audit=event, **payload)
+
+    async def _spectator_capture(turn, after_seat):
+        """M4 §4a: one omniscient world audit through the EXISTING audit
+        machinery (NO new EVENT_KINDS) — a HEARTBEAT carrying
+        audit="spectator_world" with visibility_scope="spectator" so no
+        player-routed view can ever consume it. Every capture runs under
+        asyncio.timeout(limits.spectator) on the SAME connection (the
+        SPECW/OVX/CITIES reads go through adapter.read_raw/write_raw —
+        one GameConnection._lock, no second tuner client); ANY failure is
+        audited as spectator_world_failed with the message redacted and
+        the match continues — the audit must never kill the run."""
+        if not spec.spectator_capture:
+            return
         try:
-            if adapter._phase_open != -1:  # noqa: SLF001
-                await adapter.read_raw(lua_translator.release(
-                    adapter._phase_open, adapter._turn_mirror))  # noqa: SLF001
-        except Exception:
-            pass
+            async with asyncio.timeout(limits.spectator):
+                world = await world_capture.capture(
+                    adapter, turn=turn, after_seat=after_seat,
+                    include_palette=True)
+            world["fog_audit"] = adapter.fog_audit_for(
+                after_seat if after_seat >= 0 else 0)
+            driver._write(  # noqa: SLF001
+                "HEARTBEAT", turn=turn, phase_player_id=-1, player_id=None,
+                agent_id=None, visibility_scope="spectator",
+                audit="spectator_world", after_seat=after_seat, world=world)
+        except Exception as exc:  # noqa: BLE001 — audited, never fatal
+            driver._write(  # noqa: SLF001
+                "HEARTBEAT", turn=turn, phase_player_id=-1, player_id=None,
+                agent_id=None, visibility_scope="spectator",
+                audit="spectator_world_failed", after_seat=after_seat,
+                error=ui_control.redact(f"{type(exc).__name__}: {exc}"))
+
+    popups = PopupMonitor(adapter, controller, audit, timeout=limits.recovery,
+                         attempts=limits.sweeps)
+    recovery = RecoveryEpisode(limits, popups, audit, run_dir, popup_check=popups.check)
+
+    async def poll():
+        nonlocal status
+        status = await adapter.poll_status()
+        audit("engine_status", status=status)
+        return status
+
+    def start_handoff():
+        nonlocal stage
+        stage = "recovery"
+        recovery.start()
+        return recovery.remaining()
+
+    async def wait_release(player, turn):
+        nonlocal stage
+        stage = "recovery"
+        recovery.start()
+        async def released():
+            p = await poll()
+            return (p.get("PUPPET_ACTIVE") is False
+                    or (p.get("PUPPET_ACTIVE") is True and
+                        (p.get("LEASE_PLAYER"), p.get("LEASE_TURN")) != (player, turn)))
+        async with asyncio.timeout(recovery.remaining()):
+            await popups.quiesce()
+            while not await released():
+                if (time.monotonic() >= recovery.next_sweep
+                        and await recovery.sweep(released, keys=("Return", "Escape", "Escape"))):
+                    return
+                await asyncio.sleep(min(1, recovery.remaining()))
+
+    async def engage():
+        nonlocal status, stage
+        stage = "recovery"
+        recovery.start()
+        async def probe():
+            await poll()
+            pid = status.get("LEASE_PLAYER", -1)
+            if status.get("PUPPET_ACTIVE") is True and pid in seats:
+                turn = int(status["LEASE_TURN"])
+                # The last seat's pending release is a stall, never another
+                # completed seat. Any other wrong identity is an anomaly.
+                if ledger.rows and (turn, pid) == (ledger.rows[-1]["turn"],
+                                                   ledger.rows[-1]["player"]):
+                    return None
+                ledger.check(turn, pid)
+            elif not ledger.rows:
+                pid = ledger.order[0]
+                turn = _target_turn(status, pid, -1,
+                                    _last_deact_turn(await adapter.read_trace()))
+            else:
+                return None
+            agent = seats[pid]["agent"]
+            adapter.expect_turn(turn)
+            previous_wait = adapter._turn_wait_s
+            adapter._turn_wait_s = min(5, recovery.remaining())
+            try:
+                await driver.referee.begin_turn(agent.player_id, agent.agent_id, turn)
+            except RuntimeError as exc:
+                if not any(x in str(exc) for x in ("cannot begin turn", "lease to engage")):
+                    raise
+                audit("engagement_wait", reason=ui_control.redact(str(exc)))
+                return None
+            finally:
+                adapter._turn_wait_s = previous_wait
+            return turn, pid
+
+        async with asyncio.timeout(recovery.remaining()):
+            await popups.quiesce()
+            while True:
+                result = await probe()
+                if result:
+                    recovery.engaged()
+                    return result
+                if time.monotonic() >= recovery.next_sweep:
+                    found = None
+                    async def engaged():
+                        nonlocal found
+                        found = await probe()
+                        return found is not None
+                    if await recovery.sweep(engaged):
+                        recovery.engaged()
+                        return found
+                await asyncio.sleep(min(1, recovery.remaining()))
+
+    async def cleanup_all():
+        errors = []
+        # Preserve the game and its lease for diagnosis; cleanup sends no
+        # new game actions. Disconnect first, then close provider resources.
+        try:
+            await adapter.teardown()
+        except Exception as exc:
+            errors.append(ui_control.redact(f"disconnect: {exc}"))
         for seat in seats.values():
             close = getattr(seat["runtime"], "aclose", None)
             if close is not None:
-                with contextlib.suppress(Exception):
+                try:
                     await close()
-        await adapter.teardown()
+                except Exception as exc:
+                    errors.append(ui_control.redact(f"provider close: {exc}"))
+        return {"status": "failed" if errors else "completed", "errors": errors}
+
+    try:
+        # MATCH_START exists even when construction, provider auth, or setup fails.
+        await driver.match_start()
+        identity = driver.capture_launch_identity(mod_lua)
+        audit("run_identity", identity=identity, limits=asdict(limits),
+              fake=adapter._simulate is not None,
+              llm_turn_pacing="visible_briefing_v1" if pace_llm_turns else "standard",
+              movement_allowance=spec.declare_own_endpath_drift)
+        if rounds <= 0:
+            raise ValueError("rounds must be positive")
+        async with asyncio.timeout(limits.startup):
+            for agent in spec.agents:
+                runtime = build_runtime(
+                    _agent_profile(agent), match_id=spec.match_id,
+                    audit=lambda payload: _strategic_audit(driver, payload),
+                    opening_units_frozen=adapter._simulate is None)
+                audit("decision_mode", agent=agent.agent_id, mode=agent.decision_mode,
+                      opening_units_frozen=adapter._simulate is None)
+                seats[agent.player_id] = {
+                    "agent": agent, "runtime": runtime,
+                    "session": PlayerSession(driver.referee, agent.player_id, agent.agent_id),
+                }
+                bind = getattr(runtime, "bind_services", None)
+                if bind is not None:
+                    kwargs = dict(diary=driver.referee.diary, strategy=driver.referee.strategy)
+                    if agent.policy == "planner":
+                        from civ_arena.planner.journal import PlannerJournal
+                        kwargs["journal"] = PlannerJournal(
+                            run_dir / "planner" / f"p{agent.player_id}-journal.jsonl")
+                    bind(**kwargs)
+                if hasattr(runtime, "telemetry"):
+                    runtime.telemetry = driver.telemetry
+                configure_pacing = getattr(runtime, "configure_turn_pacing", None)
+                if pace_llm_turns and agent.policy == "llm" and configure_pacing is not None:
+                    recall_available = driver.referee.recall is not None
+                    configure_pacing(recall_available=recall_available)
+                    audit("turn_pacing", agent=agent.agent_id, mode="visible_briefing_v1",
+                          recall_available=recall_available)
+                _wire_client_sinks(getattr(runtime, "client", None), agent,
+                                   audit, run_dir)
+            await adapter.setup({})
+            caps = await adapter.inject_mod(mod_lua)
+            audit("mod_capabilities", capabilities=caps)
+            for pid in seats:
+                await adapter.read_raw(lua_translator.set_puppet(pid, True))
+            await _attach_initial_hotseat_turn(adapter, ledger.order[0], audit)
+            await adapter.refresh_digest()
+        # M4 §4a baseline: one spectator_world right after the
+        # initial-attach step (after_seat=-1 — no seat has completed yet).
+        await _spectator_capture(adapter._turn_mirror, -1)  # noqa: SLF001
+        adapter.handoff_wait = wait_release
+        adapter.handoff_start = start_handoff
+        adapter.human_seats = tuple(ledger.order)
+        adapter.human_handoff_audit = lambda receipt: audit("human_handoff", receipt=receipt)
+        play_started = time.monotonic()
+        async with asyncio.timeout(limits.match), asyncio.TaskGroup() as tasks:
+            watcher = tasks.create_task(popups.watch(lambda: stage == "active_turn"))
+            try:
+                while ledger.rounds < rounds:
+                    turn, seat_pid = await engage()
+                    stage = "active_turn"
+                    turn_started = time.monotonic()
+                    seat = seats[seat_pid]
+                    agent = seat["agent"]
+                    lease = driver.referee.grant_lease(agent.player_id, agent.agent_id, turn)
+                    # Amendment 3 item 4: the spectator capture runs
+                    # OUTSIDE the agent_turn timeout — a slow capture must
+                    # NEVER eat the agent-turn budget. The capture's own
+                    # asyncio.timeout(limits.spectator) keeps its exception
+                    # handling. The tuple is set inside the block on a
+                    # completed seat; pre-declared here so an exception or
+                    # CancelledError exiting the block doesn't NameError
+                    # the post-block capture call.
+                    _pending_capture: tuple[int, int] | None = None
+                    async with asyncio.timeout(limits.agent_turn):
+                        await adapter.activate_human_seat(agent.player_id, turn)
+                        await adapter.read_raw(lua_translator.unpause_local())
+                        digest_open = await adapter.refresh_digest()
+                        await _resolve_blockers(
+                            adapter, agent.player_id, turn,
+                            defer_economy=agent.decision_mode == "strategic_autopilot")
+                        housekept = adapter.drain_mutations()
+                        driver.referee._ls.acknowledged.extend(housekept)
+                        allowed_open = len(driver.referee._ls.allowed)
+                        begin_hook = getattr(seat["runtime"], "begin_turn", None)
+                        if begin_hook is not None:
+                            begin_hook(turn)
+                        nxt = ledger.order[(ledger.order.index(seat_pid) + 1) % 2]
+                        adapter.set_pre_end_switch(nxt)
+                        try:
+                            await seat["session"].take_turn(lease, seat["runtime"])
+                        finally:
+                            adapter.set_pre_end_switch(None)
+                        if not lease.released or adapter._phase_open != -1:
+                            raise RuntimeError("agent returned with an open lease")
+                        # Adapter.end_phase observed engine release before the
+                        # referee released the logical lease. Both are required.
+                        digest_close = adapter.state_hash()
+                        allowed = driver.referee._ls.allowed[allowed_open:]
+                        row = {"turn": turn, "player": agent.player_id,
+                               "agent": agent.agent_id, "allowed_mutations": len(allowed),
+                               "digest_changed": digest_open != digest_close,
+                               "mutated": bool(allowed), "lease_released": lease.released,
+                               "violations": driver.referee.violation_count(),
+                               "elapsed_s": time.monotonic() - turn_started}
+                        row["unexpected"] = bool(
+                            row["digest_changed"] and not (allowed or housekept))
+                        ledger.append(row, lease)
+                        audit("completed_seat_turn", row=row)
+                        # Amendment 3 item 4: the spectator capture runs
+                        # OUTSIDE the agent_turn timeout scope — a slow
+                        # capture must NEVER eat the agent-turn budget. The
+                        # inner asyncio.timeout(limits.spectator) keeps its
+                        # own exception handling.
+                        _pending_capture = (turn, agent.player_id)
+                        print(f"hotseat turn {turn} p{seat_pid}: "
+                              f"{len(ledger.rows)} completed", flush=True)
+                        if row["unexpected"] or row["violations"]:
+                            raise RuntimeError("watchdog or unexplained digest anomaly")
+                    # After the agent_turn scope exits (success OR
+                    # CancelledError raised by the watchdog), run the
+                    # spectator capture with its OWN deadline. If the
+                    # block raised before reaching the audit, the
+                    # capture is skipped — nothing to capture yet.
+                    if _pending_capture is not None:
+                        await _spectator_capture(*_pending_capture)
+                stage = "finishing"
+                await popups.quiesce()
+                audit("play_complete", elapsed_s=time.monotonic() - play_started)
+            finally:
+                watcher.cancel()
+    except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:
+        detail = str(exc)
+        if isinstance(exc, BaseExceptionGroup):
+            detail = "; ".join(f"{type(child).__name__}: {child}" for child in exc.exceptions)
+        failure = ui_control.redact(f"{type(exc).__name__} during {stage}: {detail}")
+    finally:
+        adapter.handoff_wait = None
+        try:
+            async with asyncio.timeout(limits.cleanup):
+                cleanup = await cleanup_all()
+        except (Exception, asyncio.CancelledError) as exc:
+            cleanup = {"status": "failed", "error": ui_control.redact(type(exc).__name__)}
+        if cleanup["status"] != "completed" and failure is None:
+            failure = "cleanup failed"
+        ok = failure is None and ledger.rounds == rounds and len(ledger.rows) == 2 * rounds
+        # Use cached observations: cleanup never queries a changing game.
+        summary = {
+            "phase": "dispatch-hotseat", "strategy": strategy,
+            "per_turn": ledger.rows, "completed_rounds": ledger.rounds,
+            "requested_rounds": rounds, "clean": ok, "aborted": failure,
+            "failure_reason": failure, "failure_stage": stage if failure else None,
+            "last_completed_turn": ledger.rows[-1] if ledger.rows else None,
+            "active_lease": asdict(lease) if lease and not lease.released else None,
+            "last_engine_status": status, "final_observation": "cached; not re-polled at shutdown",
+            "recovery_attempts": recovery.total_attempts,
+            "pending_recovery_attempts": recovery.attempts, "cleanup": cleanup,
+            "informational_popups": popups.summary(),
+            "limits": asdict(limits), "elapsed_s": time.monotonic() - began,
+            "identity": identity, "movement_allowance": spec.declare_own_endpath_drift,
+            "turn_pacing": {s["agent"].agent_id: {
+                "enabled": bool(getattr(s["runtime"], "paced_turns", False)),
+                "recall_available": getattr(s["runtime"], "recall_available", None),
+            } for s in seats.values()},
+            "request_usage": {s["agent"].agent_id: getattr(
+                getattr(s["runtime"], "client", None), "posts_sent", None)
+                for s in seats.values()},
+        }
+        await driver.match_end(ledger.rows[-1]["turn"] if ledger.rows else 0, summary)
+    print(f"HOTSEAT {'CLEAN' if ok else 'ABORTED'}: {len(ledger.rows)}/{rounds * 2} "
+          f"seat turns; {failure or 'completed'}", flush=True)
+    return 0 if ok else 2
+
+
+async def phase_spectate(
+    spec: MatchSpec, adapter: FireTunerAdapter, run_dir: Path,
+    turns: int, mod_lua: str, limits: SpectateLimits,
+) -> int:
+    """Watch-and-record a live game the OPERATOR plays against the engine's
+    own AI. The harness NEVER acts: no puppet arming (a lease would freeze
+    the human's units), no local-player switch, no blocker housekeeping, no
+    popup dismissal, no desktop input of any kind — polls, observes, and
+    the mod's lease-free ambient-window recorder commands only. Turn
+    boundaries come from the unconditional hook ring (HOOK_ENTER/HOOK_DEACT
+    for the human seat), corroborated by TURN_ACTIVE. Attaching mid-human-
+    turn records that (partial) turn as round 1 with window="attach". The
+    turn budget is AUDIT-ONLY: an overrun is recorded, never acted on."""
+    events = run_dir / "events.jsonl"
+    _refuse_rerun(events)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if spec.spectate is None:
+        raise RuntimeError(
+            "--phase spectate requires a spectate: block in the config")
+    if spec.agents:
+        raise RuntimeError(
+            "a spectate run rosters no driven agents (config refused it "
+            "already; this is the driver-side belt-and-braces)")
+    sc = spec.spectate
+    human = sc.human_seat
+    ai_players = [p for p in sc.observed_players if p != human]
+    driver = LiveDriver(spec, adapter, run_dir,
+                        f"{spec.match_id}-i{os.getpid()}")
+    # F-03: capability enforcement at the dispatch boundary — the phase
+    # talks ONLY to this allowlisted wrapper; its census (per-op sent
+    # counts, lifecycle, rejected attempts) is the summary's command
+    # census, not a declared constant.
+    transport = SpectateTransport(adapter)
+    census = SpectatorCensus(transport, sc)
+    watch = TurnWatch()
+    started = time.monotonic()
+
+    def audit(tag: str, **fields: Any) -> None:
+        turn = fields.pop("turn", 0)
+        driver._write("HEARTBEAT", turn=turn, phase_player_id=human,  # noqa: SLF001
+                      player_id=None, agent_id=None,
+                      visibility_scope="spectator", audit=tag, **fields)
+
+    def utcnow() -> str:
+        from datetime import UTC, datetime
+        return datetime.now(UTC).isoformat()
+
+    per_round: list[dict[str, Any]] = []
+    windows_open: set[int] = set()
+    failure: str | None = None
+    clean = False
+    attached_mid_turn = False
+    engine_turn_at_attach = -1
+    ai_hook_events = 0
+    overrun_flagged = False
+    human_turn = -1
+    snapshot: dict[str, Any] = {}
+    ai_manifests: dict[str, list[dict[str, Any]]] = {}
+    roster: dict[str, Any] = {}
+    gap_pending = False
+    window_start_cursor: str | None = None
+
+    async def open_window(pid: int) -> None:
+        await census.open_window(pid)
+        windows_open.add(pid)
+
+    async def close_window(pid: int, *,
+                           actor_class: str | None = None
+                           ) -> list[dict[str, Any]]:
+        rows = await census.close_window(pid, actor_class=actor_class)
+        windows_open.discard(pid)
+        return rows
+
+    await transport.setup({})
+    caps = await transport.inject_mod(mod_lua)
+    # CAP-R1 #1/#8: fail CLOSED against a mod that would corrupt the data
+    # — per-player ambient windows and the all-players roster are REQUIRED
+    # (an older mod answers false; the handshake parses fail-closed).
+    if not caps.get("supports_ambient_windows") \
+            or not caps.get("supports_roster"):
+        raise RuntimeError(
+            "PuppeteerMod per-player ambient windows + roster required "
+            f"for spectate (mod >= 0.4.0): {caps}")
+    await driver.match_start()
+    audit("run_identity", identity=driver.capture_launch_identity(mod_lua),
+          fake=adapter._simulate is not None)  # noqa: SLF001
+    audit("spectate_config", **asdict(sc))
+    try:
+        async with asyncio.timeout(limits.match_s):
+            status = await transport.poll_status()
+            trace = await transport.read_trace()
+            engine_turn_at_attach = int(status.get("TURN", -1))
+            attached_mid_turn = status.get("TURN_ACTIVE") is True
+            audit("engine_status", turn=engine_turn_at_attach,
+                  turn_active=status.get("TURN_ACTIVE"),
+                  attached_mid_turn=attached_mid_turn)
+            # F-08/CAP-R1 #8: roster DISCOVERY from the mod's all-players
+            # read — every OVX-shaped read enumerates alive MAJORS only,
+            # which made city-states undiscoverable. The configured set is
+            # a claim; the board is the truth. Classes now come WITH the
+            # discovery: minors are their own coverage class, and an
+            # unconfigured MAJOR is reported as such.
+            discovered_classes = await transport.roster()
+            discovered = sorted(discovered_classes)
+            configured = list(sc.observed_players)
+            if human not in discovered_classes:
+                raise RuntimeError(
+                    f"human seat {human} is not on the board "
+                    f"(roster: {discovered_classes}) — refusing to record "
+                    "a game the phase cannot bound")
+            roster = {
+                "configured": configured,
+                "discovered": discovered,
+                "observed": [p for p in configured
+                             if p in discovered_classes],
+                "unconfigured_discovered":
+                    [p for p in discovered if p not in configured],
+                "configured_missing":
+                    [p for p in configured if p not in discovered_classes],
+                "unconfigured_majors":
+                    [p for p in discovered if p not in configured
+                     and discovered_classes[p] == "major"],
+                "minors": [p for p in discovered
+                           if discovered_classes[p] == "minor"],
+                "actor_classes": {
+                    str(p): ("observed_major" if p in configured
+                             else "minor" if discovered_classes[p] == "minor"
+                             else "unconfigured_major")
+                    for p in discovered},
+            }
+            audit("roster_discovery", **roster)
+            # baseline windows from attach: every observed player (the
+            # attach round's human window opens here — window="attach")
+            for pid in sc.observed_players:
+                await open_window(pid)
+
+            round_no = 0
+            active = False
+            history_drained = False
+            last_heartbeat = time.monotonic()
+            turn_started = time.monotonic()
+            round_boundary = "attach"
+
+            async def open_round(entry_turn: int, boundary: str,
+                                 source_cursor: str | None,
+                                 hook_is_batch_last: bool) -> None:
+                """Open a capture round: close the AI windows (their deltas
+                since they last opened), census, ensure the HUMAN window is
+                open, write START + SNAPSHOT. F-01/CAP-R1 #6: the round
+                claims boundary state ONLY when the hook was the batch's
+                LAST entry AND directly observed AND the census bracket
+                held (``atomic``) — the board moving during the reads
+                demotes the claim even then. Attach and gap-inferred
+                rounds NEVER claim boundary state."""
+                nonlocal round_no, human_turn, ai_manifests, snapshot, \
+                    active, overrun_flagged, turn_started, \
+                    window_start_cursor, round_boundary
+                round_no += 1
+                human_turn = entry_turn
+                round_boundary = boundary
+                ai_manifests = {}
+                for ai in ai_players:
+                    if ai in windows_open:
+                        ai_manifests[str(ai)] = await close_window(ai)
+                    await open_window(ai)
+                snapshot = await census.snapshot()
+                state_at_boundary = (hook_is_batch_last
+                                     and boundary == "hook_observed"
+                                     and snapshot.get("atomic") is True)
+                driver._write(  # noqa: SLF001
+                    "HUMAN_TURN_START", turn=entry_turn,
+                    phase_player_id=human, player_id=None,
+                    agent_id=None, visibility_scope="spectator",
+                    operator=sc.operator,
+                    window="attach" if boundary == "attach"
+                    else "turn_start",
+                    boundary=boundary,
+                    observed_at=utcnow(),
+                    source_cursor=source_cursor,
+                    state_at_boundary=state_at_boundary,
+                    turn_active_corroborated=(
+                        status.get("TURN_ACTIVE") is True))
+                driver._write(  # noqa: SLF001
+                    "SPECTATOR_SNAPSHOT", turn=entry_turn,
+                    phase_player_id=human, player_id=None,
+                    agent_id=None, visibility_scope="spectator",
+                    round=round_no, phase="turn_start",
+                    boundary=boundary,
+                    observed_at=utcnow(),
+                    source_cursor=source_cursor,
+                    state_at_boundary=state_at_boundary,
+                    ambient=ai_manifests, **snapshot)
+                if human not in windows_open:
+                    await open_window(human)
+                window_start_cursor = source_cursor
+                active = True
+                overrun_flagged = False
+                turn_started = time.monotonic()
+
+            while not clean:
+                new, gap = watch.new_entries(trace)
+                if gap:
+                    gap_pending = True
+                    audit("trace_gap", ring_size=len(trace),
+                          generation=watch.generation,
+                          last_round_turn=human_turn,
+                          engine_turn=status.get("TURN"))
+                if not history_drained:
+                    # the FIRST read sees ring HISTORY. Attached mid-human-
+                    # turn: keep only the current turn's entries (the
+                    # human's ENTER is real and unprocessed) — and if the
+                    # ring is FRESH (a just-injected recorder, or a wrap
+                    # took the ENTER), CAP-R1 #7: synthesize the attach
+                    # round for the in-flight turn NOW (a PARTIAL interval,
+                    # boundary="attach", source_cursor=None — never an
+                    # invented historical hook). Attached between/AI turns:
+                    # every history entry is stale — drop it all and wait
+                    # for the next fresh HOOK_ENTER.
+                    history_drained = True
+                    if attached_mid_turn:
+                        new = [e for e in new
+                               if (TurnWatch.parse(e) or (-1, "", -1))[0]
+                               == engine_turn_at_attach]
+                        has_attach_enter = any(
+                            TurnWatch.parse(e) == (engine_turn_at_attach,
+                                                   "HOOK_ENTER", human)
+                            for e in new)
+                        if not has_attach_enter:
+                            await open_round(engine_turn_at_attach,
+                                             "attach", None, False)
+                            audit("attach_round_synthesized",
+                                  turn=engine_turn_at_attach,
+                                  note="ring had no ENTER for the "
+                                  "in-flight turn (fresh recorder or "
+                                  "wrap) — partial interval, never "
+                                  "invented history")
+                            new = []
+                    else:
+                        if new:
+                            audit("attach_history_discarded",
+                                  entries=len(new))
+                        new = []
+                for index, entry in enumerate(new):
+                    parsed = TurnWatch.parse(entry)
+                    if parsed is None:
+                        continue
+                    entry_turn, event, pid = parsed
+                    is_last_boundary = index == len(new) - 1
+                    if pid == human and event == "HOOK_ENTER" and not active:
+                        # -- round start (see open_round). The attach label
+                        # belongs to the turn that was ALREADY in flight at
+                        # attach — whether its ENTER survived in the ring
+                        # (round_no still 0 when it arrives) or was
+                        # synthesized (round_no already 1, so the NEXT
+                        # turn is hook_observed, never mislabeled attach).
+                        # A wrap makes the round gap-inferred.
+                        if attached_mid_turn and round_no == 0:
+                            boundary = "attach"
+                        elif gap_pending:
+                            boundary = "gap_inferred"
+                        else:
+                            boundary = "hook_observed"
+                        gap_pending = False
+                        await open_round(entry_turn, boundary, entry,
+                                         is_last_boundary)
+                    elif pid == human and event == "HOOK_DEACT" and active:
+                        # -- round end: close the human window (their
+                        # in-turn delta), digest, END, reopen AI windows.
+                        # CAP-R1 #6: the END claims boundary state ONLY if
+                        # the DEACT was the batch's last entry AND the ring
+                        # is STILL parked on it after the digest read —
+                        # anything newer (an AI hook firing between the
+                        # boundary and the reads) means the digest saw
+                        # post-boundary state, and the claim demotes.
+                        human_rows = await close_window(
+                            human, actor_class="human_seat")
+                        duration = time.monotonic() - turn_started
+                        digest_after = await transport.refresh_digest()
+                        corroborate = [ln for ln in
+                                       await transport.read_trace()
+                                       if ln.strip()]
+                        end_state_at_boundary = (
+                            is_last_boundary and bool(corroborate)
+                            and corroborate[-1] == entry)
+                        overrun = duration > sc.turn_budget_s
+                        driver._write(  # noqa: SLF001
+                            "HUMAN_TURN_END", turn=entry_turn,
+                            phase_player_id=human, player_id=None,
+                            agent_id=None, visibility_scope="spectator",
+                            operator=sc.operator,
+                            duration_s=round(duration, 3),
+                            human_ambient=human_rows,
+                            digest_after=digest_after, overrun=overrun,
+                            observed_at=utcnow(),
+                            source_cursor=entry,
+                            state_at_boundary=end_state_at_boundary,
+                            window_start_cursor=window_start_cursor,
+                            window_end_cursor=entry)
+                        for ai in ai_players:
+                            if ai not in windows_open:
+                                await open_window(ai)
+                        per_round.append({
+                            "round": round_no, "turn": entry_turn,
+                            "boundary": round_boundary,
+                            "state_at_boundary": end_state_at_boundary,
+                            "human_duration_s": round(duration, 3),
+                            "human_ambient_rows": len(human_rows),
+                            "ai_ambient_rows": {k: len(v) for k, v in
+                                                ai_manifests.items()},
+                            "census_consistent":
+                                snapshot.get("digest", {}).get("consistent"),
+                            "digest": digest_after, "overrun": overrun,
+                        })
+                        active = False
+                        if round_no >= turns:
+                            clean = True
+                            break
+                    elif pid != human:
+                        ai_hook_events += 1
+                if clean:
+                    break
+                # F-08: turns can pass BETWEEN polls (fast play) without a
+                # ring wrap — if the engine TURN ran ahead of the last
+                # round's turn by more than 1, the intermediate human turns
+                # were never observed; declare the capture gap, never
+                # fabricate those rounds.
+                if not active and human_turn > 0:
+                    engine_turn_now = int(status.get("TURN", human_turn))
+                    if engine_turn_now > human_turn + 1:
+                        gap_pending = True
+                        audit("capture_gap",
+                              missing_turns=[human_turn + 1,
+                                             engine_turn_now - 1],
+                              source="engine_turn_jump",
+                              last_round_turn=human_turn,
+                              engine_turn=engine_turn_now)
+                await asyncio.sleep(limits.poll_s)
+                status = await transport.poll_status()
+                trace = await transport.read_trace()
+                now = time.monotonic()
+                if active and not overrun_flagged \
+                        and now - turn_started > sc.turn_budget_s:
+                    overrun_flagged = True
+                    audit("human_turn_overrun", turn=human_turn,
+                          elapsed_s=round(now - turn_started, 1),
+                          note="audit only — the phase never acts")
+                if now - last_heartbeat >= limits.heartbeat_s:
+                    last_heartbeat = now
+                    audit("engine_status", turn=status.get("TURN"),
+                          turn_active=status.get("TURN_ACTIVE"),
+                          round=round_no, active=active)
+    except TimeoutError:
+        failure = "match timeout"
+    except asyncio.CancelledError:
+        failure = "cancelled"
+        raise
+    except Exception as exc:  # noqa: BLE001 — recorded, then re-raised
+        failure = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        # CAP-02: the honest outcome class for the summary (keys-only
+        # addition — the loop body above is CAP-01's surface)
+        # CAP-R1 #9: teardown still runs FIRST (its lifecycle entry stays
+        # inside the census the summary reports) but a teardown FAULT can
+        # never discard the closeout — MATCH_END/summary always write, the
+        # fault is recorded in cleanup.status and names the failure.
+        cleanup_status = "disconnect_only_no_game_actions_no_leases"
+        try:
+            await transport.teardown()
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal here
+            cleanup_status = (f"teardown_error: {type(exc).__name__}: "
+                              f"{ui_control.redact(str(exc))[:200]}")
+            if failure is None:
+                failure = f"teardown failed: {type(exc).__name__}"
+        outcome = ("completed" if clean and failure is None
+                   else {"cancelled": "operator_stopped",
+                         "match timeout": "timed_out"}.get(failure,
+                                                           "interrupted"))
+        summary = {
+            "phase": "spectate", "operator": sc.operator,
+            "observed_players": list(sc.observed_players),
+            "roster": roster,
+            "snapshot_scope": sc.snapshot_scope,
+            "human_turn_budget_s": sc.turn_budget_s,
+            "per_round": per_round,
+            "completed_rounds": len(per_round), "requested_rounds": turns,
+            "outcome": outcome,
+            "clean": clean and failure is None,
+            "aborted": failure, "failure_reason": failure,
+            "failure_stage": None if failure is None else "spectate",
+            "attach": {"attached_mid_turn": attached_mid_turn,
+                       "engine_turn_at_attach": engine_turn_at_attach},
+            "command_census": {
+                **transport.census,
+                # the transport HAS no mutating path (capability-enforced,
+                # rejection-tested) — zero is derived from structure, not
+                # declared
+                "game_writes": 0,
+            },
+            "trace_gaps": watch.gaps, "trace_generations": watch.generation,
+            "census_retries": census.retries,
+            "ai_hook_events": ai_hook_events,
+            "limits": {"match_s": limits.match_s, "poll_s": limits.poll_s,
+                       "heartbeat_s": limits.heartbeat_s,
+                       "turn_budget_s": sc.turn_budget_s},
+            "identity": implementation_identity(spec, mod_lua),
+            "cleanup": {"status": cleanup_status},
+            "elapsed_s": round(time.monotonic() - started, 3),
+        }
+        await driver.match_end(
+            per_round[-1]["turn"] if per_round else engine_turn_at_attach,
+            summary)
+    print(f"SPECTATE {'CLEAN' if clean and failure is None else 'ENDED'}: "
+          f"{len(per_round)}/{turns} rounds; {failure or 'completed'}",
+          flush=True)
+    return 0 if clean and failure is None else 2
+
 
 # research housekeeping preference: era-1 techs the wire actually offers,
 # then the sorted fallback — a deterministic pick that NEVER leaves
@@ -770,7 +1609,7 @@ def _target_turn(status: dict[str, Any], player_id: int,
 
 
 async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
-                             turn: int) -> None:
+                             turn: int, *, defer_economy: bool = False) -> None:
     """Turn-blocker housekeeping at LEASE START (inside our own turn, where
     civic/policy changes are legal): a completed civic parks 'Choose a
     Civic' + 'Fill Policy Slot' on the local player, and a forced end-turn
@@ -796,12 +1635,14 @@ async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
             # the empty-queue city: set production for EVERY own city with
             # an empty queue (the agent may have missed one; the blocker
             # fires at turn END, when resolution freezes the cycle)
-            await _fill_empty_queues(adapter, player_id, turn)
+            if not defer_economy:
+                await _fill_empty_queues(adapter, player_id, turn)
         elif "RESEARCH" in b:
             # completed research with no follow-up parks 'Choose a
             # Technology' on the local player — game four froze the whole
             # engine cycle here at the turn-17 transition
-            await _ensure_research(adapter, player_id, turn)
+            if not defer_economy:
+                await _ensure_research(adapter, player_id, turn)
         else:
             # unknown blocker: report it loudly — the run must not freeze
             # silently on something this housekeeping does not cover
@@ -811,7 +1652,10 @@ async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
     # blocker only ever lists at turn end, when the wire can no longer
     # resolve it (glm-g1 turn 12's freeze); pre-filling makes the class
     # unreachable
-    await _fill_empty_queues(adapter, player_id, turn)
+    if not defer_economy:
+        await _fill_empty_queues(adapter, player_id, turn)
+    # Strategic control owns empty production and research through the audited
+    # facade. Civic/policy housekeeping and turn completeness still apply.
     # Research is deliberately NOT pre-filled: the blocker notification
     # DOES list at lease start (game four, turn 11 — unlike production),
     # so the reactive branch above resolves it in time, and pre-filling
@@ -898,33 +1742,14 @@ async def _ensure_research(adapter: FireTunerAdapter, player_id: int,
     print(f"housekeep[{turn}]: research empty -> STUDY {pick}: {res.status}")
 
 
-async def _dismiss_popups(turn: int, keys: tuple[str, ...] = ("Escape",
-                                                              "Escape"),
-                          ) -> None:
-    """Dismiss a front-end MODAL that froze the engine's between-turn
-    processing (2026-09-01 live game, turn 16: an advisor popup held the
-    cycle after a clean turn 15 — the lease then never engaged). TWO
-    Escapes, spaced: the first closes a modal if one is up; if none was,
-    it OPENS the game menu, which the second closes. Bounded and
-    self-undoing — only invoked from the already-stalled path, where the
-    alternative is the run aborting.
-
-    A2: the hotseat path passes Return FIRST — on the hotseat PlayerChange
-    panel an Escape OPENS the options menu (harmful), while Return runs
-    the engine's own empty-password auto-OK (playerchange.lua
-    OnKeyUp_Return). The wire-side unpause_local() covers the same panel
-    non-interactively; this sweep is the input-path insurance."""
-    import subprocess
-    import sys as _sys
-    from pathlib import Path as _Path
-    repo = _Path(__file__).resolve().parents[3]
-    for k in keys:
-        subprocess.run(
-            [_sys.executable, str(repo / "scripts" / "x_click.py"),
-             "--key", k],
-            capture_output=True, timeout=15)
-        await asyncio.sleep(2.0)
-    print(f"modal-sweep[{turn}]: popup dismissal sent ({' '.join(keys)})")
+async def _dismiss_popups(turn: int, keys: tuple[str, ...] = ("Escape", "Escape"),
+                          controller=None) -> list[dict[str, Any]]:
+    controller = controller or ui_control.Controller()
+    results = []
+    for key in keys:
+        results.append(asdict(await controller.action(key=key)))
+    results.append(asdict(await controller.action(banner=True)))
+    return results
 
 
 async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
@@ -948,7 +1773,9 @@ async def _recover_stall(adapter: FireTunerAdapter, player_id: int,
               f"{status['TURN']}")
         await adapter.write_raw(lua_translator.request_end_turn(player_id))
         return
-    await _dismiss_popups(turn, keys)
+    await _dismiss_popups(
+        turn, keys, ui_control.FakeController()
+        if adapter._simulate is not None else ui_control.Controller())
 
 
 async def _settle_engagement(adapter: FireTunerAdapter,
@@ -972,7 +1799,7 @@ def main() -> None:
     ap.add_argument("config", type=Path)
     ap.add_argument("--phase", required=True,
                     choices=["probe", "exclusive-control", "dispatch",
-                             "dispatch-hotseat"])
+                             "dispatch-hotseat", "spectate"])
     ap.add_argument("--turns", type=int, default=1)
     ap.add_argument("--run-id", default=None,
                     help="run dir name under runs/ (default: match_id)")
@@ -994,19 +1821,45 @@ def main() -> None:
                          "ourselves to reach the first driven turn (the "
                          "tuner is single-client, so the standalone "
                          "bootstrap script cannot run beside the driver)")
+    ap.add_argument("--startup-timeout", type=float, default=2700)
+    ap.add_argument("--match-timeout", type=float, default=7200)
+    ap.add_argument("--agent-turn-timeout", type=float, default=600)
+    ap.add_argument("--recovery-timeout", type=float, default=180)
+    ap.add_argument("--recovery-sweeps", type=int, default=8)
+    ap.add_argument("--no-turn-pacing", action="store_true",
+                    help="use the standard LLM loop without the initial visible briefing")
     opts = ap.parse_args()
     spec = load_config(opts.config)
     mod_lua = opts.mod_path.read_text(encoding="utf-8")
+    visible_map_context = (spec.live.visible_map_context
+                           if spec.live is not None else "gamecore")
 
     async def run() -> int:
+        task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
         if opts.fake:
+            fake_cfg: dict | None = None
+            if opts.phase == "spectate":
+                if spec.spectate is None:
+                    raise SystemExit(
+                        "--phase spectate requires a spectate: config block")
+                sc = spec.spectate
+                fake_cfg = {
+                    "human_seat": sc.human_seat,
+                    "ai_seats": [p for p in sc.observed_players
+                                 if p != sc.human_seat],
+                    "polls_per_human_turn": 3,
+                }
             server = FakeTunerServer(mod=FakeMod(
                 hotseat=[a.player_id for a in spec.agents]
-                if opts.phase == "dispatch-hotseat" else None))
+                if opts.phase == "dispatch-hotseat" else None,
+                spectate=fake_cfg, ambient_diffs=fake_cfg is not None))
             port = await server.start()
             adapter = FireTunerAdapter(
                 "127.0.0.1", port,
-                simulate_hook=_fake_hook, poll_timeout_s=2.0)
+                simulate_hook=_fake_hook, poll_timeout_s=2.0,
+                visible_map_context=visible_map_context)
             try:
                 return await _dispatch(spec, adapter, opts, mod_lua)
             finally:
@@ -1017,7 +1870,8 @@ def main() -> None:
             opts.host, opts.port,
             conn=TapConnection(opts.host, opts.port, run_dir / "wire.jsonl"),
             end_phase_strategy=opts.strategy,
-            turn_wait_s=float(opts.engage_timeout))
+            turn_wait_s=float(opts.engage_timeout),
+            visible_map_context=visible_map_context)
         return await _dispatch(spec, adapter, opts, mod_lua)
 
     raise SystemExit(asyncio.run(run()))
@@ -1033,7 +1887,22 @@ async def _dispatch(spec: MatchSpec, adapter: FireTunerAdapter,
             spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
     if opts.phase == "dispatch-hotseat":
         return await phase_dispatch_hotseat(
-            spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua)
+            spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,
+            pace_llm_turns=not getattr(opts, "no_turn_pacing", False),
+            limits=HotseatLimits(startup=opts.startup_timeout, match=opts.match_timeout,
+                                 agent_turn=opts.agent_turn_timeout,
+                                 recovery=opts.recovery_timeout, sweeps=opts.recovery_sweeps),
+            controller=ui_control.FakeController() if opts.fake else ui_control.Controller())
+    if opts.phase == "spectate":
+        sc = spec.spectate or None
+        if sc is None:
+            raise RuntimeError(
+                "--phase spectate requires a spectate: block in the config")
+        return await phase_spectate(
+            spec, adapter, run_dir, opts.turns, mod_lua,
+            limits=SpectateLimits(
+                poll_s=sc.poll_s, heartbeat_s=sc.heartbeat_s,
+                match_s=opts.match_timeout))
     return await phase_dispatch(
         spec, adapter, run_dir, opts.turns, opts.strategy, mod_lua,
         bootstrap=opts.bootstrap_end_turn)

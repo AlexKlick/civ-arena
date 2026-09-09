@@ -482,6 +482,11 @@ class PlannerRuntime:
                     self._bandit_pending = None
 
     async def take_turn(self, facade: Any) -> None:
+        from civ_arena.planner.entity_boundary import EntityBoundary
+
+        # Numeric planner simulation stays isolated from owner-qualified wire ids.
+        # A fresh current-observation registry makes resume/rewind allocation-free.
+        facade = EntityBoundary(facade)
         overview = await facade.get_overview()
         turn = overview["turn"]
         self._restore_from_journal(turn)

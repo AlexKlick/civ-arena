@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#09101b">
+  <title>Civ Arena · Match room</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+  <script src="/journal-core.js" defer></script>
+  <script src="/journal.js" defer></script>
+  <script src="/compare-core.js" defer></script>
+  <script src="/compare.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="masthead">
+      <a class="brand" href="/" aria-label="Civ Arena match room"><span class="brand-mark" aria-hidden="true">◈</span><span>CIV<span class="brand-light">ARENA</span><small>MATCH ROOM</small></span></a>
+      <div class="connection" role="status"><span id="connectionDot" class="status-dot"></span><span id="connectionText">Connecting to match records</span></div>
+    </header>
+    <main>
+      <section class="intro">
+        <div><p class="eyebrow">TWO SEATS. ONE WORLD.</p><h1>Watch the game unfold.</h1><p class="subtitle">The agents’ recorded actions, plans, and progress, turn by turn.</p></div>
+        <div class="match-state"><span id="matchStatus" class="badge">Waiting for a match</span><span id="lastEvent">No events received yet</span></div>
+      </section>
+      <section class="metrics" aria-label="Match progress">
+        <article><span class="metric-label">COMPLETE ROUNDS</span><strong id="roundCount">—</strong><span class="metric-foot">Both seats finished</span></article>
+        <article><span class="metric-label">SEAT TURNS</span><strong id="turnCount">—</strong><span class="metric-foot">Completed turns</span></article>
+        <article><span class="metric-label">PROVIDER REQUESTS</span><strong id="requestCount">—</strong><span class="metric-foot">Recorded POST attempts</span></article>
+        <article><span class="metric-label">WATCHDOG VIOLATIONS</span><strong id="violationCount">—</strong><span id="violationFoot" class="metric-foot">Awaiting match records</span></article>
+      </section>
+      <section class="controls" aria-label="Match navigation">
+        <label class="run-control"><span>Match</span><select id="runSelect" aria-label="Select match"><option value="">Loading matches…</option></select></label>
+        <label class="turn-control"><span>Turn</span><select id="turnSelect" aria-label="Select engine turn"><option value="">—</option></select></label>
+        <label class="follow-control"><input id="followLive" type="checkbox" checked><span class="toggle" aria-hidden="true"></span><span>Follow latest turn</span></label>
+      </section>
+      <div id="warnings" class="warnings" role="status" hidden></div>
+      <div id="emptyState" class="empty-state" hidden><span aria-hidden="true">◈</span><h2>No match records yet</h2><p>This room will update when a match starts producing events.</p></div>
+      <section class="panel observed-map-panel" aria-label="Recorded observed map">
+        <div class="panel-heading"><div><p class="eyebrow">OBSERVED ATLAS</p><h2>Explore the recorded board</h2><p class="subtle">Partial player observations, not a complete world map. The atlas updates when the selected match, turn or perspective changes.</p></div></div>
+        <div class="map-navigation"><label>Perspective <select id="mapPerspective"><option value="0">Player 0</option><option value="1">Player 1</option><option value="spectator">Spectator · combined private views</option></select></label><button id="refreshMap" type="button">Refresh map snapshot</button><a id="openMap" target="_blank" rel="noopener">Open large atlas ↗</a></div>
+        <p id="mapState" class="subtle" role="status">Select a match to load recorded map data.</p>
+        <iframe id="observedMap" title="Zoomable retained-observation atlas" hidden></iframe>
+      </section>
+      <section id="seatCards" class="seat-grid" aria-label="Agents and recorded plans"></section>
+      <section id="researchPanel" class="panel research-panel" aria-label="Research comparison">
+        <div class="panel-heading"><div><p class="eyebrow">RESEARCH</p><h2>Who knows what <span id="researchTurn" class="subtle"></span></h2><p id="researchNote" class="subtle">Comparison data not recorded for this match.</p></div></div>
+        <div class="research-body">
+          <div id="researchAsOf" class="as-of"></div>
+          <div id="researchDiff" class="diff-columns"></div>
+          <dl id="researchRows" class="research-rows"></dl>
+        </div>
+        <div class="tree-tools">
+          <button id="treeFit" type="button" aria-pressed="false">Fit width</button>
+          <span id="treeLegend" class="tree-legend">prerequisite → tech, left to right; connective unverified · base source catalog, not the effective ruleset</span>
+        </div>
+        <div id="treeScroll" class="tree-scroll"><svg id="techTree" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Technology prerequisites by era" hidden></svg></div>
+        <p id="treeState" class="subtle" role="status">Tech tree not requested yet.</p>
+        <dl id="researchDetail" class="facts"></dl>
+      </section>
+      <section id="timelinePanel" class="panel timeline-panel" aria-label="Per-seat timelines">
+        <div class="panel-heading"><div><p class="eyebrow">TIMELINES</p><h2>Pacing and progress, turn by turn</h2><p id="timelineNote" class="subtle">Comparison data not recorded for this match.</p></div></div>
+        <div id="timelineLegend" class="timeline-legend"></div>
+        <div id="timelineGrid" class="timeline-grid"></div>
+        <details class="timeline-table"><summary>Table view</summary><div class="table-scroll"><table id="timelineTable"><thead id="timelineHead"></thead><tbody id="timelineBody"></tbody></table></div></details>
+      </section>
+      <section class="workspace" aria-label="Turn activity">
+        <div class="graph-panel panel">
+          <div class="panel-heading"><div><p class="eyebrow">TURN JOURNAL</p><h2>Action sequence <span id="graphTurn" class="subtle"></span></h2></div><span class="legend"><span aria-hidden="true">→</span> Recorded order, not causality</span><div id="decisionStrip" class="decision-strip" aria-label="Recorded decisions for the selected turn"></div></div>
+          <div class="graph-tools"><div class="filters" role="group" aria-label="Filter recorded calls"><button type="button" data-filter="all" class="selected" aria-pressed="true">All calls</button><button type="button" data-filter="actions" aria-pressed="false">Actions</button><button type="button" data-filter="observations" aria-pressed="false">Observations</button><button type="button" data-filter="notes" aria-pressed="false">Notes</button></div><span id="callCount" class="subtle">0 calls shown</span></div>
+          <div id="graphScroll" class="graph-scroll"><svg id="actionGraph" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Recorded actions in each seat’s turn"></svg><div id="graphEmpty" class="graph-empty">Select a match to explore its turns.</div></div>
+          <div class="graph-foot"><span class="tiny-dot gold"></span> Seat 1 <span class="tiny-dot teal"></span> Seat 2 <span class="glyph-key"><b>◉</b> observation <b>▶</b> action <b>✎</b> note</span><span class="glyph-key"><b>✓</b> accepted <b>✕</b> rejected <b>◌</b> pending</span><span class="graph-hint">Select any call to inspect it · Shift-click a pill to open a second turn</span></div>
+        </div>
+        <aside class="detail-panel panel" aria-label="Selected call details"><div class="panel-heading"><div><p class="eyebrow">CLOSER LOOK</p><h2 id="detailTitle">Select a call</h2></div><span id="detailStatus" class="badge" hidden></span></div><div id="detailBody" class="detail-body"><div class="detail-empty"><span aria-hidden="true">⌖</span><p>Every action leaves a record.</p><small>Choose a node to see what was requested and what the game returned.</small></div></div></aside>
+      </section>
+      <section class="panel strategy-panel" aria-label="Strategy and scouting choices"><div class="panel-heading"><div><p class="eyebrow">STRATEGY → ROUTINE ACTIONS</p><h2>Scouting choices</h2><p class="subtle">Listed values are seeded selection weights, not probabilities of success. Each move remains subject to engine validation.</p></div></div><div id="strategyChoices" class="strategy-choices"></div></section>
+    </main>
+    <footer><span><span class="tiny-dot"></span> Read-only match view</span><span>Recorded notes show what an agent chose to report.</span></footer>
+  </div>
+</body>
+</html>

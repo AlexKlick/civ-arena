@@ -292,12 +292,24 @@ class Referee:
             else list(omni_units.values())
         owner_of = {u.get("unit_id"): u.get("owner") for u in units}
         journal = getattr(self.adapter, "_journal", None)
+        admitted = []
         for m in list(journal or []):
             eid = getattr(m, "entity_id", None)
-            if (owner_of.get(eid) == ctx.player_id
+            if (getattr(m, "entity_type", None) == "unit"
+                    and owner_of.get(eid) == ctx.player_id
                     and getattr(m, "attr", None) in ("moves", "movement",
                                                      "pos", "q", "r")):
                 self._ls.acknowledged.append(m)
+                admitted.append(m.to_doc())
+        self.log.write(
+            "HEARTBEAT", match_id=self.match_id,
+            game_instance_id=self.game_instance_id, turn=ctx.turn,
+            phase_player_id=ctx.player_id, player_id=ctx.player_id,
+            agent_id=ctx.agent_id, visibility_scope="referee",
+            audit="movement_allowance", allowance="declare_own_endpath_drift",
+            mutations=admitted, owners={m["entity_id"]: owner_of[m["entity_id"]]
+                                        for m in admitted},
+        )
 
     async def _unmoved_units(self, ctx: SessionCtx) -> list[str]:
         """Own units with movement remaining and no standing order (the
@@ -503,11 +515,17 @@ class Referee:
         kind: ObserveKind,
         subject_id: str | None = None,
         scope: Scope = Scope.PRIVATE_PLAYER,
+        *, research_building_briefing: bool = False,
     ) -> Any:
         t0 = time.perf_counter()
         tool = f"get_{kind.value}"
         # record the tool's real positional arg name so replay can dispatch
         args = {"city_id": subject_id} if subject_id else {}
+        if type(research_building_briefing) is not bool or (
+                research_building_briefing and kind is not ObserveKind.AVAILABLE_RESEARCH):
+            raise ValueError('research briefing requires the research observation')
+        if research_building_briefing:
+            args['research_building_briefing'] = True
         phase = await self._phase()
         if scope is Scope.REFEREE:
             self._unauthorized(ctx, phase, RejectionReason.ARGS_INVALID,
@@ -524,7 +542,8 @@ class Referee:
                             {"status": "rejected", "rejection": reason.value})
             return {"error": reason.value}
         omniscient = await self.adapter.observe(
-            ObserveRequest(kind=kind, player_id=ctx.player_id, subject_id=subject_id)
+            ObserveRequest(kind=kind, player_id=ctx.player_id, subject_id=subject_id,
+                           research_building_briefing=research_building_briefing)
         )
         observable, remembered = self.adapter.visibility_for(ctx.player_id)
         projected = self.policy.project(

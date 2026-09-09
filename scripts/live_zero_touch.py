@@ -29,10 +29,18 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
+import re
+import shutil
+import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+
+from civ_arena.game.civ6 import ui_control
+from civ_arena.game.civ6.vendor.connection import GameConnection
 
 REPO = Path(__file__).resolve().parents[1]
 DISPLAY = ":1"
@@ -44,70 +52,251 @@ SAVES = Path("/home/alexk/.local/share/aspyr-media/"
 COLD_BOOT_S = 600        # first launch after Steam start: ~8-10 min
 WARM_BOOT_S = 420        # relaunch: states register in ~4-7 min
 INTRO_SETTLE_S = 300     # host -> BEGIN GAME clickable (varies 80-300s)
+TUNER_COOLDOWN_S = 8
 MAP_LOAD_S = 300         # BEGIN GAME -> GameCore_Tuner
+WINDOW_NORMALIZE_S = 45.0  # includes single-client cooldown and engine/window verification
+WINDOW_RESIZE_S = 8.0
+WINDOW_DISCONNECT_S = 3.0
 
 
-def bounce_x() -> bool:
+def window_resolution_lua(token: str) -> str:
+    """Use installed Options.lua's setters/apply; never persist user settings.
+
+    MainMenu.xml eagerly loads the Options context. Windowed is enum zero;
+    Options.ApplyGraphicsOptions changes runtime values without SaveOptions.
+    """
+    return f"""
+do
+  local function emit(value) print('RESOLUTION|{token}|' .. value) end
+  local function normalize()
+    if ContextPtr:GetID() ~= 'Options' then return 'wrong_context' end
+    if Options == nil or type(Options.GetAppOption) ~= 'function' or
+       type(Options.SetAppOption) ~= 'function' or
+       type(Options.GetAvailableDisplayModes) ~= 'function' or
+       type(Options.ApplyGraphicsOptions) ~= 'function' then
+      return 'missing_options_api'
+    end
+    local function observe(label)
+      emit(label .. '|' .. tostring(Options.GetAppOption('Video', 'RenderWidth')) ..
+        '|' .. tostring(Options.GetAppOption('Video', 'RenderHeight')) ..
+        '|' .. tostring(Options.GetAppOption('Video', 'FullScreen')))
+    end
+    observe('before')
+    local supported = false
+    for _, mode in ipairs(Options.GetAvailableDisplayModes()) do
+      if mode.Width == 1024 and mode.Height == 768 then supported = true break end
+    end
+    if not supported then return 'unsupported_resolution' end
+    Options.SetAppOption('Video', 'FullScreen', 0)
+    Options.SetAppOption('Video', 'RenderWidth', 1024)
+    Options.SetAppOption('Video', 'RenderHeight', 768)
+    local applied = Options.ApplyGraphicsOptions()
+    emit('applied|' .. tostring(applied))
+    observe('after')
+    return applied == true and 'ok' or 'apply_failed'
+  end
+  local ok, result = pcall(normalize)
+  emit('result|' .. (ok and result or 'runtime_error'))
+end
+print('RESOLUTION_END|{token}')
+print('---END---')
+"""
+
+
+def parse_window_resolution(lines: list[str], token: str) -> dict:
+    prefix = f"RESOLUTION|{token}|"
+    result = {}
+    for line in lines:
+        if not line.startswith(prefix):
+            continue
+        row = line[len(prefix):].split('|')
+        if not row or row[0] in result:
+            raise RuntimeError('duplicate resolution response')
+        if row[0] in ('before', 'after') and len(row) == 4:
+            if not all(re.fullmatch(r'\d{1,6}', value) for value in row[1:]):
+                raise RuntimeError('invalid resolution readback')
+            result[row[0]] = [int(value) for value in row[1:]]
+        elif row[0] in ('applied', 'result') and len(row) == 2:
+            result[row[0]] = row[1]
+        else:
+            raise RuntimeError('invalid resolution response')
+    if lines.count(f"RESOLUTION_END|{token}") != 1 or 'result' not in result:
+        raise RuntimeError('incomplete resolution response')
+    known = {'ok', 'wrong_context', 'missing_options_api', 'unsupported_resolution',
+             'apply_failed', 'runtime_error'}
+    if result['result'] not in known:
+        raise RuntimeError('unrecognized resolution outcome')
+    return result
+
+
+async def normalize_game_window(artifacts: Path) -> None:
+    """Require the coordinate-calibrated game resolution before menu actions.
+
+    One tuner connection, at most 45s of work plus 3s disconnect. Settings stay
+    in memory; existing persisted preferences and the X session are unchanged.
+    No input is issued on a missing/ambiguous UI context or failed readback.
+    """
+    token = uuid.uuid4().hex
+    diagnostic = {'target': [1024, 768, 0], 'status': 'failed', 'cleanup': 'not_started'}
+    conn = GameConnection('127.0.0.1', tuner_port())
+    failure = None
+    try:
+        async with asyncio.timeout(WINDOW_NORMALIZE_S):
+            # menu_up's transient client has just disconnected.
+            await asyncio.sleep(TUNER_COOLDOWN_S)
+            before = await asyncio.to_thread(ui_control.select_window, DISPLAY)
+            diagnostic['window_before'] = {'id': before.window_id,
+                                           'geometry': list(before.geometry)}
+            await conn.connect()
+            states = [index for index, name in conn.lua_states.items() if name == 'Options']
+            if len(states) != 1:
+                raise RuntimeError('missing or ambiguous Options context')
+            # Applying settings must be issued once, without automatic reconnect/retry.
+            async with conn._lock:
+                if not conn.is_connected or conn.lua_states.get(states[0]) != 'Options':
+                    raise RuntimeError('Options connection unavailable')
+                lines = await conn._locked_execute(states[0], window_resolution_lua(token), 8.0)
+            observed = parse_window_resolution(lines, token)
+            diagnostic['options'] = observed
+            if observed.get('result') != 'ok' or observed.get('applied') != 'true':
+                raise RuntimeError(f"resolution apply failed: {observed['result']}")
+            if observed.get('after') != [1024, 768, 0] or 'before' not in observed:
+                raise RuntimeError('resolution readback does not match 1024x768 windowed')
+            async with asyncio.timeout(WINDOW_RESIZE_S):
+                while True:
+                    window = await asyncio.to_thread(ui_control.select_window, DISPLAY)
+                    diagnostic['window_after'] = {'id': window.window_id,
+                                                  'geometry': list(window.geometry)}
+                    if window.window_id != before.window_id:
+                        raise RuntimeError('Civ6 window changed during resolution normalization')
+                    if window.geometry[2:] == (1024, 768):
+                        break
+                    await asyncio.sleep(0.25)
+            diagnostic['status'] = 'verified'
+    except (Exception, asyncio.CancelledError) as exc:
+        failure = exc
+        diagnostic['error'] = ui_control.redact(f'{type(exc).__name__}: {exc}')
+    finally:
+        try:
+            async with asyncio.timeout(WINDOW_DISCONNECT_S):
+                await conn.disconnect()
+            diagnostic['cleanup'] = 'disconnected'
+        except (Exception, asyncio.CancelledError) as exc:
+            diagnostic['cleanup'] = type(exc).__name__
+            if failure is None:
+                failure = exc
+                diagnostic['status'] = 'failed'
+        (artifacts / f'window-normalization-{token}.json').write_text(
+            json.dumps(diagnostic, sort_keys=True) + '\n')
+    if isinstance(failure, asyncio.CancelledError):
+        raise failure
+    if failure is not None:
+        raise RuntimeError(f'window normalization failed: {diagnostic.get("error", "cleanup")}')
+    print('[window] verified 1024x768 windowed; runtime settings only', flush=True)
+
+
+async def bounce_x() -> bool:
     """M17e/A1: the tuner binds 4318 only on a YOUNG X server (the menu
     bind is gone by ~35 min). Killing the gaming session's xinit tree
     makes its supervisor respawn a fresh one in seconds."""
-    out = run(["pgrep", "-f", "xinit.*headless-gaming-session"]).stdout
+    out = (await run(["pgrep", "-f", "xinit.*headless-gaming-session"])).stdout
     pids = [int(x) for x in out.split()]
     if not pids:
         print("[fresh-x] no gaming xinit found — nothing to bounce")
         return False
     for pid in pids:
-        run(["kill", "-TERM", str(pid)])
+        await run(["kill", "-TERM", str(pid)])
     for _ in range(24):            # respawn within ~2 min
-        time.sleep(5)
-        out = run(["pgrep", "-f",
-                   "xinit.*headless-gaming-session"]).stdout
+        await asyncio.sleep(5)
+        out = (await run(["pgrep", "-f",
+                   "xinit.*headless-gaming-session"])).stdout
         new = [int(x) for x in out.split()]
         if any(p not in pids for p in new):
             fresh = next(p for p in new if p not in pids)
             print(f"[fresh-x] respawned xinit {fresh}")
-            time.sleep(10)         # openbox/sunshine/steam settle
+            await asyncio.sleep(10)         # openbox/sunshine/steam settle
             return True
     print("[fresh-x] session never respawned")
     return False
 
 
-def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, **kw)
+async def run(cmd: list[str], *, timeout=240, **kw) -> subprocess.CompletedProcess:
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=REPO, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        start_new_session=True, **kw)
+    try:
+        async with asyncio.timeout(timeout):
+            out, err = await proc.communicate()
+        return subprocess.CompletedProcess(cmd, proc.returncode, out.decode(), err.decode())
+    finally:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            await proc.communicate()
 
 
-def civ6_pids() -> list[int]:
-    out = run(["pgrep", "-f", r"Civilization VI/./Civ6"]).stdout
+async def civ6_pids() -> list[int]:
+    out = (await run(["pgrep", "-f", r"Civilization VI/./Civ6"])).stdout
     return [int(x) for x in out.split()]
 
 
-def kill_game() -> None:
+async def require_active_display(artifacts: Path | None = None) -> None:
+    """An X server without an active output cannot create Steam windows.
+
+    In particular, a persisted local gaming mode can survive unplugging the
+    monitor. Merely finding xinit/Steam processes does not establish readiness.
+    This probe sends no desktop input and never changes the host display mode.
+    """
+    try:
+        result = await run(["xrandr", "--display", DISPLAY, "--query"], timeout=10)
+        active = re.findall(
+            r"^(\S+) connected(?: primary)? [1-9]\d*x[1-9]\d*[+-]\d+[+-]\d+\b",
+            result.stdout, re.MULTILINE)
+        diagnostic = dict(display=DISPLAY, returncode=result.returncode,
+                          active_outputs=active,
+                          stdout=ui_control.redact(result.stdout),
+                          stderr=ui_control.redact(result.stderr))
+    except (OSError, TimeoutError) as exc:
+        diagnostic = dict(display=DISPLAY, returncode=None, active_outputs=[],
+                          error=ui_control.redact(f"{type(exc).__name__}: {exc}"))
+    if artifacts is not None:
+        path = artifacts / f"display-preflight-{uuid.uuid4().hex}.json"
+        path.write_text(json.dumps(diagnostic, sort_keys=True) + "\n")
+    if diagnostic["returncode"] != 0 or not diagnostic["active_outputs"]:
+        raise RuntimeError(
+            f"display preflight failed: {DISPLAY} has no verified active output; "
+            "restore the gaming session display mode before launching Steam/Civ6")
+    print(f"[display] {DISPLAY} active outputs: {', '.join(diagnostic['active_outputs'])}")
+
+
+async def kill_game() -> None:
     for _ in range(3):
-        pids = civ6_pids()
+        pids = await civ6_pids()
         if not pids:
             break
-        run(["pkill", "-f", r"Civilization VI/./Civ6"])
-        time.sleep(3)
-    run(["pkill", "-f", "SteamLaunch AppId=289070"])
-    time.sleep(3)
-    print(f"[kill] game clear: {civ6_pids() or 'none'}")
+        await run(["pkill", "-f", r"Civilization VI/./Civ6"])
+        await asyncio.sleep(3)
+    await run(["pkill", "-f", "SteamLaunch AppId=289070"])
+    await asyncio.sleep(3)
+    print(f"[kill] game clear: {await civ6_pids() or 'none'}")
 
 
-def launch() -> None:
-    subprocess.Popen(
-        ["bash", "-c",
-         f"HOME=/home/alexk DISPLAY={DISPLAY} setsid nohup "
-         f"/usr/games/steam {STEAM_URI} </dev/null >/tmp/civ6-zero.log 2>&1 &"])
-    print("[launch] URI handoff fired")
+def launch(artifacts: Path | None = None) -> None:
+    path = (artifacts or Path("/tmp")) / f"civ6-launch-{uuid.uuid4().hex}.log"
+    with path.open("x") as log:
+        subprocess.Popen(
+            ["/usr/games/steam", STEAM_URI], env={**os.environ, "DISPLAY": DISPLAY},
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    print(f"[launch] URI handoff fired; log={path}", flush=True)
 
 
-def port_up() -> bool:
+async def port_up() -> bool:
     """The tuner binds 4318 — and ONLY 4318. 4319 is NOT a tuner fallback
     (the old docstring's game-five theory is wrong, M18-live disproven):
     it is the EOS/net service, up from boot, and sending it FireTuner
     handshakes correlates with game-process death within ~2 min (twice
     reproduced). Accepting 4319 here let boot gates pass on EOS alone."""
-    out = run(["ss", "-tln"]).stdout
+    out = (await run(["ss", "-tln"])).stdout
     return "127.0.0.1:4318" in out
 
 
@@ -115,103 +304,35 @@ def tuner_port() -> int:
     return 4318
 
 
-def civ6_window_geometry() -> tuple[int, int, int, int]:
-    """Absolute x, y, w, h of the Civ6 window on :1. Attempt-7 lesson:
-    the client list's LAST window is not always Civ6 (Steam overlay
-    windows come and go mid-boot, and Civ6's placement varies per boot —
-    (961,554) one boot, (1798,253) the next), and xwininfo on the wrong
-    id returns no geometry lines at all, which killed the banner loop
-    AND the gate screenshots. Scan EVERY client, keep the largest
-    geometry that parses."""
-    out = run(["bash", "-c",
-               "xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*'"]).stdout
-    best: tuple[int, int, int, int] | None = None
-    for wid in out.split():
-        info = run(["xwininfo", "-id", wid]).stdout
-        geo: dict[str, int] = {}
-        for line in info.splitlines():
-            for key in ("Absolute upper-left X", "Absolute upper-left Y",
-                        "Width", "Height"):
-                if line.strip().startswith(key):
-                    geo[key] = int(line.split(":")[1])
-        if len(geo) == 4:
-            cand = (geo["Absolute upper-left X"], geo["Absolute upper-left Y"],
-                    geo["Width"], geo["Height"])
-            if best is None or cand[2] * cand[3] > best[2] * best[3]:
-                best = cand
-    if best is None:
-        raise RuntimeError("no window geometry parsed from _NET_CLIENT_LIST")
-    return best
-
-
-def find_teal_banner(png: bytes) -> tuple[float, float] | None:
-    """The BEGIN GAME / CONTINUE GAME ribbon by pixel color (teal: blue+
-    green high, red low) — locate UI by pixels, not by a vision model's
-    guess. Attempt-6 lesson (live, 2026-09-03): return the DENSEST teal
-    cluster, never the bbox of every hit — ocean water passes the same
-    filter, and the diluted bbox center clicked open water beside the
-    ribbon. The load-path intro ribbon sits at window y~0.93; scan the
-    whole lower half."""
-    sys.path.insert(0, str(REPO / "scripts"))
-    from screen_triage import _decode_rgb
-    w, h, rows = _decode_rgb(png)
-    grid = 32
-    counts: dict[tuple[int, int], int] = {}
-    for y in range(int(h * 0.50), h, 2):
-        for x in range(0, w, 2):
-            r, g, b = rows[y][x]
-            if b > 120 and g > 110 and r < 90 and (b - r) > 60:
-                cell = (x // grid, y // grid)
-                counts[cell] = counts.get(cell, 0) + 1
-    if not counts:
-        return None
-
-    def hood(cx: int, cy: int) -> int:
-        return sum(counts.get((cx + dx, cy + dy), 0)
-                   for dx in (-1, 0, 1) for dy in (-1, 0, 1))
-
-    bx, by = max(counts, key=lambda c: hood(*c))
-    sx = sy = tot = 0
-    for (cx, cy), n in counts.items():
-        if abs(cx - bx) <= 1 and abs(cy - by) <= 1:
-            sx += (cx + 0.5) * grid * n
-            sy += (cy + 0.5) * grid * n
-            tot += n
-    return (sx / tot / w, sy / tot / h)
-
-
 def capture_window() -> bytes:
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
-        path = fh.name
-    try:
-        wx, wy, ww, wh = civ6_window_geometry()
-        cap = f"DISPLAY={DISPLAY} scrot -a {wx},{wy},{ww},{wh} -o {path}"
-    except Exception:
-        # never lose the frame to a geometry hiccup — the whole screen
-        # contains the window (attempt-7: the failed dump left the
-        # ingame-2 timeout undiagnosable)
-        cap = f"DISPLAY={DISPLAY} scrot -o {path}"
-    run(["bash", "-c", f"{cap}"])
-    data = Path(path).read_bytes()
-    Path(path).unlink(missing_ok=True)
-    return data
+    return ui_control.capture(ui_control.select_window(DISPLAY))
+
+
+def find_teal_banner(png: bytes):
+    return ui_control.find_teal_banner(png)
 
 
 def dump_screen(label: str) -> None:
-    """Attempt-6 lesson: a gate timeout without a screenshot is a guess.
-    Dump the window at every failure for off-line diagnosis."""
     try:
-        Path(f"/tmp/arch1-{label}-{time.strftime('%H%M%S')}.png") \
-            .write_bytes(capture_window())
-        print(f"[screen] /tmp/arch1-{label}-{time.strftime('%H%M%S')}.png")
-    except Exception as exc:            # never let a dump kill the ladder
-        print(f"[screen] dump failed: {exc}")
+        path = Path(f"/tmp/arch1-{label}-{time.time_ns()}.png")
+        path.write_bytes(capture_window())
+        print(f"[screen] {path}")
+    except Exception as exc:
+        print(f"[screen] failed: {ui_control.redact(str(exc))}")
 
 
-def click(fx: float, fy: float) -> None:
-    run([sys.executable, str(REPO / "scripts" / "x_click.py"),
-         "--at", f"{fx:.4f},{fy:.4f}"])
+async def click(fx: float, fy: float) -> None:
+    result = await ui_control.Controller(DISPLAY).action(at=(fx, fy))
+    print("[ui]", result)
+    if result.status != "sent":
+        raise RuntimeError(f"required click: {result}")
+
+
+async def click_banner() -> None:
+    result = await ui_control.Controller(DISPLAY).action(banner=True)
+    print("[ui]", result)
+    if result.status == "failed":
+        raise RuntimeError(f"banner helper: {result}")
 
 
 async def tuner_states(port: int | None = None) -> list[str]:
@@ -248,25 +369,28 @@ async def wait_for(check, budget_s: int, label: str,
     return False
 
 
-def key(k: str) -> None:
-    run([sys.executable, str(REPO / "scripts" / "x_click.py"), "--key", k])
+async def key(k: str) -> None:
+    result = await ui_control.Controller(DISPLAY).action(key=k)
+    print("[ui]", result)
+    if result.status != "sent":
+        raise RuntimeError(f"required key: {result}")
 
 
-def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
+async def phase(args: list[str], settle: float = 0.0) -> subprocess.CompletedProcess:
     """Run a live-lane phase script with the single-client cooldown
     discipline baked in (the tuner refuses rapid reconnects)."""
-    time.sleep(8)
-    r = run([sys.executable, str(REPO / "scripts" / args[0]), *args[1:]])
+    await asyncio.sleep(TUNER_COOLDOWN_S)
+    r = await run([sys.executable, str(REPO / "scripts" / args[0]), *args[1:]])
     out = (r.stdout.strip() or r.stderr.strip())
     print(f"[phase {args[0]} {' '.join(args[1:])}] rc={r.returncode}")
     for ln in out.splitlines():
         print("   ", ln)
     if settle:
-        time.sleep(settle)
+        await asyncio.sleep(settle)
     return r
 
 
-def swap_save_into_load_slot() -> bool:
+def swap_save_into_load_slot(backup_dir: Path) -> bool:
     """A1: the LoadGame params only reliably resolve
     Saves/Single/auto/AutoSave_0001 — copy the hotseat quicksave there
     (backing up whatever occupied the slot)."""
@@ -276,19 +400,75 @@ def swap_save_into_load_slot() -> bool:
         print(f"[swap] missing {src}")
         return False
     if dst.exists():
-        dst.rename(dst.with_suffix(".Civ6Save.prev.bak"))
-    dst.write_bytes(src.read_bytes())
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(dst, backup_dir / dst.name)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
     print(f"[swap] {src.name} -> {dst}")
     return True
+
+
+def verify_two_major_census(output: str) -> dict:
+    """Require the complete engine census to contain exactly two live majors.
+
+    GameCore's IsHuman is authoritative here. Some builds do not expose the
+    configuration IsHuman method; that field may be '?' after the independent
+    InGame reflag readback has confirmed it.
+    """
+    rows = {}
+    trailers = []
+    for line in output.splitlines():
+        if line.startswith('CENSUS_END|'):
+            trailers.append(line)
+            continue
+        if not re.match(r'^P\d+\|', line):
+            continue
+        if trailers:
+            raise RuntimeError('census player appeared after completion')
+        fields = line.split('|')
+        pid = int(fields[0][1:])
+        if pid in rows:
+            raise RuntimeError(f'duplicate census player {pid}')
+        row = {}
+        for field in fields[1:]:
+            if '=' not in field:
+                raise RuntimeError('malformed census field')
+            key, value = field.split('=', 1)
+            if key in row:
+                raise RuntimeError('duplicate census field')
+            row[key] = value
+        if any(row.get(key) not in ('true', 'false') for key in ('major', 'alive', 'human')):
+            raise RuntimeError('incomplete census flags')
+        rows[pid] = row
+    if trailers != [f'CENSUS_END|{len(rows)}']:
+        raise RuntimeError('incomplete census row count')
+    majors = sorted(pid for pid, row in rows.items()
+                    if row['major'] == 'true' and row['alive'] == 'true')
+    if majors != [0, 1]:
+        raise RuntimeError(f'live major roster must be [0, 1], observed {majors}')
+    for pid in majors:
+        row = rows[pid]
+        if row['human'] != 'true' or row.get('slot') != '3':
+            raise RuntimeError(f'major seat {pid} is not human slot 3')
+        if row.get('cfghuman') not in ('true', '?'):
+            raise RuntimeError(f'major seat {pid} configuration human readback failed')
+    return {'alive_major_ids': majors, 'players': rows}
 
 
 async def run_arch1_session(opts) -> int:
     """The Architecture-1 session (A1-proven 2026-09-03), stop at the first
     failed gate. Exit codes continue the ladder's scheme from 20."""
-    if opts.fresh_x and not bounce_x():
+    await require_active_display(opts.artifacts)
+    kill_first = getattr(opts, "kill_first", True)
+    if not kill_first and opts.fresh_x:
+        raise ValueError("--from-menu cannot restart X; omit --fresh-x")
+    if opts.fresh_x and not await bounce_x():
         return 20
-    kill_game()
-    launch()
+    if opts.fresh_x:
+        await require_active_display(opts.artifacts)
+    if kill_first:
+        await kill_game()
+        launch(opts.artifacts)
     if not await wait_for(port_up, 240, "tuner-bind", 10.0):
         return 21
 
@@ -297,19 +477,22 @@ async def run_arch1_session(opts) -> int:
 
     if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu"):
         return 22
-    key("Escape")               # skip the intro movie if it is still up
-    await asyncio.sleep(8)
+    await normalize_game_window(opts.artifacts)
+    if kill_first:
+        await key("Escape")           # skip the intro movie on a fresh launch
+        await asyncio.sleep(8)
 
     async def ingame_up() -> bool:
         return "GameCore_Tuner" in await tuner_states()
 
-    # 1. hotseat create, EMPTY passwords (the launch's transition poll is
-    #    expected to fail — rc 11 — the config+host have applied by then).
+    # 1. hotseat create, EMPTY passwords, with an explicit post-host roster
+    #    receipt. UI start avoids waiting for this hotseat session's dead tuner.
     #    Codex r1 P2-8: the password gate demands the EXACT empty rows —
     #    "P1PW|arena" or "P1PW|nil" must refuse (Return auto-OK needs "")
-    r = phase(["live_hotseat_launch.py", "--full", "--empty",
+    r = await phase(["live_hotseat_launch.py", "--full", "--empty", "--ui-start",
                "--port", str(tuner_port())])
-    if "InSession|true" not in r.stdout \
+    if r.returncode != 0 or "UI_START_READY|posthost_roster_verified" not in r.stdout \
+            or "InSession|true" not in r.stdout \
             or "\nP0PW|\n" not in f"\n{r.stdout}\n" \
             or "\nP1PW|\n" not in f"\n{r.stdout}\n":
         return 23
@@ -317,7 +500,7 @@ async def run_arch1_session(opts) -> int:
     #    hand-off panels. The tuner is DEAD inside this game (the hotseat
     #    session killed it) — the reliable "turn 1 is live" signal is the
     #    engine writing the hotseat autosave.
-    click(0.50, 0.888)
+    await click(0.50, 0.888)
     session_start = time.time()
     autosave = SAVES / "Hotseat" / "auto" / "AutoSave_0001.Civ6Save"
 
@@ -335,16 +518,16 @@ async def run_arch1_session(opts) -> int:
             print("[enter] turn-1 autosave landed — game is in")
             break
         try:
-            banner = find_teal_banner(capture_window())
+            banner = await asyncio.to_thread(lambda: find_teal_banner(capture_window()))
         except Exception:
             banner = None
         if banner and clicked_banner < 3:
-            click(*banner)
+            await click_banner()
             clicked_banner += 1
             print(f"[enter] banner click #{clicked_banner} "
                   f"({banner[0]:.3f}, {banner[1]:.3f})")
         else:
-            key("Return")       # empty-password hand-off panel auto-OK
+            await key("Return")       # empty-password hand-off panel auto-OK
     if not turn1_autosaved():
         print("[enter] turn-1 autosave never appeared")
         dump_screen("no-autosave")
@@ -355,9 +538,9 @@ async def run_arch1_session(opts) -> int:
     #    pass as evidence — the gate is the file's mtime moving past the
     #    session start, exactly like the turn-1 autosave gate.
     quicksave = SAVES / "Hotseat" / "quick" / "quicksave.Civ6Save"
-    key("Escape")
+    await key("Escape")
     await asyncio.sleep(4)
-    click(0.50, 0.383)
+    await click(0.50, 0.383)
     quicksaved = False
     for _ in range(10):
         await asyncio.sleep(3)
@@ -372,22 +555,23 @@ async def run_arch1_session(opts) -> int:
         print("[quicksave] file did not land (or is stale)")
         dump_screen("no-quicksave")
         return 25
-    if not swap_save_into_load_slot():
+    if not swap_save_into_load_slot(opts.artifacts / "load-slot-backup"):
         return 26
     # 4. fresh process, then the load with the load-menu screen OPEN
-    kill_game()
-    launch()
+    await kill_game()
+    launch(opts.artifacts)
     if not await wait_for(port_up, 240, "tuner-bind-2", 10.0):
         return 27
     if not await wait_for(menu_up, COLD_BOOT_S + 300, "menu-2"):
         return 28
-    key("Escape")
+    await normalize_game_window(opts.artifacts)
+    await key("Escape")
     await asyncio.sleep(8)
-    click(0.459, 0.404)         # Single Player
+    await click(0.459, 0.404)         # Single Player
     await asyncio.sleep(5)
-    click(0.57, 0.55)           # Load Game
+    await click(0.57, 0.55)           # Load Game
     await asyncio.sleep(5)
-    r = phase(["live_hotseat_launch.py", "--load",
+    r = await phase(["live_hotseat_launch.py", "--load",
                "--port", str(tuner_port())], settle=25)
     if "loadgame-returned|true" not in r.stdout:
         dump_screen("load-failed")
@@ -403,16 +587,16 @@ async def run_arch1_session(opts) -> int:
         if await ingame_up():
             break
         try:
-            banner = find_teal_banner(capture_window())
+            banner = await asyncio.to_thread(lambda: find_teal_banner(capture_window()))
         except Exception:
             banner = None
         if banner and intro_clicks < 3:
-            click(*banner)
+            await click_banner()
             intro_clicks += 1
             print(f"[intro-2] click #{intro_clicks} "
                   f"({banner[0]:.3f}, {banner[1]:.3f})")
         else:
-            key("Return")
+            await key("Return")
         await asyncio.sleep(15)
     # attempt-7 lesson: this boot's tuner registered ~15-17 min after the
     # load (600s missed it by <=2 min) — "binds late or never" skews LATE
@@ -422,29 +606,36 @@ async def run_arch1_session(opts) -> int:
     # 5. census the demote, re-flag, gate the flip. Codex r1 P2-9: the
     #    gate requires BOTH the re-flag's own read-back (slot + cfg-human)
     #    and the GameCore census row — either alone can lie.
-    r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
+    # census-1 needs the tuner reconnect cooldown too (the pivot run
+    # died here: the census ran right after the ingame-2 poll's
+    # connection closed and the single-client refusal returned EMPTY)
+    await asyncio.sleep(TUNER_COOLDOWN_S)
+    r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-1]", r.stdout.strip())
-    r = phase(["live_hotseat_launch.py", "--reflag",
+    r = await phase(["live_hotseat_launch.py", "--reflag",
                "--port", str(tuner_port())])
     if "REFLAG_SLOT|1|3" not in r.stdout \
             or "REFLAG_CFGHUMAN|1|true" not in r.stdout:
         print("[gate] re-flag read-back mismatch — refusing to dispatch")
         dump_screen("reflag-gate")
         return 31
-    time.sleep(5)
-    r = run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
+    await asyncio.sleep(TUNER_COOLDOWN_S)
+    r = await run([sys.executable, str(REPO / "scripts" / "live_seat_check.py"),
              "--port", str(tuner_port())])
     print("[census-2]", r.stdout.strip())
-    if not any(ln.startswith("P1|human=true|") and "|slot=3|" in ln
-               for ln in r.stdout.splitlines()):
-        print("[gate] census did not confirm P1 human slot=3 — refusing")
+    try:
+        if r.returncode:
+            raise RuntimeError(f'census helper failed: exit {r.returncode}')
+        census = verify_two_major_census(r.stdout)
+        (opts.artifacts / 'major-census.json').write_text(json.dumps(census, sort_keys=True) + '\n')
+    except RuntimeError as exc:
+        print("[gate]", str(exc))
         dump_screen("census-gate")
         return 31
     if not opts.no_smoke:
-        smoke = run([sys.executable,
-                     str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
-                     "--port", str(tuner_port())])
+        smoke = await phase(["firetuner_smoke.py", "--live",
+                             "--port", str(tuner_port())])
         last = (smoke.stdout.strip().splitlines() or ["<none>"])[-1]
         print("[smoke]", last)
         if smoke.returncode != 0:
@@ -455,24 +646,99 @@ async def run_arch1_session(opts) -> int:
                                   "mod attached, ready to dispatch"},
                          sort_keys=True))
         return 0
-    # 6. dispatch both seats
+    return 0
+
+
+async def dispatch(opts) -> int:
     args = [sys.executable, "-m", "civ_arena.game.civ6.live_driver",
             str(REPO / opts.config), "--phase", "dispatch-hotseat",
-            "--turns", str(opts.rounds), "--port", str(tuner_port())]
-    if opts.run_id:
-        args += ["--run-id", opts.run_id]
-    print("[dispatch]", " ".join(args[2:]), flush=True)
-    proc = subprocess.run(args, cwd=REPO)
-    return proc.returncode
+            "--turns", str(opts.rounds), "--port", str(tuner_port()),
+            "--run-id", opts.run_id, "--runs-root", str(opts.runs_root)]
+    startup_budget = getattr(opts, "driver_startup_timeout", opts.startup_timeout)
+    for flag, value in (("startup-timeout", startup_budget),
+                        ("match-timeout", opts.match_timeout),
+                        ("agent-turn-timeout", opts.agent_turn_timeout),
+                        ("recovery-timeout", opts.recovery_timeout),
+                        ("recovery-sweeps", opts.recovery_sweeps)):
+        args += ["--" + flag, str(value)]
+    print("[dispatch]", " ".join(args), flush=True)
+    # Keep complete driver output in its own supporting log. The driver handles
+    # its deadlines and SIGTERM; launcher cancellation gives it 20s to seal.
+    with (opts.artifacts / "dispatch.log").open("w") as log:
+        proc = await asyncio.create_subprocess_exec(*args, cwd=REPO, stdout=log, stderr=log)
+        try:
+            return await proc.wait()
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), 22)
+                except TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    print("[dispatch] hard kill: run INCOMPLETE")
+
+
+async def controlled_arch1(opts) -> int:
+    from civ_arena.arena.events import EventLog
+
+    opts.run_id = opts.run_id or f"arch1-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    # Allocate exclusively BEFORE any game input or save mutation.
+    opts.artifacts = opts.runs_root / (opts.run_id + "-startup")
+    opts.artifacts.mkdir(parents=True, exist_ok=False)
+    if (opts.runs_root / opts.run_id).exists():
+        raise RuntimeError("dispatch run id already exists")
+    log = EventLog(opts.artifacts / "events.jsonl")
+    namespace = dict(match_id=opts.run_id + "-startup", game_instance_id=opts.run_id,
+                     turn=0, phase_player_id=-1, player_id=None, agent_id=None,
+                     visibility_scope="referee")
+    log.write("MATCH_START", **namespace, startup_timeout_s=opts.startup_timeout)
+    started = time.monotonic()
+    code, failure = 2, None
+    try:
+        async with asyncio.timeout(opts.startup_timeout):
+            # Copy the entire existing save inventory before the fresh game
+            # can rotate autosaves or overwrite quicksave. Never remove it.
+            if SAVES.exists():
+                await asyncio.to_thread(shutil.copytree, SAVES, opts.artifacts / "saves-before")
+            code = await run_arch1_session(opts)
+            if code:
+                failure = f"startup gate failed: exit {code}"
+            elif opts.config:
+                await asyncio.sleep(TUNER_COOLDOWN_S)
+                opts.driver_startup_timeout = opts.startup_timeout - (time.monotonic() - started)
+                if opts.driver_startup_timeout <= 0:
+                    raise TimeoutError("startup budget exhausted before driver setup")
+    except (Exception, asyncio.CancelledError, KeyboardInterrupt) as exc:
+        failure = ui_control.redact(f"{type(exc).__name__}: {exc}")
+    finally:
+        summary = dict(clean=code == 0 and failure is None, aborted=failure,
+                       phase="arch1-startup", elapsed_s=time.monotonic() - started,
+                       startup_timeout_s=opts.startup_timeout,
+                       driver_startup_timeout_s=getattr(opts, "driver_startup_timeout", None),
+                       final_observation="unavailable; game preserved",
+                       cleanup="helper processes stopped; game preserved")
+        log.write("MATCH_END", **namespace, summary=summary)
+        (opts.artifacts / "summary.json").write_text(json.dumps(summary, sort_keys=True))
+        log.close()
+    if not summary["clean"]:
+        print("[startup] stopped and preserved:", failure, flush=True)
+        return code or 2
+    if opts.config:
+        return await dispatch(opts)
+    return 0
 
 
 async def main(opts) -> int:
     if getattr(opts, "session", None) == "arch1":
-        return await run_arch1_session(opts)
-    if opts.fresh_x and not bounce_x():
+        return await controlled_arch1(opts)
+    await require_active_display()
+    if opts.fresh_x and not await bounce_x():
         return 20
+    if opts.fresh_x:
+        await require_active_display()
     if opts.kill_first:
-        kill_game()
+        await kill_game()
         launch()
         if not await wait_for(port_up, 120, "tuner-bind", 10.0):
             return 1
@@ -488,7 +754,7 @@ async def main(opts) -> int:
     # be long closed before live_newgame's subprocess dials in
     await asyncio.sleep(8)
     # configure-then-host (order proven live): values stick through hosting
-    cfg = run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
+    cfg = await run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
                "config"])
     print("[config]", cfg.stdout.strip() or cfg.stderr.strip())
     if cfg.returncode != 0:
@@ -497,7 +763,7 @@ async def main(opts) -> int:
                ("MapSize|-601637951", "MinMajor|2", "Participating|2")):
         print("[config] read-back mismatch — refusing to host")
         return 3
-    host = run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
+    host = await run([sys.executable, str(REPO / "scripts" / "live_newgame.py"),
                 "host"])
     print("[host]", host.stdout.strip() or host.stderr.strip())
     if host.returncode != 0:
@@ -512,7 +778,7 @@ async def main(opts) -> int:
         return 5
     for attempt in range(3):
         fx, fy = find_teal_banner(capture_window())  # type: ignore[misc]
-        click(fx, fy)
+        await click_banner()
         print(f"[begin] clicked ({fx:.3f}, {fy:.3f}) attempt {attempt + 1}")
         await asyncio.sleep(12)
         try:
@@ -527,7 +793,7 @@ async def main(opts) -> int:
     if not await wait_for(ingame_up, MAP_LOAD_S, "ingame"):
         return 6
     if opts.smoke:
-        smoke = run([sys.executable,
+        smoke = await run([sys.executable,
                      str(REPO / "scripts" / "firetuner_smoke.py"), "--live",
                      "--port", str(tuner_port())])
         print("[smoke]", smoke.stdout.strip().splitlines()[-1] if
@@ -562,5 +828,16 @@ if __name__ == "__main__":
                     help="explicit run id for the dispatch")
     ap.add_argument("--no-smoke", action="store_true",
                     help="skip the smoke stage in --session arch1")
+    ap.add_argument("--startup-timeout", type=float, default=2700)
+    ap.add_argument("--match-timeout", type=float, default=7200)
+    ap.add_argument("--agent-turn-timeout", type=float, default=600)
+    ap.add_argument("--recovery-timeout", type=float, default=180)
+    ap.add_argument("--recovery-sweeps", type=int, default=8)
+    ap.add_argument("--runs-root", type=Path, default=REPO / "runs")
     ap.set_defaults(kill_first=True)
-    sys.exit(asyncio.run(main(ap.parse_args())))
+    async def entry():
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        loop.add_signal_handler(signal.SIGTERM, task.cancel)
+        return await main(ap.parse_args())
+    sys.exit(asyncio.run(entry()))

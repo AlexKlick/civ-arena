@@ -9,8 +9,10 @@ action tools routed GameCore/InGame per the live-probed table
 (docs/live-validation.md §6).
 
 Still NotImplementedError: ``snapshot``/``restore``, ``export_state``/
-``import_state`` (live save/load is M14e), and ground-truth visibility
-(``visibility_for`` returns EMPTY sets — the M14d declaration below).
+``import_state`` (live save/load is M14e). Visibility stays DERIVED from
+own entities (``visibility_for``); the engine's own fog answer is
+reachable on GameCore since M4 (the PlayersVisibility table route) and is
+audited via ``fog_audit_for`` — never used to widen what a seat sees.
 
 Design notes that cost nothing to forget:
 
@@ -50,8 +52,13 @@ from civ_arena.game.adapter import (
     ObserveRequest,
     RejectionReason,
 )
-from civ_arena.game.civ6 import lua_translator, response_parser
+from civ_arena.game.civ6 import lua_translator, productive_native, response_parser
+from civ_arena.game.civ6.entity_ids import decode
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
+from civ_arena.game.terrain_metadata import (
+    static_tile_fields,
+    visible_tile_fields,
+)
 
 _LIVE_POINTER = (
     "live FireTuner support is not implemented yet — see "
@@ -61,14 +68,17 @@ _LIVE_POINTER = (
 # agent-supplied ids/coords are INTERPOLATED into Lua source — only these
 # spellings may cross the boundary (defense in depth beyond the referee's
 # type checks; a hostile tech_id like "MINING'] Evil() --" dies here).
-_UNIT_ID = re.compile(r"^u\d+\Z")
-_CITY_ID = re.compile(r"^c\d+\Z")
+_UNIT_ID = re.compile(r"^u(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
+_CITY_ID = re.compile(r"^c(?:0|[1-9][0-9]*):(?:0|[1-9][0-9]*)\Z")
 _TOKEN = re.compile(r"^[A-Z0-9_]+\Z")
 _COORD = re.compile(r"^-?\d+,-?\d+\Z")
 
 # tools that operate on a unit: restore its movement before the command
 # (the lease froze every unit at engagement), re-freeze on rejection so
 # the release diff sees the frozen baseline.
+_PRODUCTION_VERIFY_TIMEOUT_S = 5.0
+_PRODUCTION_POLL_INTERVAL_S = 0.2
+
 _UNIT_TOOLS = frozenset({"move_unit", "attack", "fortify", "found_city"})
 
 # Codex P1-5: attrs each tool may legitimately move (the mod's DiffSinceLast
@@ -130,7 +140,52 @@ def _arg_violation(tool: str, args: dict[str, Any]) -> str | None:
         value = args.get(key)
         if value is not None and not pattern.match(str(value)):
             return f"{tool}.{key}={value!r} fails the canonical spelling"
+        if value is not None and key in ("unit_id", "target_id", "city_id"):
+            try:
+                decode(value, "c" if key == "city_id" else "u")
+            except ValueError:
+                return f"{tool}.{key} is not an exact owner-qualified ID"
+    if tool == "set_city_production":
+        item = args.get("item_id", "")
+        try:
+            if item.startswith(("DISTRICT_", "PROJECT_")):
+                productive_native.validate(item, args.get("dest"))
+            elif "dest" in args:
+                return "legacy production does not accept placement"
+        except ValueError:
+            return "invalid productive production shape"
     return None
+
+
+async def verify_production(connection, city_id: str, submitted: list[str]) -> int:
+    """Verify an asynchronous request without submitting it a second time."""
+    receipts = [row.split("|", 1)[1] for row in response_parser._split_lines(submitted)
+                if row.startswith("PRODUCTION_REQUEST|")]
+    if len(receipts) != 1 or not re.fullmatch(r"-?[0-9]+", receipts[0]):
+        raise RuntimeError("production request lacks an exact target-hash receipt")
+    expected = int(receipts[0])
+    if expected == 0:
+        raise RuntimeError("production request target hash is empty")
+    last = None
+    try:
+        async with asyncio.timeout(_PRODUCTION_VERIFY_TIMEOUT_S):
+            while True:
+                rows = await connection.execute_write(
+                    lua_translator.current_production_read(city_id))
+                values = [row.split("|", 1)[1] for row in response_parser._split_lines(rows)
+                          if row.startswith("CURPROD|")]
+                if len(values) != 1 or not re.fullmatch(r"-?[0-9]+", values[0]):
+                    raise RuntimeError("production readback unavailable after submission")
+                last = int(values[0])
+                if last == expected:
+                    return expected
+                if last == -1:
+                    raise RuntimeError("production city or owner unavailable after submission")
+                await asyncio.sleep(_PRODUCTION_POLL_INTERVAL_S)
+    except TimeoutError as exc:
+        raise RuntimeError(
+            f"production request unconfirmed: expected hash {expected}, last {last}; "
+            "submitted request may still apply") from exc
 
 
 _MOD_VERSION_RE = re.compile(r'Puppeteer\.version\s*=\s*"([^"]+)"')
@@ -166,7 +221,7 @@ _ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
     "set_research": lambda pid, a: (lua_translator.set_research(
         pid, a["tech_id"]), False),
     "set_city_production": lambda _pid, a: (lua_translator.set_city_production(
-        a["city_id"], a["item_id"]), True),
+        a["city_id"], a["item_id"], a.get("dest")), True),
     "purchase": lambda _pid, a: (lua_translator.purchase(
         a["city_id"], a["item_id"]), True),
 }
@@ -178,13 +233,24 @@ _ACT_BUILDERS: dict[str, Callable[..., tuple[str, bool]]] = {
 SimulateHook = Callable[[str, int, int], str]
 
 # M17c derived-visibility sight radii (axial hex distance). The engine's
-# fog state is not exposed in this build's GameCore Lua, so the adapter
-# derives the visible set from own entities. Deliberately CONSERVATIVE:
-# a hill-top unit or a walled city sees farther in the real engine —
-# under-revealing is the safe side of the no-leak contract (declared
-# approximation; hills/walls bonuses would need a per-plot read to lift).
+# OWN fog answer is now reachable (M4, Amendment 1.2: the
+# PlayersVisibility TABLE route works on GameCore — the 2026-08-31
+# negative finding applied to the plot-object route), but the ADAPTER's
+# derived visible set stays the no-leak authority: only derived-visible
+# coordinates are ever asked about. The derived set is deliberately
+# CONSERVATIVE — a hill-top unit or a walled city sees farther in the real
+# engine, and under-revealing is the safe side of the no-leak contract
+# (declared approximation; hills/walls bonuses would need a per-plot read
+# to lift). VMAP|4's `engvis` field audits the disagreement between the
+# two (fog_audit_for).
 UNIT_SIGHT = 2
 CITY_SIGHT = 3
+
+# which VM the targeted terrain read runs in (contract §5). gamecore (the
+# default) is the read transport — engvis works there (Amendment 1.2) —
+# so ingame is an OPT-IN experiment for future InGame-only tile fields,
+# never a fog requirement.
+VISIBLE_MAP_CONTEXTS = frozenset({"gamecore", "ingame"})
 
 
 def _ring(q: int, r: int, radius: int) -> set[str]:
@@ -226,24 +292,33 @@ class FireTunerAdapter:
         poll_timeout_s: float = 10.0,
         turn_wait_s: float = 120.0,
         simulate_hook: SimulateHook | None = None,
+        visible_map_context: str = "gamecore",
     ) -> None:
         if end_phase_strategy not in ("h1", "h2", "h3"):
             raise ValueError(
                 f"end_phase_strategy must be h1|h2|h3, got "
                 f"{end_phase_strategy!r}")
+        if visible_map_context not in VISIBLE_MAP_CONTEXTS:
+            raise ValueError(
+                f"visible_map_context must be one of "
+                f"{sorted(VISIBLE_MAP_CONTEXTS)}, got "
+                f"{visible_map_context!r}")
+        self._visible_map_context = visible_map_context
         self._conn = conn if conn is not None else GameConnection(host, port)
         self._strategy = end_phase_strategy
         self._poll_interval_s = poll_interval_s
         self._poll_timeout_s = poll_timeout_s
         self._turn_wait_s = turn_wait_s
         self._simulate = simulate_hook
+        self.handoff_wait = None
         self._phase_open = -1
         self._turn_mirror = -1
         self._journal: list[MutationRecord] = []
         self._digest_text: str | None = None
         # M17c per-player visibility cache: player_id -> the last parsed
         # visible-map doc (tiles + the currently-seen key set). Written on
-        # each VISIBLE_MAP observe; read by visibility_for().
+        # each VISIBLE_MAP observe; read by visibility_for(). M4 adds the
+        # fog_audit slice (derived vs engine visibility per read).
         self._map_vis: dict[int, dict[str, Any]] = {}
         # hash scoping (Codex P1-4): while a phase is open (and for the
         # sealed phase-end hash) state_hash covers ONLY the phase owner's
@@ -253,7 +328,16 @@ class FireTunerAdapter:
         self._sealed_hash: str | None = None
         self._diff_seq = 0
         self._pre_end_switch: int | None = None
+        self.human_seats: tuple[int, ...] = ()
+        self.human_handoff_audit = None
+        self.handoff_start = None
         self.state = _LiveStateView(self)
+
+    async def activate_human_seat(self, player_id: int, turn: int) -> None:
+        from civ_arena.game.civ6 import human_handoff
+        await human_handoff.activate(
+            self._conn, player_id, turn, self.human_seats,
+            on_result=self.human_handoff_audit)
 
     def set_pre_end_switch(self, player_id: int | None) -> None:
         """M18 hotseat: switch local to THIS seat before the driven seat's
@@ -372,6 +456,15 @@ class FireTunerAdapter:
             raise RuntimeError(
                 f"PuppeteerMod handshake gate failed: {doc} — command_diff "
                 "required for M14d dispatch (mod >= 0.3)")
+        if doc["mod_version"] != "0.4.0":
+            raise RuntimeError(
+                "PuppeteerMod 0.4.0 required for guarded handoff, owner-qualified IDs "
+                "checked restore completion, silent native lease hooks, per-player "
+                "ambient windows, and the all-players roster")
+        if doc.get("supports_guarded_handoff") is not True:
+            raise RuntimeError("PuppeteerMod guarded_handoff capability required")
+        if doc.get("supports_reward_receipts") is not True:
+            raise RuntimeError("PuppeteerMod native reward_receipts capability required")
         return doc
 
     def capabilities(self) -> AdapterCapabilities:
@@ -407,7 +500,7 @@ class FireTunerAdapter:
         await self._conn.execute_read(
             lua_translator.end_ambient_window(player_id))
         ambient = await self._conn.execute_read(lua_translator.dump_ambient())
-        manifest = response_parser.parse_ledger_lines(ambient)
+        manifest = response_parser.parse_ledger_lines(ambient, qualified=True)
         self._phase_open = player_id
         self._hash_owner = player_id
         self._sealed_hash = None
@@ -433,7 +526,14 @@ class FireTunerAdapter:
         # post-processing.
         await self._refresh_digest()
         self._sealed_hash = self.state_hash()
-        if self._pre_end_switch is not None \
+        if self.human_seats:
+            from civ_arena.game.civ6 import human_handoff
+            remaining = self.handoff_start() if self.handoff_start else 180
+            async with asyncio.timeout(remaining):
+                await human_handoff.end_current(
+                    self._conn, player_id, turn, self.human_seats,
+                    on_result=self.human_handoff_audit)
+        elif self._pre_end_switch is not None \
                 and self._pre_end_switch != player_id:
             # M18 both-seats (live-proven 2026-09-03): a LOCAL seat's next
             # slice only holds when local == that seat at the boundary
@@ -443,14 +543,10 @@ class FireTunerAdapter:
             # seat it would end the WRONG seat — so the driven seat's turn
             # ends via the H2 non-local path instead.
             nxt = self._pre_end_switch
-            sw = await self._conn.execute_read(
-                lua_translator.switch_local_player(nxt))
-            want = f"LOCAL_SWITCHED|{nxt}|{nxt}"
-            if not any(ln.strip() == want for ln in sw):
-                raise RuntimeError(
-                    f"pre-end local switch to p{nxt} did not take: {sw!r}")
-            await self._conn.execute_read(
-                lua_translator.finish_all_moves(player_id))
+            async with asyncio.timeout(5):
+                rows = await self._conn.execute_read(
+                    lua_translator.guarded_handoff(player_id, turn, nxt))
+                response_parser.parse_handoff_receipt(rows, player_id, turn, nxt)
         elif self._strategy == "h1":
             await self._conn.execute_write(
                 lua_translator.request_end_turn(player_id))
@@ -463,17 +559,20 @@ class FireTunerAdapter:
         # advanced, or the lease moved to ANOTHER player (the M18 hotseat
         # hand-off engages the next seat's lease immediately — waiting for
         # -1 would time out; single-seat behavior is unchanged: -1 != pid).
-        await self._await(
-            lambda p: (p.get("PUPPET_ACTIVE") is False
-                       or int(p.get("LEASE_PLAYER", player_id)) != player_id
-                       or int(p.get("TURN", -1)) > turn),
-            f"lease release for player {player_id} (D7-{self._strategy})",
-            timeout_s=self._turn_wait_s)
+        if self.handoff_wait is not None:
+            await self.handoff_wait(player_id, turn)
+        else:
+            await self._await(
+                lambda p: (p.get("PUPPET_ACTIVE") is False
+                           or int(p.get("LEASE_PLAYER", player_id)) != player_id
+                           or int(p.get("TURN", -1)) > turn),
+                f"lease release for player {player_id} (D7-{self._strategy})",
+                timeout_s=self._turn_wait_s)
         # Release books any lease-vs-close drift as UNDECLARED actuals —
         # the referee's next sweep flags them (the live make-or-break check)
         await self._conn.execute_read(lua_translator.release(player_id, turn))
         ledger = await self._conn.execute_read(lua_translator.dump_ledger())
-        for doc in response_parser.parse_ledger_lines(ledger):
+        for doc in response_parser.parse_ledger_lines(ledger, qualified=True):
             self._journal.append(MutationRecord.from_doc(doc))
         self._hash_owner = None
         self._phase_open = -1
@@ -512,7 +611,7 @@ class FireTunerAdapter:
 
     async def _refresh_digest(self) -> None:
         lines = await self._conn.execute_read(lua_translator.mod_digest())
-        self._digest_text = response_parser.parse_digest(lines)
+        self._digest_text = response_parser.parse_digest(lines, qualified=True)
 
     async def _await(
         self, predicate: Callable[[dict[str, Any]], bool], what: str,
@@ -537,33 +636,43 @@ class FireTunerAdapter:
     # -- observation ----------------------------------------------------------
     async def observe(self, req: ObserveRequest) -> Any:
         # OMNISCIENT by seam contract — the referee projects scope AFTER this
-        # returns. Reads are GameCore (verified accessors), except
-        # AVAILABLE_PRODUCTION whose CanStartOperation gate is InGame-only.
+        # returns. City queues and AVAILABLE_PRODUCTION use InGame; the
+        # current production getter is unavailable on GameCore city objects.
         if req.kind is ObserveKind.OVERVIEW:
             lines = await self._conn.execute_read(
                 lua_translator.overview_read())
             return response_parser.parse_overview(lines)
         if req.kind is ObserveKind.UNITS:
             lines = await self._conn.execute_read(lua_translator.units_read())
-            return response_parser.parse_units(lines)
+            return response_parser.parse_units(lines, qualified=True)
         if req.kind is ObserveKind.CITIES:
-            lines = await self._conn.execute_read(lua_translator.cities_read())
-            return response_parser.parse_cities(lines)
+            # M4: extended rows (CITIES|2) — city-states included, real hp
+            # when the engine answers, unread keys absent (no placeholder
+            # 100). The build-queue getter stays InGame-only, so the read
+            # keeps the write transport.
+            lines = await self._conn.execute_write(
+                lua_translator.cities_read(extended=True))
+            return response_parser.parse_cities(lines, qualified=True)
         if req.kind is ObserveKind.VISIBLE_MAP:
-            # M17c derived visibility (the engine's fog state is not
-            # exposed in this build's GameCore Lua — live-probed
-            # 2026-08-31). The currently-visible set is hex radius
-            # UNIT_SIGHT around own units / CITY_SIGHT around own city
-            # centers, computed from the same reads the agents use; the
-            # targeted terrain read asks ONLY about those coordinates, so
-            # no unseen terrain can enter the doc. Remembered tiles are
-            # the ACCUMULATION of every previously-visible set (the M11
-            # no-expiry epistemics, adapter-side), served from cache with
-            # their last-seen terrain — never re-read from the wire.
+            # M17c derived visibility. The engine's own fog answer is now
+            # reachable (M4, Amendment 1.2: the PlayersVisibility TABLE
+            # route works on GameCore), but the no-leak authority stays
+            # the DERIVED set: hex radius UNIT_SIGHT around own units /
+            # CITY_SIGHT around own city centers, computed from the same
+            # reads the agents use; the targeted terrain read asks ONLY
+            # about those coordinates, so no unseen terrain can enter the
+            # doc. VMAP|4's `engvis` field audits engine agreement
+            # (fog_audit_for). Remembered tiles are the ACCUMULATION of
+            # every previously-visible set (the M11 no-expiry
+            # epistemics, adapter-side), served from cache with their
+            # last-seen static keys — never re-read from the wire.
             units = response_parser.parse_units(await self._conn.execute_read(
-                lua_translator.units_read()))
+                lua_translator.units_read()), qualified=True)
+            # lite rows here: the map read only needs positions/owners —
+            # extended fields would double the InGame round-trips.
             cities = response_parser.parse_cities(
-                await self._conn.execute_read(lua_translator.cities_read()))
+                await self._conn.execute_write(
+                    lua_translator.cities_read(extended=False)), qualified=True)
             visible: set[str] = set()
             for u in units:
                 if u["owner"] == req.player_id:
@@ -573,20 +682,40 @@ class FireTunerAdapter:
                     visible |= _ring(c["q"], c["r"], CITY_SIGHT)
             coords = [(int(k.split(",")[0]), int(k.split(",", 1)[1]))
                       for k in sorted(visible)]
-            parsed = response_parser.parse_visible_map(
-                await self._conn.execute_read(
-                    lua_translator.visible_map_read(req.player_id, coords),
-                    timeout=25.0))
+            map_lua = lua_translator.visible_map_read(req.player_id, coords)
+            map_call = (self._conn.execute_write(map_lua, timeout=25.0)
+                        if self._visible_map_context == "ingame"
+                        else self._conn.execute_read(map_lua, timeout=25.0))
+            parsed = response_parser.parse_visible_map(await map_call)
             turn = parsed["turn"]
             fresh = parsed["tiles"]
+            if set(fresh) - visible:
+                raise ValueError("terrain response contains unrequested coordinates")
             cache = self._map_vis.setdefault(
                 req.player_id, {"turn": turn, "tiles": {}, "visible": set()})
-            # remembered = every tile EVER visible, terrain frozen at its
-            # last-seen read; the merge is monotone by construction
+            # remembered = every tile EVER visible, static keys frozen at
+            # their last-seen read; the merge is monotone by construction
             for key, tile in fresh.items():
                 cache["tiles"][key] = tile
             cache["turn"] = turn
             cache["visible"] = visible
+            # M4 fog audit: engine agreement over exactly the requested
+            # (derived-visible) coordinates — an `engvis: false` there is
+            # a derived-vs-engine disagreement, reported, never acted on.
+            engine_visible = sum(
+                1 for t in fresh.values() if t.get("engine_visible") is True)
+            engine_not = sum(
+                1 for t in fresh.values() if t.get("engine_visible") is False)
+            unavailable = len(fresh) - engine_visible - engine_not
+            disagree = [k for k, t in sorted(fresh.items())
+                        if t.get("engine_visible") is False]
+            cache["fog_audit"] = {
+                "requested": len(coords),
+                "engine_visible": engine_visible,
+                "engine_not_visible": engine_not,
+                "unavailable": unavailable,
+                "disagree_coords": disagree[:64],
+            }
             # city tagging: a Python-side join against the omniscient
             # cities read, applied ONLY on currently-visible tiles (a
             # visible tile legitimately shows the city standing on it)
@@ -597,17 +726,28 @@ class FireTunerAdapter:
                     entry = cache["tiles"][key]
                     if "owner" in entry:
                         entry["city"] = city_at[key]
-            # the returned doc: visible tiles with owner/city, remembered
-            # tiles terrain-only (ownership stripped on the way out — the
-            # cache keeps full rows but the doc never leaks fog ownership)
+            # the returned doc: visible tiles with owner/city plus their
+            # re-validated static+dynamic keys, remembered tiles
+            # static-only (ownership/dynamic keys stripped on the way out
+            # — the cache keeps full rows but the doc never leaks fog
+            # ownership)
             out: dict[str, dict[str, Any]] = {}
             for key, tile in cache["tiles"].items():
                 if key in visible:
-                    out[key] = tile
+                    entry = {**static_tile_fields(tile),
+                             **visible_tile_fields(tile)}
+                    if "owner" in tile:
+                        entry["owner"] = tile["owner"]
+                        entry["city"] = tile["city"]
+                    out[key] = entry
                 else:
-                    out[key] = {"terrain": tile["terrain"]}
+                    out[key] = static_tile_fields(tile)
             return {"turn": turn, "tiles": out}
         if req.kind is ObserveKind.AVAILABLE_RESEARCH:
+            if req.research_building_briefing:
+                from civ_arena.game.civ6 import research_briefing
+                lines = await self._conn.execute_read(research_briefing.query(req.player_id))
+                return research_briefing.parse(lines, req.player_id)
             lines = await self._conn.execute_read(
                 lua_translator.available_research_read(req.player_id))
             return response_parser.parse_available_research(lines)
@@ -615,30 +755,48 @@ class FireTunerAdapter:
             if req.subject_id is None:
                 raise ValueError(
                     "AVAILABLE_PRODUCTION requires subject_id (city_id)")
+            if decode(req.subject_id, "c")[0] != req.player_id:
+                raise ValueError("production observation city owner mismatch")
             lines = await self._conn.execute_write(
                 lua_translator.available_production_read(
-                    int(req.subject_id[1:])))
-            return response_parser.parse_available_production(lines)
+                    req.subject_id))
+            return response_parser.parse_available_production(lines, require_productive=True)
         raise ValueError(f"unknown observe kind: {req.kind}")
 
     def visibility_for(self, player_id: int) -> tuple[frozenset[str], frozenset[str]]:
         """M17c: (observable, remembered) from the CACHED derived map read.
-        The engine's fog state is not exposed in this build's GameCore
-        Lua, so visibility is derived from the player's own entities
+        The engine's own fog answer is reachable since M4 (the
+        PlayersVisibility table route works on GameCore — Amendment 1.2)
+        but visibility stays DERIVED from the player's own entities
         (under-approximation by construction: own-entity sight, never the
         engine's full reveal). Before the first map observation of a
         player the sets are EMPTY — under-visibility, never
         over-visibility, the same fail-safe side as the retired M14d
         declaration. The projection therefore shows a foreign entity only
         while its tile is within current own-entity sight, and remembered
-        tiles keep their terrain (never fog ownership — the doc strips
-        it on the way out)."""
+        tiles keep their static keys (never fog ownership — the doc strips
+        it on the way out). Engine-vs-derived agreement is AUDITED, never
+        acted on: see fog_audit_for()."""
         vis = self._map_vis.get(player_id)
         if vis is None:
             return frozenset(), frozenset()
         visible = frozenset(vis["visible"])
         revealed = frozenset(vis["tiles"])
         return visible, revealed - visible
+
+    def fog_audit_for(self, player_id: int) -> dict[str, Any]:
+        """M4: the last VMAP|4 read's engine-visibility audit for a player
+        — how often the ENGINE's own PlayersVisibility answer agreed with
+        the adapter's derived visible set over exactly the requested
+        coordinates. Zeroed before the first map observation (fail-safe:
+        no claim either way). Audit-only: the projection never consults
+        it."""
+        vis = self._map_vis.get(player_id)
+        if vis is None or "fog_audit" not in vis:
+            return {"requested": 0, "engine_visible": 0,
+                    "engine_not_visible": 0, "unavailable": 0,
+                    "disagree_coords": []}
+        return vis["fog_audit"]
 
     # -- action -----------------------------------------------------------------
     async def act(self, cmd: ActionCommand) -> ActionResult:
@@ -658,19 +816,48 @@ class FireTunerAdapter:
             return ActionResult(
                 status="rejected", result=None, mutations=(),
                 rejection="args_invalid", error=bad)
+        for key, kind, rejection in (("unit_id", "u", "not_your_unit"),
+                                     ("city_id", "c", "not_your_city")):
+            if key in cmd.args and decode(cmd.args[key], kind)[0] != cmd.player_id:
+                return ActionResult(status="rejected", result=None, mutations=(),
+                                    rejection=rejection,
+                                    error="entity owner differs from acting seat")
         unit_id = cmd.args.get("unit_id")
-        if cmd.tool in _UNIT_TOOLS:
-            # unfreeze exactly this unit (the lease froze all of them at
-            # engagement; NEVER bulk-restore; once per unit per lease —
-            # mod-side, Codex P1-1)
-            await self._conn.execute_read(
-                lua_translator.restore_unit(unit_id))
+        diff_seq = self._next_diff_seq()
+        reward_nonce = None
+        productive_generation = productive_native.generation(self._conn)
+        if cmd.tool == "move_unit":
+            reward_nonce = _sha({"lease": cmd.lease_id, "key": cmd.idempotency_key,
+                                 "turn": self._turn_mirror, "seq": diff_seq})
         try:
+            if reward_nonce is not None:
+                rows = await self._conn.execute_read(lua_translator.begin_reward_command(
+                    cmd.player_id, self._turn_mirror, unit_id, reward_nonce,
+                    cmd.args["dest"], diff_seq))
+                response_parser.parse_reward_begin(rows, reward_nonce)
+            if cmd.tool in _UNIT_TOOLS:
+                lines = await self._conn.execute_read(lua_translator.restore_unit(unit_id))
+                restored = response_parser.parse_restore_receipt(lines, unit_id)
+                if restored == "unknown_entity":
+                    await self._conn.execute_read(lua_translator.freeze_unit(unit_id))
+                    if reward_nonce is not None:
+                        await self._conn.execute_read(
+                            lua_translator.cancel_reward_command(reward_nonce))
+                    return ActionResult(status="rejected", result=None, mutations=(),
+                                        rejection="unknown_entity", error=unit_id)
             lua, ingame = builder(cmd.player_id, cmd.args)
-            lines = await (self._conn.execute_write(lua) if ingame
-                           else self._conn.execute_read(lua))
+            if cmd.tool == "set_city_production" and productive_native.kind(cmd.args["item_id"]):
+                async with asyncio.timeout(_PRODUCTION_VERIFY_TIMEOUT_S):
+                    lines = await productive_native.execute_once(self._conn, lua)
+            else:
+                lines = await (self._conn.execute_write(lua) if ingame
+                               else self._conn.execute_read(lua))
             verdict = response_parser.parse_act(lines)
         except BaseException:
+            if reward_nonce is not None:
+                with contextlib.suppress(Exception):
+                    await self._conn.execute_read(
+                        lua_translator.cancel_reward_command(reward_nonce))
             # Codex P1-7: a Lua error after the restore must not leak
             # restored movement into the release diff — freeze it back,
             # then let the failure propagate (the driver aborts the run)
@@ -685,21 +872,46 @@ class FireTunerAdapter:
                 # movement never books as undeclared drift at release
                 await self._conn.execute_read(
                     lua_translator.freeze_unit(unit_id))
+            if reward_nonce is not None:
+                await self._conn.execute_read(
+                    lua_translator.cancel_reward_command(reward_nonce))
             return ActionResult(
                 status="rejected", result=verdict, mutations=(),
                 rejection=_rejection_value(verdict["rejection"]),
                 error=verdict["detail"])
+        production_hash = None
+        production_readback = None
+        if cmd.tool == "set_city_production":
+            if productive_native.kind(cmd.args["item_id"]):
+                production_readback = await productive_native.verify(
+                    self._conn, cmd.args["city_id"], cmd.args["item_id"], cmd.args.get("dest"),
+                    lines, timeout=_PRODUCTION_VERIFY_TIMEOUT_S,
+                    interval=_PRODUCTION_POLL_INTERVAL_S,
+                    connection_generation=productive_generation)
+            else:
+                production_hash = await verify_production(self._conn, cmd.args["city_id"], lines)
         # Codex P2-10: a landed act MUST refresh the digest before returning
         # — otherwise execute()'s post-hash is the PRE-command digest and the
         # log's hash trail goes stale mid-lease.
         await self._refresh_digest()
+        causal_receipts = []
+        reward_lines = None
+        if reward_nonce is not None:
+            rows = await self._conn.execute_read(
+                lua_translator.finish_reward_command(reward_nonce, diff_seq))
+            reward_lines, causal_receipts = response_parser.parse_reward_finish(
+                rows, reward_nonce, diff_seq, cmd.player_id, self._turn_mirror, unit_id)
         muts = await self._drain_command_diff(
-            cmd.player_id, _TOOL_ATTRS.get(cmd.tool, ""),
-            self._next_diff_seq())
-        return ActionResult(
-            status="accepted",
-            result={"tool": cmd.tool, "detail": verdict["detail"]},
-            mutations=tuple(muts))
+            cmd.player_id, _TOOL_ATTRS.get(cmd.tool, ""), diff_seq, lines=reward_lines)
+        result = {"tool": cmd.tool, "detail": verdict["detail"]}
+        if causal_receipts:
+            result["causal_receipts"] = causal_receipts
+        if production_readback is not None:
+            result['production_readback'] = production_readback
+        if production_hash is not None:
+            result.update(production_hash=production_hash,
+                          verification="subsequent_ingame_read")
+        return ActionResult(status="accepted", result=result, mutations=tuple(muts))
 
     def _next_diff_seq(self) -> int:
         """Per-lease monotonically increasing diff sequence (Codex P1-6):
@@ -710,15 +922,17 @@ class FireTunerAdapter:
 
     async def _drain_command_diff(self, player_id: int,
                                   attrs: str = "",
-                                  seq: int = 0) -> list[MutationRecord]:
+                                  seq: int = 0, *,
+                                  lines: list[str] | None = None) -> list[MutationRecord]:
         """The commanded-effects seam (mod v0.3): journal DiffSinceLast's
         rows as BOTH the command's mutations (allowed, via the returned
         records) and actuals (via the journal the referee drains) — the
         exact-key multiset diff then reconciles them. Rows the diff never
         covers (production, promotions — declared recorder limitations)
         simply book nothing, on both sides."""
-        lines = await self._conn.execute_read(
-            lua_translator.diff_since_last(attrs, seq))
+        if lines is None:
+            lines = await self._conn.execute_read(
+                lua_translator.diff_since_last(attrs, seq))
         if any(ln.startswith("MOD_DIFF|unavailable") for ln in lines):
             raise RuntimeError(
                 "mod has no DiffSinceLast (need >= 0.3) — commanded effects "
@@ -729,7 +943,7 @@ class FireTunerAdapter:
                 entity_id=doc["entity_id"], attr=doc["attr"],
                 before=doc["before"], after=doc["after"],
                 origin="command")
-            for doc in response_parser.parse_ledger_lines(lines)
+            for doc in response_parser.parse_ledger_lines(lines, qualified=True)
         ]
         self._journal.extend(records)
         return records

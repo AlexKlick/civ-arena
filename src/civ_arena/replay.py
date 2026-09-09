@@ -36,7 +36,7 @@ ARG_ORDER: dict[str, list[str]] = {
     "fortify": ["unit_id"],
     "found_city": ["unit_id", "name"],
     "set_research": ["tech_id"],
-    "set_city_production": ["city_id", "item_id"],
+    "set_city_production": ["city_id", "item_id", "dest"],
     "purchase": ["city_id", "item_id"],
     "end_turn": [],
     "write_diary": ["text"],
@@ -70,12 +70,16 @@ class ReplayRuntime:
             call = self._queue.popleft()
             fn = getattr(facade, call.tool)
             pos = [call.args[k] for k in ARG_ORDER.get(call.tool, []) if k in call.args]
-            if call.tool == "purchase" or call.key is not None:
-                await fn(*pos, idempotency_key=call.key)
+            if call.tool == 'get_available_research' and 'research_building_briefing' in call.args:
+                result = await fn(
+                    research_building_briefing=call.args['research_building_briefing'])
+            elif call.tool == "purchase" or call.key is not None:
+                result = await fn(*pos, idempotency_key=call.key)
             else:
-                await fn(*pos)
+                result = await fn(*pos)
             self.issued += 1
-            if call.tool == "end_turn":
+            if (call.tool == "end_turn" and isinstance(result, dict)
+                    and result.get("status") == "accepted"):
                 return
         # queue exhausted without a recorded end_turn (torn tail, or an agent
         # that never completed): close the phase anyway so replay reports a
@@ -162,6 +166,25 @@ async def replay_run(run_dir: Path, spec: MatchSpec,
         raise ValueError(
             f"replay dir {replay_dir} is the SOURCE run dir — refusing "
             "to replay into it (the wipe would delete the trust root)")
+    # A spectate run has ZERO driven tool calls (a human played the seat;
+    # the harness only observed) — re-executing through an Arena would
+    # fabricate a synthetic sim match. Return the structural audit
+    # before any Arena construction.
+    if _is_spectate_run(run_dir):
+        return _spectate_certificate(run_dir)
+    # CAP-02 no-synthetic-fallback: a spectate-SHAPED log (spectate round
+    # kinds present) whose summary is missing or malformed would fall
+    # through to an Arena replay here — zero TOOL_CALLs would run a
+    # fabricated synthetic match against it. Refuse loudly instead.
+    pre_records = _load_records(Path(run_dir) / "events.jsonl")
+    spectate_shaped = any(
+        rec.get("kind") in ("SPECTATOR_SNAPSHOT", "HUMAN_TURN_START",
+                            "HUMAN_TURN_END")
+        for rec in pre_records)
+    if spectate_shaped:
+        raise ValueError(
+            f"{run_dir}: spectate-shaped log (spectate round kinds present) "
+            "with a missing or malformed summary — refusing synthetic replay")
     # a replay dir is a DERIVED artifact, never a trust root: a stale one
     # from an earlier replay would have the Arena APPEND a second match
     # into the same events.jsonl (observed 2026-09-03: 388+308 'identical'
@@ -266,6 +289,73 @@ def _is_live_run(run_dir: Path) -> bool:
         return False
 
 
+def _is_spectate_run(run_dir: Path) -> bool:
+    summary = Path(run_dir) / "summary.json"
+    if not summary.exists():
+        return False
+    try:
+        return json.loads(summary.read_text()).get("phase") == "spectate"
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+_SPECTATE_FORBIDDEN_KINDS = frozenset({
+    "TOOL_CALL", "TOOL_RESULT", "LEASE_GRANT", "LEASE_RELEASE",
+    "LEASE_EXPIRED", "VIOLATION", "UNAUTHORIZED_TOOL_CALL",
+})
+
+
+def _spectate_certificate(run_dir: Path) -> dict[str, Any]:
+    """Structural audit for a spectate run, on the ONE shared core
+    (civ_arena.spectate_audit) — the same rule set the run validator
+    applies, declared as profile='structural'. There is nothing to
+    re-execute (zero driven tool calls): the result says so explicitly
+    and never claims a comparison. Open-prefix outcomes
+    (operator-stopped / interrupted / crashed / running prefix)
+    tolerate one trailing unpaired human-turn START — an observed open
+    interval, never a fabricated completion. A tampered log fails here,
+    loudly."""
+    from civ_arena.spectate_audit import (
+        OPEN_PREFIX_OUTCOMES,
+        SPECTATE_FORBIDDEN_KINDS,  # noqa: F401  (re-exported for callers)
+        classify_outcome,
+        final_interval_state,
+        structural_problems,
+    )
+    records = _load_records(Path(run_dir) / "events.jsonl")
+    summary = json.loads((Path(run_dir) / "summary.json").read_text()) \
+        if (Path(run_dir) / "summary.json").exists() else {}
+    outcome = classify_outcome(summary)
+    problems = structural_problems(
+        records, summary=summary,
+        allow_open_prefix=outcome in OPEN_PREFIX_OUTCOMES)
+    return {
+        "summary": summary,
+        # truthful outcome fields (CAP-02 / F-05)
+        "audit_valid": not problems,
+        "profile": "structural",
+        "outcome": outcome,
+        "final_interval": final_interval_state(records),
+        "capture_complete_for_declared_scope": None,
+        "reexecution_performed": False,
+        "comparison_result": "not_performed",
+        "schema_note": (
+            "structural audit only — no re-execution and no state "
+            "comparison were performed; legacy keys identical/"
+            "replayed_events are retained for compatibility and derive "
+            "from audit_valid, not from any replay"),
+        # legacy keys (documented, derived — never silent reinterpretation)
+        "identical": not problems,
+        "problems": problems,
+        "mode": "spectate",
+        "live_events": len(records),
+        "replayed_events": len(records),
+        "live_final_hash": summary.get("final_state_hash"),
+        "replayed_final_hash": None,
+        "live_mode": True,
+    }
+
+
 def _live_turn_offset(records: list[dict[str, Any]]) -> int:
     """The live log's first driven turn minus one (a live dispatch that
     attached at engine turn 2 has offset 1). 0 when there are no calls."""
@@ -317,6 +407,25 @@ async def _main_async(argv: list[str] | None = None) -> int:
     spec = load_config(opts.config)
     replay_dir = opts.replay_dir or (opts.run_dir.parent / f"{opts.run_dir.name}-replay")
     result = await replay_run(opts.run_dir, spec, replay_dir, live=opts.live)
+    if result.get("mode") == "spectate":
+        # truthful language: this is a STRUCTURAL AUDIT of the supplied
+        # records — no re-execution, no state comparison, ever (CAP-02)
+        if result["audit_valid"]:
+            print(f"SPECTATE run — structural audit OK "
+                  f"(profile={result['profile']}, "
+                  f"outcome={result['outcome']}, "
+                  f"final_interval={result['final_interval']}, "
+                  f"{result['live_events']} events; re-execution not "
+                  f"performed, comparison not performed)")
+            return 0
+        print(f"SPECTATE run — structural audit FAILED "
+              f"(profile={result['profile']}, "
+              f"outcome={result['outcome']}) over "
+              f"{result['live_events']} events "
+              f"(re-execution not performed, comparison not performed):")
+        for problem in result["problems"]:
+            print("  ", problem)
+        return 4
     if result["identical"]:
         print(f"REPLAY OK: {result['live_events']} comparable events identical; "
               f"final hash {result['replayed_final_hash']}"

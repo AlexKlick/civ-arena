@@ -1,0 +1,998 @@
+{
+  "source_wire_path": "runs/minimax100-20260906T181834Z/wire.jsonl",
+  "source_wire_sha256": "bcbc3831ec1eec06eee125a857c31f8dc486e7da8946a0d90a58b5f8e80bef98",
+  "scope": "Last retained reads at P1 turn28; currently derived-visible terrain only, no reconstruction of earlier remembered terrain. This subset still reproduces critical-state overflow.",
+  "player_id": 1,
+  "turn": 28,
+  "state": {
+    "get_units": [
+      {
+        "unit_id": "u1:131073",
+        "owner_id": 1,
+        "type": "WARRIOR",
+        "coord": "43,11",
+        "hp": 100,
+        "hp_bucket": 4,
+        "movement": 0,
+        "max_movement": 2,
+        "strength": 20,
+        "ranged_strength": 0,
+        "fortified": false
+      },
+      {
+        "unit_id": "u1:196608",
+        "owner_id": 1,
+        "type": "SCOUT",
+        "coord": "45,18",
+        "hp": 100,
+        "hp_bucket": 4,
+        "movement": 0,
+        "max_movement": 3,
+        "strength": 10,
+        "ranged_strength": 0,
+        "fortified": true
+      },
+      {
+        "unit_id": "u1:262146",
+        "owner_id": 1,
+        "type": "SCOUT",
+        "coord": "45,20",
+        "hp": 100,
+        "hp_bucket": 4,
+        "movement": 0,
+        "max_movement": 3,
+        "strength": 10,
+        "ranged_strength": 0,
+        "fortified": false
+      },
+      {
+        "unit_id": "u1:327683",
+        "owner_id": 1,
+        "type": "SCOUT",
+        "coord": "47,15",
+        "hp": 100,
+        "hp_bucket": 4,
+        "movement": 0,
+        "max_movement": 3,
+        "strength": 10,
+        "ranged_strength": 0,
+        "fortified": false
+      },
+      {
+        "unit_id": "u1:393220",
+        "owner_id": 1,
+        "type": "SCOUT",
+        "coord": "48,15",
+        "hp": 100,
+        "hp_bucket": 4,
+        "movement": 0,
+        "max_movement": 3,
+        "strength": 10,
+        "ranged_strength": 0,
+        "fortified": false
+      }
+    ],
+    "get_cities": [
+      {
+        "city_id": "c1:65536",
+        "owner": 1,
+        "name": "Uruk",
+        "q": 48,
+        "r": 16,
+        "population": 5,
+        "production_queue": [
+          "SCOUT"
+        ],
+        "hp": 100,
+        "food_bucket": 0,
+        "production_bucket": 0,
+        "buildings": [],
+        "coord": "48,16"
+      }
+    ],
+    "get_overview": {
+      "turn": 28,
+      "you": {
+        "player_id": 1,
+        "civ_name": "CIVILIZATION_SUMERIA",
+        "gold": 310,
+        "researched": [
+          "ANIMAL_HUSBANDRY",
+          "ASTROLOGY",
+          "MINING",
+          "POTTERY"
+        ],
+        "researching": null
+      },
+      "public": {
+        "turn": 28,
+        "players": [
+          {
+            "player_id": 0,
+            "civ_name": "CIVILIZATION_EGYPT",
+            "alive": true
+          },
+          {
+            "player_id": 1,
+            "civ_name": "CIVILIZATION_SUMERIA",
+            "alive": true
+          }
+        ]
+      }
+    },
+    "get_available_research": [
+      {
+        "tech_id": "ARCHERY",
+        "cost": 50
+      },
+      {
+        "tech_id": "BRONZE_WORKING",
+        "cost": 80
+      },
+      {
+        "tech_id": "IRRIGATION",
+        "cost": 50
+      },
+      {
+        "tech_id": "MASONRY",
+        "cost": 80
+      },
+      {
+        "tech_id": "SAILING",
+        "cost": 50
+      },
+      {
+        "tech_id": "THE_WHEEL",
+        "cost": 80
+      },
+      {
+        "tech_id": "WRITING",
+        "cost": 50
+      }
+    ],
+    "get_visible_map": {
+      "turn": 28,
+      "tiles": {
+        "41,11": {
+          "coord": "41,11",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "41,12": {
+          "coord": "41,12",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "41,13": {
+          "coord": "41,13",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "42,10": {
+          "coord": "42,10",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_MOUNTAIN",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "42,11": {
+          "coord": "42,11",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "42,12": {
+          "coord": "42,12",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "42,13": {
+          "coord": "42,13",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,10": {
+          "coord": "43,10",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_HILLS",
+            "biome": "PLAINS",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,11": {
+          "coord": "43,11",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,12": {
+          "coord": "43,12",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT_HILLS",
+            "biome": "DESERT",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,13": {
+          "coord": "43,13",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,18": {
+          "coord": "43,18",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,19": {
+          "coord": "43,19",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,20": {
+          "coord": "43,20",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,21": {
+          "coord": "43,21",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,22": {
+          "coord": "43,22",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "43,9": {
+          "coord": "43,9",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,10": {
+          "coord": "44,10",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_HILLS",
+            "biome": "PLAINS",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,11": {
+          "coord": "44,11",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_MOUNTAIN",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,12": {
+          "coord": "44,12",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,17": {
+          "coord": "44,17",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,18": {
+          "coord": "44,18",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,19": {
+          "coord": "44,19",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,20": {
+          "coord": "44,20",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,21": {
+          "coord": "44,21",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,22": {
+          "coord": "44,22",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "44,9": {
+          "coord": "44,9",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_HILLS",
+            "biome": "PLAINS",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,10": {
+          "coord": "45,10",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_HILLS",
+            "biome": "PLAINS",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,11": {
+          "coord": "45,11",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,15": {
+          "coord": "45,15",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,16": {
+          "coord": "45,16",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,17": {
+          "coord": "45,17",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS_MOUNTAIN",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,18": {
+          "coord": "45,18",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,19": {
+          "coord": "45,19",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS_MOUNTAIN",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,20": {
+          "coord": "45,20",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,21": {
+          "coord": "45,21",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_HILLS",
+            "biome": "PLAINS",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,22": {
+          "coord": "45,22",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "45,9": {
+          "coord": "45,9",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_MOUNTAIN",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,14": {
+          "coord": "46,14",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_MOUNTAIN",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,15": {
+          "coord": "46,15",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,16": {
+          "coord": "46,16",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "46,17": {
+          "coord": "46,17",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,18": {
+          "coord": "46,18",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,19": {
+          "coord": "46,19",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,20": {
+          "coord": "46,20",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "46,21": {
+          "coord": "46,21",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "47,13": {
+          "coord": "47,13",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "47,14": {
+          "coord": "47,14",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "47,15": {
+          "coord": "47,15",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS_HILLS",
+            "biome": "PLAINS",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "47,16": {
+          "coord": "47,16",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "47,17": {
+          "coord": "47,17",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "47,18": {
+          "coord": "47,18",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "47,19": {
+          "coord": "47,19",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "47,20": {
+          "coord": "47,20",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "48,13": {
+          "coord": "48,13",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "48,14": {
+          "coord": "48,14",
+          "terrain": "PLAINS",
+          "native_terrain": {
+            "type": "TERRAIN_PLAINS",
+            "biome": "PLAINS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "48,15": {
+          "coord": "48,15",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "48,16": {
+          "coord": "48,16",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "48,17": {
+          "coord": "48,17",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "48,18": {
+          "coord": "48,18",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "48,19": {
+          "coord": "48,19",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "49,13": {
+          "coord": "49,13",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "49,14": {
+          "coord": "49,14",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "49,15": {
+          "coord": "49,15",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS_HILLS",
+            "biome": "GRASS",
+            "hills": true
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "49,16": {
+          "coord": "49,16",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "49,17": {
+          "coord": "49,17",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "49,18": {
+          "coord": "49,18",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "50,13": {
+          "coord": "50,13",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "50,14": {
+          "coord": "50,14",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT_HILLS",
+            "biome": "DESERT",
+            "hills": true
+          },
+          "owner_id": 1,
+          "city_id": ""
+        },
+        "50,15": {
+          "coord": "50,15",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS_MOUNTAIN",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "50,16": {
+          "coord": "50,16",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "50,17": {
+          "coord": "50,17",
+          "terrain": "GRASSLAND",
+          "native_terrain": {
+            "type": "TERRAIN_GRASS",
+            "biome": "GRASS",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "51,13": {
+          "coord": "51,13",
+          "terrain": "DESERT",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "51,14": {
+          "coord": "51,14",
+          "terrain": "MOUNTAIN",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT_MOUNTAIN",
+            "biome": "DESERT",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "51,15": {
+          "coord": "51,15",
+          "terrain": "HILL",
+          "native_terrain": {
+            "type": "TERRAIN_DESERT_HILLS",
+            "biome": "DESERT",
+            "hills": true
+          },
+          "owner_id": -1,
+          "city_id": ""
+        },
+        "51,16": {
+          "coord": "51,16",
+          "terrain": "COAST",
+          "native_terrain": {
+            "type": "TERRAIN_COAST",
+            "biome": "COAST",
+            "hills": false
+          },
+          "owner_id": -1,
+          "city_id": ""
+        }
+      }
+    },
+    "get_available_production": {
+      "by_city": {}
+    }
+  }
+}

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import random
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,7 +39,13 @@ from civ_arena.agents.llm.client import (
     ModelUnavailable,
     tool_uses,
 )
-from civ_arena.agents.llm.prompts import SYSTEM_PROMPT, turn_header
+from civ_arena.agents.llm.context_curator import (
+    BASIC_READS,
+    DETAIL_SCHEMA,
+    ContextCurator,
+    replace_context,
+)
+from civ_arena.agents.llm.prompts import CURATED_SYSTEM_PROMPT, SYSTEM_PROMPT, turn_header
 from civ_arena.agents.llm.tool_schemas import TOOL_SCHEMAS
 from civ_arena.agents.runtime import AgentProfile
 from civ_arena.arena.referee import MatchAborted
@@ -46,6 +53,8 @@ from civ_arena.config import LLMSpec
 from civ_arena.strategy.view import render_memory
 
 _SCHEMA_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
+_GAME_ACTIONS = frozenset({"move_unit", "attack", "fortify", "found_city", "set_research",
+                           "set_city_production", "purchase"})
 
 
 @dataclass
@@ -58,6 +67,9 @@ class LLMAgentRuntime:
     strategy: Any = None  # StrategyStore; the memory view renders when set
     rng: random.Random = field(default=None)  # type: ignore[assignment]
     _turn: int = field(default=0, init=False)
+    paced_turns: bool = False
+    recall_available: bool | None = None
+    strategic_controller: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.rng is None:
@@ -97,6 +109,18 @@ class LLMAgentRuntime:
         if strategy is not None:
             self.strategy = strategy
 
+    def configure_turn_pacing(self, *, recall_available: bool) -> None:
+        """Opt in using the coordinator's actual recall capability, never a guess."""
+        if type(recall_available) is not bool:
+            raise ValueError("recall_available must be a boolean")
+        self.paced_turns = True
+        self.recall_available = recall_available
+
+    def configure_strategic_controller(self, controller: Any) -> None:
+        if not callable(getattr(controller, "take_turn", None)):
+            raise ValueError("strategic controller must implement take_turn")
+        self.strategic_controller = controller
+
     async def aclose(self) -> None:
         await self.client.aclose()
 
@@ -107,6 +131,17 @@ class LLMAgentRuntime:
                 "begin_turn(turn) must be called before take_turn "
                 "(the coordinator does this; direct callers must too)"
             )
+        if self.strategic_controller is not None:
+            await self.strategic_controller.take_turn(self, facade)
+            return
+        if self.profile.decision_mode == "strategic_autopilot":
+            raise MatchAborted("strategic_autopilot runtime was not bound by the factory")
+        if self.llm.adaptive_context is not None:
+            raise MatchAborted('adaptive context requires the strategic controller')
+        # CAP-03 (F-07): every legacy-path turn is one decision unit for
+        # cost attribution (the strategic controller assigns its own ids).
+        if self.client is not None:
+            self.client.decision_id = uuid.uuid4().hex
         diary_text = (self.diary.get(self.profile.player_id)
                       if self.diary is not None else "")
         memory = (render_memory(self.strategy, self.profile.player_id,
@@ -116,7 +151,21 @@ class LLMAgentRuntime:
             {"role": "user",
              "content": turn_header(self._turn, diary_text, memory)}
         ]
+        curator = None
         try:
+            if self.paced_turns:
+                messages[0]["content"] = messages[0]["content"].replace(
+                    "Observe with your tools", "Use the supplied controller context")
+                curator = ContextCurator(
+                    facade, self.profile.player_id, self.llm.max_result_chars,
+                    memory,
+                    own_economy_context=getattr(self.llm, "own_economy_context",
+                                                False))
+                await curator.refresh()
+                opening: list[dict[str, Any]] = []
+                replace_context(messages, opening, curator.render())
+                messages.append({"role": "user", "content": opening})
+            accepted_actions = 0
             for _round in range(self.llm.max_tool_rounds):
                 reply = await self._create(messages)
                 # verbatim echo: thinking blocks included
@@ -126,14 +175,16 @@ class LLMAgentRuntime:
                 if not uses:
                     # prose-only reply: per the system prompt that means the
                     # model is done. Force the phase closed — never stall.
-                    await facade.end_turn()
+                    await self._close_turn(facade)
                     return
                 results: list[dict[str, Any]] = []
                 for i, use in enumerate(uses):
                     tool_use_id = use.get("id") or \
                         f"toolu_{self._turn}_{_round}_{i}"
-                    ok, payload = await self._call_tool(
-                        facade, use.get("name"), use.get("input"))
+                    name, args = use.get("name"), use.get("input")
+                    ok, payload = await self._call_tool(facade, name, args, curator=curator)
+                    if ok and isinstance(name, str) and name in _GAME_ACTIONS:
+                        accepted_actions += 1
                     results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
@@ -144,15 +195,51 @@ class LLMAgentRuntime:
                         # lease released: sibling calls would be guaranteed
                         # rejections, so skip them entirely
                         return
+                if self.paced_turns:
+                    remaining = self.llm.max_tool_rounds - _round - 1
+                    hint = (f"{remaining} model requests remain in this turn's "
+                            "existing tool-round budget. ")
+                    if not accepted_actions:
+                        hint += ("No game action has been accepted yet. "
+                                 "Use the observed state to act now. ")
+                    if remaining <= 2:
+                        hint += ("Finish useful unit orders, update your diary briefly, "
+                                 "and call end_turn.")
+                    else:
+                        hint += "Group independent actions; the controller gathers updated state."
+                    if curator is not None:
+                        await curator.refresh()
+                        replace_context(messages, results, curator.render())
+                    results.append({"type": "text", "text": hint})
                 messages.append({"role": "user", "content": results})
             # round cap exhausted without end_turn — the runtime closes the
             # phase itself; a model that never finishes cannot stall the match
-            await facade.end_turn()
+            await self._close_turn(facade)
         except ModelUnavailable as exc:
             raise MatchAborted(
                 f"llm runtime {self.profile.agent_id!r}: {exc}") from exc
 
     # ------------------------------------------------------------ helpers
+    async def _turn_briefing(self, facade: Any) -> str:
+        curator = ContextCurator(
+            facade, self.profile.player_id, self.llm.max_result_chars,
+            own_economy_context=getattr(self.llm, "own_economy_context", False))
+        await curator.refresh()
+        return curator.render()
+
+    async def _close_turn(self, facade: Any) -> None:
+        result = await facade.end_turn()
+        if isinstance(result, dict) and result.get("rejection") == "unmoved_units":
+            units = result.get("unmoved_units")
+            if not isinstance(units, list) or len(units) > 256:
+                raise MatchAborted("invalid or oversized completeness repair")
+            # One bounded pass, via the same audited facade as model actions.
+            for uid in dict.fromkeys(units):
+                await facade.fortify(uid)
+            result = await facade.end_turn()
+        if not isinstance(result, dict) or result.get("status") != "accepted":
+            raise MatchAborted("forced end_turn did not release the turn")
+
     async def _create(self, messages: list[dict[str, Any]]) -> ModelReply:
         posts = getattr(self.client, "posts_sent", 0)
         if posts >= self.llm.max_requests_per_match:
@@ -161,16 +248,32 @@ class LLMAgentRuntime:
                 f"{self.llm.max_requests_per_match}) for "
                 f"{self.profile.agent_id!r}"
             )
-        return await self.client.create(system=SYSTEM_PROMPT, messages=messages,
-                                        tools=TOOL_SCHEMAS)
+        tools = TOOL_SCHEMAS
+        system = SYSTEM_PROMPT
+        if self.paced_turns:
+            system = CURATED_SYSTEM_PROMPT
+            tools = [tool for tool in tools if tool["name"] not in BASIC_READS]
+            tools = [*tools, DETAIL_SCHEMA]
+            if self.recall_available is False:
+                tools = [tool for tool in tools if tool["name"] != "recall_lessons"]
+                system += "\nCross-match recall is unavailable in this match; do not request it."
+        return await self.client.create(system=system, messages=messages, tools=tools)
 
-    async def _call_tool(self, facade: Any, name: Any, args: Any
-                         ) -> tuple[bool, str]:
+    async def _call_tool(self, facade: Any, name: Any, args: Any,
+                         *, curator: ContextCurator | None = None) -> tuple[bool, str]:
+        if name == "inspect_context" and curator is not None:
+            result = await curator.inspect(args) if isinstance(args, dict) else {
+                "status": "rejected", "rejection": "arguments_must_be_object"}
+            return result.get("status") == "accepted", self._compact(result)
         if not isinstance(name, str) or name not in _SCHEMA_BY_NAME:
             # manifest lookup FIRST: a facade attribute that is not a tool
             # (e.g. "names") must degrade to an error result, never dispatch
             self._note_error("llm_unknown_tool")
             return False, self._error(f"unknown tool: {name!r}")
+        if self.paced_turns and name == "recall_lessons" and self.recall_available is False:
+            self._note_error("llm_unavailable_tool")
+            return False, self._error(
+                "recall_lessons is unavailable for this match; act on current observations")
         if not isinstance(args, dict):
             self._note_error("llm_malformed_args")
             return False, self._error("tool arguments must be a JSON object")
@@ -205,6 +308,8 @@ class LLMAgentRuntime:
                     f"bad arguments: {key} exceeds maxLength {max_len} "
                     f"(got {len(value)} chars)"
                 )
+        if curator is not None and name in BASIC_READS:
+            return True, self._compact(curator.cached_read(name, args))
         try:
             # kwargs dispatch: no positional reordering can ever reinterpret
             # a malformed argument as a different parameter
@@ -212,11 +317,32 @@ class LLMAgentRuntime:
         except TypeError as exc:
             self._note_error("llm_malformed_args")
             return False, self._error(f"bad arguments: {exc}")
-        return True, self._compact(result)
+        if curator is not None and name in _GAME_ACTIONS:
+            result = curator.action_result(name, args, result)
+        # Codex r2 finding 9: when the curator is None (unpaced tool
+        # use, no caching wrapper), the gate must still apply to the
+        # model-bound overview response. The curator's cache-time gate
+        # closes the cached path; this closes the direct facade path
+        # so default-off tool-response documents stay byte-identical
+        # to the legacy 5-key shape.
+        if name == "get_overview" and not getattr(
+                self.llm, "own_economy_context", False) \
+                and isinstance(result, dict) and "you" in result:
+            gated = dict(result)
+            gated["you"] = {k: result["you"][k] for k in (
+                "player_id", "civ_name", "gold", "researched", "researching"
+            ) if k in result["you"]}
+            result = gated
+        ok = not isinstance(result, dict) or result.get("status") != "rejected"
+        if name == "end_turn":
+            ok = isinstance(result, dict) and result.get("status") == "accepted"
+        return ok, self._compact(result)
 
     def _compact(self, result: Any) -> str:
         payload = json.dumps(result, sort_keys=True, default=str)
         if len(payload) > self.llm.max_result_chars:
+            if self.paced_turns:
+                raise MatchAborted("tool result exceeds curated context budget")
             return (payload[: self.llm.max_result_chars]
                     + f"\n...[truncated, full {len(payload)} chars]")
         return payload

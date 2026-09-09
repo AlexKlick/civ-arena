@@ -1,0 +1,13 @@
+{
+  "main": "/home/alexk/civ-arena-reliability-20260904",
+  "head": "76f4dce0a344f749d6ddbea42b4f92dcba9d649e",
+  "tree": "7de749d64ce92e4db54a7c5b6a8058cecd67e978",
+  "clean": true,
+  "imported_source_sha256": {
+    "src/civ_arena/agents/production_policy.py": "fe45e980e8d1cb5c56804ae2a519589cf8a693ebd5dfd07ae3dc531acf049684",
+    "src/civ_arena/agents/llm/context_curator.py": "dbdad5791d3aa3f870b006b953239b85433e18b875b5a844a5335f3d7054f851",
+    "src/civ_arena/agents/llm/strategic_controller.py": "90a74558011154619e64d644a8b27660977a19854954eb8904de9155c7e324cd",
+    "src/civ_arena/game/civ6/lua_translator.py": "9f8ef726fb9d2cb0ba33dc51eeefa19e3cfd2d1b3da4aa1b2fbb1d54e921ba7f",
+    "src/civ_arena/game/civ6/response_parser.py": "3c9370f39d5383a4b462531760882ac7314335a75a1e9a98d9742d5aa71376e9"
+  }
+}

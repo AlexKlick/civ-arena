@@ -135,6 +135,12 @@ Network.HostGame(ServerType.SERVER_TYPE_HOTSEAT)
 print("hostgame-hotseat-called")
 print("InSession|" .. tostring(Network.IsSessionActive()))
 print("Humans|" .. tostring(GameConfiguration.GetHumanPlayerCount()))
+if Network.IsSessionActive() and GameConfiguration.IsHotseat() then
+  CivArenaCloseExtraMajorSlots()
+  print("POSTHOST_ROSTER|two_humans_no_extra_major_slots")
+else
+  error("hotseat session unavailable after HostGame")
+end
 print("{SENTINEL}")
 """
 
@@ -191,11 +197,53 @@ print("{SENTINEL}")
 # Network.LaunchGame from the session host). Leaders are the engine's own
 # tutorialsetup.lua strings.
 CONFIG_HOTSEAT_LUA = f"""
+-- Open major slots can be filled with AI at launch despite Participating=2.
+-- Use the shipped stagingroom.lua OnSlotType closure semantics explicitly.
+function CivArenaVerifyMajorSlots()
+  for pid = 0, 63 do
+    local pc = PlayerConfigurations[pid]
+    if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
+        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then
+      if pid > 1 then
+        if pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
+          error("extra major slot did not close: " .. tostring(pid))
+        end
+      elseif pc:GetSlotStatus() ~= SlotStatus.SS_TAKEN or not pc:IsHuman() then
+        error("expected human major slot unavailable: " .. tostring(pid))
+      end
+    end
+  end
+  local majors = {{}}
+  for _, pid in ipairs(GameConfiguration.GetParticipatingPlayerIDs()) do
+    local pc = PlayerConfigurations[pid]
+    if pc:GetCivilizationLevelTypeID() == CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV then
+      table.insert(majors, pid)
+    end
+  end
+  table.sort(majors)
+  if #majors ~= 2 or majors[1] ~= 0 or majors[2] ~= 1 then
+    error("participating major roster is not exactly seats 0 and 1")
+  end
+  print("MAJOR_ROSTER|0,1|humans=true|extra_slots=closed")
+end
+function CivArenaCloseExtraMajorSlots()
+  -- Keep the map's native min/max bounds. The shipped MapSize_ValueNeedsChanging
+  -- treats a forced Tiny MaxMajor=2 as stale setup and reopens four players.
+  GameConfiguration.SetParticipatingPlayerCount(2)
+  for pid = 2, 63 do
+    local pc = PlayerConfigurations[pid]
+    if pc ~= nil and pc:GetCivilizationLevelTypeID() ==
+        CivilizationLevelTypes.CIVILIZATION_LEVEL_FULL_CIV
+        and pc:GetSlotStatus() ~= SlotStatus.SS_CLOSED then
+      pc:SetSlotStatus(SlotStatus.SS_CLOSED)
+      Network.BroadcastPlayerInfo(pid)
+    end
+  end
+  CivArenaVerifyMajorSlots()
+end
 Network.SetLocalNetworkMode(GameModeTypes.HOTSEAT)
 GameConfiguration.SetGameMode(GameModeTypes.HOTSEAT)
 MapConfiguration.SetMapSize({lua_int(MAPSIZE_TINY)})
-MapConfiguration.SetMinMajorPlayers(2)
-MapConfiguration.SetMaxMajorPlayers(2)
 GameConfiguration.SetParticipatingPlayerCount(2)
 GameConfiguration.SetGameSpeedType({lua_int(GAMESPEED_STANDARD)})
 PlayerConfigurations[0]:SetSlotStatus(SlotStatus.SS_TAKEN)
@@ -212,6 +260,7 @@ PlayerConfigurations[1]:SetHotseatName("Arena Seat 2")
 pcall(function() PlayerConfigurations[1]:SetHotseatPassword("arena") end)
 PlayerConfigurations[1]:SetReady(true)
 Network.BroadcastPlayerInfo(1)
+CivArenaCloseExtraMajorSlots()
 print("GameMode|" .. tostring(GameConfiguration.GetGameMode()))
 print("IsHotseat|" .. tostring(GameConfiguration.IsHotseat()))
 print("Humans|" .. tostring(GameConfiguration.GetHumanPlayerCount()))

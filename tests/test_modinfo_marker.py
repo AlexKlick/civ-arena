@@ -34,11 +34,14 @@ def test_lua_carries_marker_and_rejected_pattern():
     # and the forbidden API is called out
     assert "SetCivic" in lua and "FORBIDDEN" not in lua  # documented, not used
     # find the actual calls: FinishMoves exists (freeze), RestoreMovement
-    # exists only inside RestoreUnit (per-unit), never in OnPlayerTurnStartComplete
-    start_complete = lua.split("function OnPlayerTurnStartComplete", 1)[1]
+    # exists only inside RestoreUnit (per-unit), never in the acquisition
+    # helper or its native hook caller.
+    acquire = lua.split("local function acquire_lease(", 1)[1]
+    acquire, start_complete = acquire.split("local function OnPlayerTurnStartComplete", 1)
     start_complete = start_complete.split("function ", 1)[0]
-    assert "FinishMoves" in start_complete
-    assert "RestoreMovement" not in start_complete, (
+    assert "UnitManager.FinishMoves(unit)" in acquire
+    assert "acquire_lease(playerID, nil)" in start_complete
+    assert "RestoreMovement" not in acquire + start_complete, (
         "the hook must freeze, never bulk-restore"
     )
 
@@ -48,9 +51,11 @@ def test_freeze_snapshots_the_frozen_state():
     must be taken AFTER the freeze — snapshotting first books our own
     movement-zeroing as an undeclared violation at release."""
     lua = (MODS / "PuppeteerMod.lua").read_text()
-    hook = lua.split("function OnPlayerTurnStartComplete", 1)[1]
-    hook = hook.split("function ", 1)[0]
-    assert hook.index("FinishMoves") < hook.index("snapshot_player"), (
+    acquire = lua.split("local function acquire_lease(", 1)[1]
+    acquire = acquire.split("local function OnPlayerTurnStartComplete", 1)[0]
+    assert acquire.index("UnitManager.FinishMoves(unit)") < acquire.index(
+        "snapshot = snapshot_player(playerID)"
+    ), (
         "freeze FIRST, then snapshot — else the freeze itself drifts"
     )
 
@@ -133,25 +138,25 @@ def test_every_translator_output_parses():
         lua_translator.cities_read(),
         lua_translator.visible_map_read(0, [(0, 0), (1, -1), (-2, 3)]),
         lua_translator.available_research_read(0),
-        lua_translator.available_production_read(3),
+        lua_translator.available_production_read("c0:3"),
         lua_translator.mod_handshake(),
         lua_translator.mod_status(),
         lua_translator.mod_digest(),
         lua_translator.mod_trace(),
         lua_translator.diff_since_last("pos,moves", 4),
-        lua_translator.move_unit("u131073", "2,3"),
-        lua_translator.attack("u131073", "u65538"),
-        lua_translator.fortify("u131073"),
-        lua_translator.found_city("u131073", "Name"),
+        lua_translator.move_unit("u0:131073", "2,3"),
+        lua_translator.attack("u0:131073", "u0:65538"),
+        lua_translator.fortify("u0:131073"),
+        lua_translator.found_city("u0:131073", "Name"),
         lua_translator.set_research(0, "MINING"),
-        lua_translator.set_city_production("c65536", "MONUMENT"),
-        lua_translator.purchase("c65536", "MONUMENT"),
+        lua_translator.set_city_production("c0:65536", "MONUMENT"),
+        lua_translator.purchase("c0:65536", "MONUMENT"),
         lua_translator.request_end_turn(0),
         lua_translator.finish_all_moves(0),
         lua_translator.set_puppet(0, True),
         lua_translator.release(0, 12),
-        lua_translator.restore_unit("u7"),
-        lua_translator.freeze_unit("u7"),
+        lua_translator.restore_unit("u0:7"),
+        lua_translator.freeze_unit("u0:7"),
         lua_translator.begin_ambient_window(0),
         lua_translator.end_ambient_window(0),
         lua_translator.dump_ledger(),
