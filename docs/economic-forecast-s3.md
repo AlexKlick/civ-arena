@@ -1,8 +1,12 @@
 # S3 economic forecast lane (graph-optimizer O1)
 
-**Branch:** `feat/s3-economic-forecast-20260907` (worktree `~/civ-arena-s3-forecast-20260907`),
-based on `feat/cap-integration-20260907` @ `5711fc1` (CAP-01/02/03 integrated; CAP-R1 was
-pending at branch time and is expected to land on top — this lane is additive by design).
+**Branch:** `s3-rebase/20260909` (worktree `~/civ-arena-s3-rebase-20260909`), rebased onto
+`origin/master` @ `45f36c6` on 2026-09-09. The lane was originally cut from
+`feat/cap-integration-20260907` @ `5711fc1`; CAP-01/02/03 and CAP-R1 have since merged to
+master, so this lane now sits directly on top of them — additive by design, as planned.
+Rebase conflicts were five "both sides added a knob" hunks (master's `own_economy_context`
+vs this lane's `economic_forecast`) across `config.py`, `agents/runtime.py` and
+`agents/llm/strategic_controller.py`; both knobs were kept in every case.
 
 **Program:** CAR-GRAPH-OPTIMIZER-001 lane O1 (see
 `~/pop-deck-uploads/2026-09/civ-arena-graph-optimizer-handoff-2026-09-07-6a221d.md`),
@@ -16,16 +20,19 @@ reasons why).
 
 ## What landed
 
+Hashes below are the post-rebase (`s3-rebase/20260909`) commits; the pre-rebase hashes the
+first draft of this doc cited are no longer in this branch's history.
+
 | Commit | Content |
 |---|---|
-| `921a8cf` | `agents/economic_forecast.py` — pure forecast contract |
-| `922f3f6` | `agents/build_option.py` — closed-loop option monitor |
-| `1eac3f5` | config/runtime/controller wiring (advisory, default-off) |
-| `6c67e7b` | engine-scenario + mutation-hardening tests |
-| `2f150d9` | Codex review round 1 — all five findings fixed |
-| `7b23b72` | Codex review round 2 — all four findings fixed |
-| `294f5a8` | Codex review round 3 — two fix-introduced bugs + one coverage gap fixed |
-| (r4) | Codex review round 4 — source GO; two coverage gaps closed, mutation-verified |
+| `3cbae1a` | `agents/economic_forecast.py` — pure forecast contract |
+| `3b8903d` | `agents/build_option.py` — closed-loop option monitor |
+| `cac19aa` | config/runtime/controller wiring (advisory, default-off) |
+| `6f04dea` | engine-scenario + mutation-hardening tests |
+| `160a26b` | Codex review round 1 — all five findings fixed |
+| `6490f60` | Codex review round 2 — all four findings fixed |
+| `de4335e` | Codex review round 3 — two fix-introduced bugs + one coverage gap fixed |
+| `aa5433f` | Codex review round 4 — source GO; two coverage gaps closed, mutation-verified |
 
 ### Codex R1 (all five findings verified real, all fixed)
 
@@ -48,7 +55,7 @@ reasons why).
    bounds; completing before the lower bound is `'early'` (a miss), not
    in-window.
 
-### Codex R2 (four findings on the R1 fixes, all verified real, all fixed in `7b23b72`)
+### Codex R2 (four findings on the R1 fixes, all verified real, all fixed in `6490f60`)
 
 1. **`GetTurnsLeft` is a countdown, not a static estimate** — comparing raw
    turns censored every healthy build. The recheck now compares implied
@@ -65,7 +72,7 @@ reasons why).
    instead of the policy's fall-through — now mirrors `choose_production`
    exactly: no eligible defender ⇒ normal cascade.
 
-### Codex R3 (two fix-introduced bugs + one coverage gap on the R2 fixes, fixed in `294f5a8`)
+### Codex R3 (two fix-introduced bugs + one coverage gap on the R2 fixes, fixed in `de4335e`)
 
 1. **Losing a pending city could abort the controller** (P1) — the R2 catalog
    pre-read read *every* pending city; the native accessor rejects a captured
