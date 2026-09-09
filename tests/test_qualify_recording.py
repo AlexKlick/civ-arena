@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -412,3 +413,289 @@ def test_dirty_tree_identity_fails(tmp_path):
     code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
     assert code == 1
     assert "run recorded on a dirty tree" in result["failures"]
+
+
+# -- r1 fix lane: world payload / seat / pipeline contract (finding 1) ----------
+
+
+def _edit_capture(run_dir: Path, after_seat: int, edit) -> None:
+    """Mutate one spectator_world row on disk (seqs renumbered after)."""
+    rows = _read_rows(run_dir)
+    row = next(row for row in rows
+               if row.get("audit") == "spectator_world"
+               and row["after_seat"] == after_seat)
+    edit(row)
+    _rewrite(run_dir, rows)
+
+
+def test_clean_fixture_rejects_no_captures(tmp_path):
+    run_dir = _write_qual_run(tmp_path, 1)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 0, result.get("failures")
+    assert result["audit"]["spectator_world_rejected"] == []
+    assert result["audit"]["after_seat_sequence"] == [-1, 0, 1]
+
+
+def test_worldless_spectator_capture_is_rejected_and_breaks_the_row_contract(tmp_path):
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 1, lambda row: row.pop("world"))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    assert result["verdict"] == "FAIL"
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 1
+    assert "world payload" in rejected[0]["reason"]
+    assert any("does not count toward the row contract" in failure
+               for failure in result["failures"])
+    # the rejected capture cannot satisfy the row contract either
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+    assert result["audit"]["spectator_world_rows"] == 2
+    assert result["audit"]["expected_rows"] == 3
+    assert any("row contract" in failure for failure in result["failures"])
+
+
+@pytest.mark.parametrize("op,token", [
+    ("not_a_dict", "not a dict"),
+    ("schema", "schema is not 1"),
+    ("roster", "roster is not a list"),
+    ("read_ms_absent", "read_ms"),
+    ("read_ms_type", "read_ms"),
+    ("unknown_key", "outside the world package key set"),
+])
+def test_corrupt_world_envelopes_are_rejected(tmp_path, op, token):
+    run_dir = _write_qual_run(tmp_path, 1)
+
+    def corrupt(row):
+        if op == "not_a_dict":
+            row["world"] = "garbage"
+        else:
+            world = row["world"]
+            if op == "schema":
+                world["schema"] = 2
+            elif op == "roster":
+                world["roster"] = {"0": "major"}
+            elif op == "read_ms_absent":
+                del world["read_ms"]
+            elif op == "read_ms_type":
+                world["read_ms"] = "fast"
+            elif op == "unknown_key":
+                world["unexpected_key"] = 1
+
+    _edit_capture(run_dir, 1, corrupt)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    assert result["verdict"] == "FAIL"
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1, result["failures"]
+    assert token in rejected[0]["reason"], rejected[0]["reason"]
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+    assert any("row contract" in failure for failure in result["failures"])
+
+
+def test_inner_after_seat_mismatch_is_rejected(tmp_path):
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 1,
+                  lambda row: row["world"].update({"after_seat": 2}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    reason = result["audit"]["spectator_world_rejected"][0]["reason"]
+    assert "after_seat 2" in reason and "event after_seat 1" in reason
+    assert result["audit"]["after_seat_sequence"] == [-1, 0]
+
+
+def test_capture_turn_regression_is_rejected(tmp_path):
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 1, lambda row: row.update({"turn": 0}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    reason = result["audit"]["spectator_world_rejected"][0]["reason"]
+    assert "precedes the previous capture's turn 1" in reason
+
+
+def test_capture_without_a_completed_seat_turn_is_rejected(tmp_path):
+    """A spliced capture claiming seat 1 completed turn 1 — before seat 1 ever
+    ran — must be rejected even though summary.per_turn names that pair.
+
+    The three genuine captures still hold up, so the row-contract SEQUENCE is
+    intact; the run fails on the rejection itself (a forged capture is never
+    laundered into evidence by the surviving contract).
+    """
+    run_dir = _write_qual_run(tmp_path, 1)
+    rows = _read_rows(run_dir)
+    baseline = next(index for index, row in enumerate(rows)
+                    if row.get("audit") == "spectator_world")
+    rows.insert(baseline + 1,
+                {"schema": 1, "kind": "HEARTBEAT", "ts": TS, "match_id": MATCH_ID,
+                 "game_instance_id": INSTANCE, "turn": 1, "phase_player_id": -1,
+                 "player_id": None, "agent_id": None,
+                 "visibility_scope": "spectator", "audit": "spectator_world",
+                 "after_seat": 1, "world": _world(1)})
+    _rewrite(run_dir, rows)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    rejected = result["audit"]["spectator_world_rejected"]
+    assert len(rejected) == 1 and rejected[0]["after_seat"] == 1
+    assert "completed_seat_turn" in rejected[0]["reason"]
+    assert "after this capture" in rejected[0]["reason"]
+    assert result["audit"]["after_seat_sequence"] == [-1, 0, 1]
+    assert any("does not count toward the row contract" in failure
+               for failure in result["failures"])
+
+
+def test_capture_placed_before_its_seat_turn_completes_is_rejected(tmp_path):
+    """The baseline capture sits before every seat turn; retargeting it at seat
+    0 cannot be laundered by the per-turn summary row that comes later."""
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, -1, lambda row: row.update({"after_seat": 0}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    reason = result["audit"]["spectator_world_rejected"][0]["reason"]
+    assert "at seq" in reason and "after this capture" in reason
+    assert result["audit"]["after_seat_sequence"] == [0, 1]
+
+
+def test_novel_roster_kind_fails_the_verdict_but_still_counts(tmp_path):
+    run_dir = _write_qual_run(tmp_path, 1)
+    _edit_capture(run_dir, 0, lambda row: row["world"]["roster"].append(
+        {"player_id": 9, "kind": "rebels"}))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 1
+    assert result["verdict"] == "FAIL"
+    # the census keeps counting the unknown kind ...
+    assert result["audit"]["roster_kinds_observed"] == {"major": 6, "rebels": 1}
+    # ... but a failure names the kind and the pid
+    assert any("'rebels'" in failure and "pid 9" in failure
+               for failure in result["failures"])
+
+
+# -- r1 fix lane: output safety (findings 2, 5, 6, 8) ---------------------------
+
+
+@pytest.mark.parametrize("artifact,flag", [("events.jsonl", "--json"),
+                                           ("summary.json", "--report")])
+def test_output_hardlinked_to_run_evidence_is_refused(tmp_path, capsys,
+                                                      artifact, flag):
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "qual-out"
+    out.mkdir()
+    linked = out / f"linked-{artifact}"
+    os.link(run_dir / artifact, linked)
+    before = (run_dir / artifact).read_bytes()
+    code, result, json_path, report = _run(run_dir, tmp_path, "--rounds", "1",
+                                           "--allow-fake", flag, str(linked))
+    assert code == 2 and result == {}
+    assert "aliases run evidence" in capsys.readouterr().err
+    assert (run_dir / artifact).read_bytes() == before
+    assert not json_path.exists() and not report.exists()
+
+
+def test_colliding_output_paths_are_refused(tmp_path, capsys):
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "collide"
+    out.mkdir()
+    same = out / "same.out"
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--json", str(same), "--report", str(same))
+    assert code == 2 and result == {}
+    assert "same path" in capsys.readouterr().err
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--export-out", str(out / "s.jsonl"),
+                              "--json", str(out / "s.jsonl.manifest.json"))
+    assert code == 2 and result == {}
+    assert "manifest sibling" in capsys.readouterr().err
+    assert not (out / "s.jsonl").exists()
+
+
+def test_hardlinked_output_collision_is_refused(tmp_path, capsys):
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "collide2"
+    out.mkdir()
+    first, second = out / "a.md", out / "b.md"
+    first.write_text("keep me\n")
+    os.link(first, second)
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--json", str(first), "--report", str(second))
+    assert code == 2 and result == {}
+    assert "same file" in capsys.readouterr().err
+    assert first.read_text() == "keep me\n"
+
+
+def test_unreadable_events_jsonl_is_exit_2_without_a_traceback(tmp_path, capsys):
+    run_dir = _write_qual_run(tmp_path, 1)
+    (run_dir / "events.jsonl").write_text('{"schema": 1, "seq": 0,\n{"broken"\n')
+    out = tmp_path / "qual-out"
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake")
+    assert code == 2 and result == {}
+    err = capsys.readouterr().err
+    assert "not valid JSON" in err and "Traceback" not in err
+    assert not (out / "qualification.json").exists()
+    assert not (out / "report.md").exists()
+    assert not (out / "samples.jsonl").exists()
+
+
+def test_failed_report_write_removes_the_earlier_outputs(tmp_path, capsys):
+    run_dir = _write_qual_run(tmp_path, 1)
+    out = tmp_path / "boom"
+    (out / "report.md").mkdir(parents=True)  # a DIRECTORY where the report goes
+    code, result, json_path, _ = _run(run_dir, tmp_path, "--rounds", "1",
+                                      "--allow-fake", "--export-out",
+                                      str(out / "samples.jsonl"),
+                                      "--report", str(out / "report.md"))
+    assert code == 2 and result == {}
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "IsADirectoryError" in err
+    assert not json_path.exists()
+    assert not (out / "samples.jsonl").exists()
+    assert not (out / "samples.jsonl.manifest.json").exists()
+
+
+def test_report_cells_escape_pipes(tmp_path):
+    """The viewer refuses a piped run id, but the harness still PUBLISHES that
+    run's report — the document the operator reads to see why it failed. A raw
+    `|` in the Run id cell shifts every column to its right."""
+    run_dir = _write_qual_run(tmp_path, 1, name="qual|run")
+    code, result, _, report = _run(run_dir, tmp_path, "--rounds", "1",
+                                   "--allow-fake")
+    assert code == 1
+    assert any("viewer load failed" in failure
+               for failure in result["failures"]), result["failures"]
+    lines = report.read_text().splitlines()
+    assert "| Run id | `qual\\|run` |" in lines
+    table = [line for line in lines[lines.index("| Field | Value |")::]
+             if line.startswith("|")]
+    widths = {len(line.replace("\\|", "").split("|")) for line in table}
+    assert widths == {4}, widths  # header, separator and every row: 2 cells
+
+
+# -- r1 fix lane: the warning baseline is code-owned (finding 4) ----------------
+
+
+def test_supplied_baseline_cannot_whitelist_real_warnings(tmp_path, capsys):
+    from civ_arena import dashboard_compare as dc
+
+    run_dir = _write_qual_run(tmp_path, 1)
+    baseline = json.loads(BASELINE_PATH.read_text())
+    bad = tmp_path / "baseline.json"
+    bad.write_text(json.dumps(baseline[:2] + [dc.WORLD_INVALID,
+                                              dc.PACKET_UNBOUND]))
+    code, result, _, _ = _run(run_dir, tmp_path, "--rounds", "1", "--allow-fake",
+                              "--baseline-warnings", str(bad))
+    assert code == 2 and result == {}
+    err = capsys.readouterr().err
+    assert "outside the code-owned benign-cap allowlist" in err
+    assert dc.WORLD_INVALID in err and dc.PACKET_UNBOUND in err
+
+
+def test_baseline_allowlist_is_code_owned_and_matches_the_shipped_json():
+    from civ_arena import dashboard_compare as dc
+
+    allowed = set(qual.ALLOWED_BASELINE_WARNINGS)
+    assert allowed == set(json.loads(BASELINE_PATH.read_text()))
+    dashboard_source = (REPO / "src" / "civ_arena" / "dashboard.py").read_text()
+    for warning in qual.DASHBOARD_CAP_WARNINGS:
+        assert warning in dashboard_source, warning
+    assert len(qual.DASHBOARD_CAP_WARNINGS) == 6
+    assert len(allowed) == 16
+    for real_problem in (dc.WORLD_INVALID, dc.PACKET_UNBOUND,
+                         dc.STRATEGY_MALFORMED, "WORLD_INVALID"):
+        assert real_problem not in allowed

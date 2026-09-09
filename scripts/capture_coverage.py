@@ -24,10 +24,15 @@ Attribution rules (mirrored in docs/capture-coverage-20260909.md):
 - global families (game_era, grid, fog_audit) have no class dimension;
   every class row carries the same aggregation over the events where
   the field is present.
-- ``unsupported_or_null`` counts admitted-but-absent fields inside the
-  contributing events (the canonical key sets of world_capture.package,
-  plus ``level`` — admitted by the PLAYERROW wire, never emitted — and
-  ``palette_confirmed: false``).
+- ``unsupported_or_null`` counts admitted fields the payload does not
+  support inside the contributing events — absent OR explicitly null (the
+  canonical key sets of world_capture.package, plus ``level`` — admitted by
+  the PLAYERROW wire, never emitted — and ``palette_confirmed: false``). A
+  real ``0``/``False``/``""``/``[]`` is supported data and is NOT counted.
+- a roster row naming a kind the wire parser never admits (anything
+  outside major/city_state/barbarian, ``free_city`` included) is recorded
+  in the top-level ``errors`` list — an explicit coverage error, never a
+  silent no-class attribution.
 """
 
 from __future__ import annotations
@@ -43,6 +48,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 SCHEMA = 1
 ENTITY_CLASSES = ("major", "city_state", "barbarian", "free_city")
+# The kinds world_capture.parse_roster admits off the PLAYERROW wire
+# (world_capture.py:277). `free_city` is an arena class the matrix keeps a
+# GAP row for, but NO producer can name it — a roster row that does is a
+# wire violation, recorded as an explicit coverage ERROR rather than
+# quietly attributed.
+WIRE_ROSTER_KINDS = ("major", "city_state", "barbarian")
 FIELD_FAMILIES = ("roster_identity", "economy_players", "cities",
                   "owned_tiles", "palette", "game_era", "grid", "fog_audit")
 NAMED_FROM = "roster PLAYERROW kind"
@@ -179,7 +190,14 @@ def _pid_of(key: Any) -> int | None:
 
 
 def _absent_count(admitted: tuple[str, ...], member: dict[str, Any]) -> int:
-    return sum(1 for key in admitted if key not in (member or {}))
+    """Admitted keys this payload does not actually support. Codex r1
+    finding 7: an EXPLICIT null is unsupplied exactly like an absent key
+    (the producer drops None-valued optional keys — world_capture.py:526-546
+    — so a null on the wire is a value nobody read), while a real `0`,
+    `False`, `""` or `[]` is supported data and stays counted as such."""
+    payload = member or {}
+    return sum(1 for key in admitted
+               if key not in payload or payload[key] is None)
 
 
 class _Accumulator:
@@ -241,6 +259,7 @@ def build_matrix(run_dir: Path, records: Any) -> dict[str, Any]:
     global_cells: dict[str, _Accumulator] = {}
     spectator_events = 0
     world_missing = 0
+    errors: list[dict[str, Any]] = []
 
     for record in records:
         if record.get("audit") != "spectator_world":
@@ -264,6 +283,14 @@ def build_matrix(run_dir: Path, records: Any) -> dict[str, Any]:
         for row in world.get("roster", []):
             pid, kind = row.get("player_id"), row.get("kind")
             pid_kind[pid] = kind
+            if kind not in WIRE_ROSTER_KINDS:
+                # Codex r1 finding 3: a kind the wire parser never admits is
+                # an explicit coverage ERROR, never a silent no-class row.
+                errors.append({
+                    "seq": seq, "pid": pid, "kind": kind,
+                    "detail": f"roster names kind {kind!r} for pid {pid}: not a "
+                              "wire-admitted kind (world_capture.parse_roster "
+                              f"admits {', '.join(WIRE_ROSTER_KINDS)})"})
             if kind in classes:
                 classes[kind]["members"].add(pid)
                 named_kinds.add(kind)
@@ -322,6 +349,7 @@ def build_matrix(run_dir: Path, records: Any) -> dict[str, Any]:
         "identity": summary,
         "spectator_world_events": spectator_events,
         "world_payload_missing": world_missing,
+        "errors": errors,
         "entity_classes": [
             {"class": cls, "named_from": NAMED_FROM,
              "observed_members": len(classes[cls]["members"]),
@@ -374,6 +402,19 @@ def _now_iso() -> str:
 # -- markdown ------------------------------------------------------------------
 
 
+def _cell(value: Any) -> str:
+    """Codex r1 finding 8: the accessors ARE wire headers (`SPECW|1
+    roster_read`, `OVX|2 overview_read`), so an unescaped delimiter silently
+    shifts every column to its right — the reader sees a context value under
+    `accessor`. The JSON matrix keeps the raw text."""
+    return str(value).replace("|", "\\|")
+
+
+def _row_line(*cells: Any) -> str:
+    """One markdown table row, every cell escaped."""
+    return "| " + " | ".join(_cell(cell) for cell in cells) + " |"
+
+
 def render_markdown(matrix: dict[str, Any]) -> str:
     lines = [
         f"# Capture coverage — {matrix['run_dir']}",
@@ -389,20 +430,20 @@ def render_markdown(matrix: dict[str, Any]) -> str:
         "",
         "## Entity classes (named from roster PLAYERROW kind)",
         "",
-        "| class | named_from | observed_members | observed_in_worlds |",
+        _row_line("class", "named_from", "observed_members", "observed_in_worlds"),
         "|---|---|---|---|",
     ]
     for entry in matrix["entity_classes"]:
-        lines.append(
-            f"| {entry['class']} | {entry['named_from']} "
-            f"| {entry['observed_members']} | {entry['observed_in_worlds']} |")
+        lines.append(_row_line(entry["class"], entry["named_from"],
+                               entry["observed_members"],
+                               entry["observed_in_worlds"]))
     lines += [
         "",
         "## Coverage matrix (class × field_family)",
         "",
-        "| class | family | accessor | context | observed/derived | "
-        "events (seq) | first_ts | last_ts | read_ms min/median/max | "
-        "unsupported_or_null | truncated |",
+        _row_line("class", "family", "accessor", "context", "observed/derived",
+                  "events (seq)", "first_ts", "last_ts",
+                  "read_ms min/median/max", "unsupported_or_null", "truncated"),
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for row in matrix["rows"]:
@@ -412,13 +453,16 @@ def render_markdown(matrix: dict[str, Any]) -> str:
                 if cursor["events"] else "0")
         times = row["sampling_time"]
         stats = row["read_ms"]
-        lines.append(
-            f"| {row['class']} | {row['field_family']} | {row['accessor']} "
-            f"| {row['context']} | {row['observed_vs_derived']} | {span} "
-            f"| {times['first_ts'] or '—'} | {times['last_ts'] or '—'} "
-            f"| {stats['min']}/{stats['median']}/{stats['max']} "
-            f"| {row['unsupported_or_null']} "
-            f"| {_short_truncated(row['truncated'])} |")
+        lines.append(_row_line(
+            row["class"], row["field_family"], row["accessor"], row["context"],
+            row["observed_vs_derived"], span, times["first_ts"] or "—",
+            times["last_ts"] or "—",
+            f"{stats['min']}/{stats['median']}/{stats['max']}",
+            row["unsupported_or_null"], _short_truncated(row["truncated"])))
+    lines += ["", "## Errors", ""]
+    lines += ([f"- seq {error['seq']}: {_cell(error['detail'])}"
+               for error in matrix["errors"]]
+              or ["- none — every roster row named a wire-admitted kind"])
     lines += ["", "## GAPS", ""]
     lines += _gap_lines(matrix)
     return "\n".join(lines) + "\n"

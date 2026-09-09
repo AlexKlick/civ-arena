@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "capture_coverage.py"
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")
 
 EXPECTED_CLASSES = ("major", "city_state", "barbarian", "free_city")
 EXPECTED_FAMILIES = ("roster_identity", "economy_players", "cities",
@@ -302,3 +304,86 @@ def test_cli_writes_json_and_markdown(tmp_path):
     assert "## GAPS" in md and "palette_confirmed" in md
     assert "spectate-phase world carrier UNVERIFIED" in md
     assert "city_state" in md
+
+
+# -- r1 fix lane: novel kinds, nulls, and markdown cells ------------------------
+
+
+def test_novel_roster_kind_is_an_explicit_error_not_a_silent_gap():
+    rogue = _world(roster=[_roster_row(0, "major", is_major=True),
+                           _roster_row(7, "rebels")])
+    matrix = _matrix([_event(0, rogue)])
+    assert len(matrix["errors"]) == 1
+    error = matrix["errors"][0]
+    assert error["seq"] == 0 and error["pid"] == 7 and error["kind"] == "rebels"
+    assert "'rebels'" in error["detail"] and "wire-admitted" in error["detail"]
+    assert "barbarian" in error["detail"]
+    # the unknown kind still names no class anywhere in the table
+    assert [entry["class"] for entry in matrix["entity_classes"]] == \
+        list(EXPECTED_CLASSES)
+    rendered = _publisher().render_markdown(matrix)
+    assert "## Errors" in rendered and "rebels" in rendered
+
+
+def test_free_city_is_never_nameable_so_a_named_one_is_an_error():
+    matrix = _matrix([_event(0, _world(roster=[_roster_row(3, "free_city")]))])
+    assert [entry["kind"] for entry in matrix["errors"]] == ["free_city"]
+    assert next(entry for entry in matrix["entity_classes"]
+                if entry["class"] == "free_city")["observed_members"] == 1
+
+
+def test_clean_run_reports_no_errors():
+    matrix = _matrix([_event(0, TWO_MAJOR_WORLD), _event(1, CITY_STATE_WORLD)])
+    assert matrix["errors"] == []
+
+
+def test_null_valued_admitted_keys_count_as_unsupported():
+    world = _world(
+        roster=[_roster_row(0, "major", is_major=True, is_barbarian=None,
+                            alive=None)],
+        players=[{"player_id": 0, "gold": None, "science": 0}])
+    matrix = _matrix([_event(0, world)])
+    # level (never emitted) + the two nulls
+    assert _row(matrix, "major", "roster_identity")["unsupported_or_null"] == 3
+    # gold null + the other eight admitted-but-absent Amendment-2 keys
+    assert _row(matrix, "major", "economy_players")["unsupported_or_null"] == 10
+
+
+def test_real_falses_zeros_and_empty_values_stay_supported():
+    world = _world(roster=[_roster_row(0, "major", is_major=False,
+                                      is_barbarian=False, alive=False,
+                                      suzerain=0)],
+                   players=[{"player_id": 0, "gold": 0, "civics": [],
+                             "researching": ""}])
+    matrix = _matrix([_event(0, world)])
+    assert _row(matrix, "major", "roster_identity")["unsupported_or_null"] == 1  # level
+    assert _row(matrix, "major", "economy_players")["unsupported_or_null"] == 8
+
+
+def test_markdown_cells_escape_pipes(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    records = [_event(0, TWO_MAJOR_WORLD)]
+    (run_dir / "events.jsonl").write_text(
+        "\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n")
+    out_md = tmp_path / "coverage-matrix.md"
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(run_dir), "--md", str(out_md)],
+        capture_output=True, text=True, timeout=60.0)
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+    md = out_md.read_text()
+    # the accessor literal carries a pipe: escaped, never a column break
+    assert "SPECW\\|1 roster_read" in md
+    assert "SPECW|1 roster_read" not in md
+    lines = md.splitlines()
+    header = lines.index("| class | family | accessor | context | "
+                         "observed/derived | events (seq) | first_ts | last_ts "
+                         "| read_ms min/median/max | unsupported_or_null | "
+                         "truncated |")
+    separator = lines[header + 1]
+    assert set(separator) <= {"|", "-"}
+    width = len(_UNESCAPED_PIPE.findall(separator))
+    for line in lines[header + 2:]:
+        if not line.startswith("|"):
+            break
+        assert len(_UNESCAPED_PIPE.findall(line)) == width, line

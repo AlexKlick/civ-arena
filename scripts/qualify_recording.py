@@ -10,9 +10,13 @@ Stages (each appends human-readable failures to one shared list; a stage never
 raises past its boundary except usage/IO errors):
 
 - stage_audit      validate_run.validate + spectator_world row contract
-                   (after_seat == [-1] + [0, 1] * rounds), the
-                   spectator_world_failed census, the roster-kind census and
-                   the run identity (a dirty tree fails).
+                   (after_seat == [-1] + [0, 1] * rounds over the captures
+                   whose world ENVELOPE holds up — schema/roster/read_ms,
+                   inner-vs-outer after_seat, turn order and a preceding
+                   completed_seat_turn row), the spectator_world_failed
+                   census, the roster-kind census (a kind the wire parser
+                   never admits fails the verdict) and the run identity (a
+                   dirty tree fails).
 - stage_viewer     in-process DashboardStore.load — status must be 'completed'
                    and no warning may fall outside the benign size-cap
                    baseline.
@@ -31,18 +35,26 @@ Exit codes:
     0  verdict PASS
     1  any stage failure (verdict FAIL; qualification.json is still written)
     2  usage/IO error: missing run dir, unreadable artifact, malformed
-       baseline file, bad --rounds, or an output path inside the run dir
+       baseline file (or one naming a warning outside the code-owned
+       benign-cap allowlist), bad --rounds, an output path inside the run
+       dir / aliasing its evidence / colliding with another output, or a
+       failed publication
 
 The harness NEVER mutates the run dir: every output defaults to a sibling
-"<run>.qual/" directory, and any explicit output inside the run dir is
-refused. No HTTP server is started; the viewer runs in-process.
+"<run>.qual/" directory, and any explicit output inside the run dir — or
+merely sharing an inode with one of its artifacts — is refused before any
+stage runs. A publication that fails part-way removes the outputs it
+created, so no success document outlives a failed write. No HTTP server is
+started; the viewer runs in-process.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
 import sys
 from collections import Counter
 from datetime import UTC, datetime
@@ -50,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from civ_arena import dashboard_compare  # noqa: E402
 from civ_arena.dashboard import DashboardStore  # noqa: E402
 from civ_arena.game.civ6.validate_run import validate  # noqa: E402
 from civ_arena.research.export_dataset import export, write  # noqa: E402
@@ -61,6 +74,46 @@ ENTITY_CLASS_SOURCE = "roster PLAYERROW kind — named, never inferred"
 PENDING = "*(pending operator fill)*"
 MAX_FAILED_REFS = 10
 VIEWER_CHECK = "in-process DashboardStore.load"
+# the consumed artifacts a derived output must never alias (the exporter
+# guards its own two targets; these are ours) plus the run dir itself
+RUN_EVIDENCE = ("events.jsonl", "summary.json", "llm_costs.jsonl")
+# The roster kinds world_capture.parse_roster admits off the PLAYERROW wire.
+# Anything else is a wire violation — never a class to infer.
+WIRE_ROSTER_KINDS = ("major", "city_state", "barbarian")
+# The closed top-level key set of world_capture.package — the hotseat world
+# carrier this harness qualifies (`palette` / `game_era` are optional emits,
+# so a conforming payload may omit them but may add nothing).
+WORLD_PACKAGE_KEYS = frozenset({
+    "schema", "after_seat", "contexts", "grid", "roster", "players", "cities",
+    "owned_tiles_columns", "fog_audit", "palette_confirmed", "truncated",
+    "read_ms", "palette", "game_era"})
+# The ONLY warnings a baseline may whitelist: the size-cap constants
+# dashboard_compare owns plus the cap strings dashboard.py emits inline. A
+# supplied baseline cannot whitelist a real warning by naming it — the
+# allowlist is CODE-owned; configs/qual-warning-baseline.json is only the
+# shipped default spelling of the same set.
+COMPARE_CAP_WARNINGS = (
+    dashboard_compare.WORLD_RECORDS_CAPPED,
+    dashboard_compare.WORLD_PLAYERS_CAPPED,
+    dashboard_compare.RESEARCH_CAPPED,
+    dashboard_compare.HISTORY_CAPPED,
+    dashboard_compare.OPTIONS_CAPPED,
+    dashboard_compare.ROWS_CAPPED,
+    dashboard_compare.MARKS_CAPPED,
+    dashboard_compare.ECONOMY_CAPPED,
+    dashboard_compare.ROLES_CAPPED,
+    dashboard_compare.DIRECTIVE_CAPPED)
+# The six cap strings dashboard.py emits inline (no module constant to
+# import; every one is asserted present in that source by the tests).
+DASHBOARD_CAP_WARNINGS = (
+    "Event log exceeds the read limit; this view is incomplete.",
+    "Event count limit reached; this view is incomplete.",
+    "Per-turn display limit reached; older items omitted.",
+    "Turn display limit reached; older turns omitted.",
+    "Response size limit reached; older turns omitted.",
+    "Response size limit reached; older comparison rows omitted.")
+ALLOWED_BASELINE_WARNINGS = frozenset(COMPARE_CAP_WARNINGS
+                                      + DASHBOARD_CAP_WARNINGS)
 
 
 class QualificationError(Exception):
@@ -77,12 +130,72 @@ def diff_warnings(warnings: list, baseline: list[str]) -> tuple[list, list]:
 # -- stage 1: capture audit -----------------------------------------------------
 
 
+def world_envelope_reasons(record: dict, prev_turn: int | None,
+                           seat_turns: dict[tuple[int, int], list[int]]
+                           ) -> list[str]:
+    """Every way ONE spectator_world capture violates the producer contract.
+
+    Codex r1 finding 1: neither validate_run nor the viewer inspects these
+    payloads (dashboard_compare skips worldless captures silently), so the
+    row contract must not be satisfiable by an envelope the producer could
+    never have emitted. Checked against world_capture.package (the closed
+    top-level key set, schema 1, the roster list, read_ms and the payload's
+    OWN after_seat) and against live_driver's emission order: captures are
+    turn-ordered and every non-baseline capture sits after the
+    completed_seat_turn row for ITS seat and turn (live_driver.py:1054 then
+    :1071 — the audit row's `row` carries the authoritative turn/player;
+    the HEARTBEAT's own `turn` field is the engine mirror and may already
+    have advanced).
+    """
+    world = record.get("world")
+    if not isinstance(world, dict):
+        return [f"world payload is not a dict ({type(world).__name__})"]
+    reasons: list[str] = []
+    schema = world.get("schema")
+    if type(schema) is not int or schema != 1:
+        reasons.append(f"world schema is not 1 (got {schema!r})")
+    if not isinstance(world.get("roster"), list):
+        reasons.append("world roster is not a list "
+                       f"({type(world.get('roster')).__name__})")
+    read_ms = world.get("read_ms")
+    if "read_ms" not in world:
+        reasons.append("world read_ms is absent")
+    elif not isinstance(read_ms, (int, float)) or isinstance(read_ms, bool):
+        reasons.append(f"world read_ms is not a number ({type(read_ms).__name__})")
+    unknown = sorted(set(world) - WORLD_PACKAGE_KEYS)
+    if unknown:
+        reasons.append("world payload carries key(s) outside the world package "
+                       f"key set: {unknown}")
+    outer, turn, seq = (record.get("after_seat"), record.get("turn"),
+                        record.get("seq"))
+    inner = world.get("after_seat")
+    if inner != outer:
+        reasons.append(f"world payload after_seat {inner!r} does not match the "
+                       f"event after_seat {outer!r}")
+    if type(turn) is not int:
+        reasons.append(f"capture turn {turn!r} is not an integer")
+    elif prev_turn is not None and turn < prev_turn:
+        reasons.append(f"capture turn {turn} precedes the previous capture's "
+                       f"turn {prev_turn}")
+    if type(outer) is not int:
+        reasons.append(f"event after_seat {outer!r} is not an integer")
+    elif outer != -1 and type(turn) is int:
+        seqs = seat_turns.get((outer, turn)) or []
+        if not any(type(seq) is int and other < seq for other in seqs):
+            where = (f" (the matching row is at seq {seqs[0]}, after this capture)"
+                     if seqs else "")
+            reasons.append(f"no completed_seat_turn row for seat {outer} at turn "
+                           f"{turn} before this capture{where}")
+    return reasons
+
+
 def stage_audit(run_dir: Path, rounds: int, require_live: bool,
                 failures: list[str]) -> dict:
     """validate_run + the spectator_world contract + identity, in one pass."""
     result = {"validate": {}, "spectator_world_rows": 0,
               "expected_rows": 1 + 2 * rounds, "after_seat_sequence": [],
-              "spectator_world_failed": 0, "roster_kinds_observed": {},
+              "spectator_world_failed": 0, "spectator_world_rejected": [],
+              "roster_kinds_observed": {},
               "entity_class_source": ENTITY_CLASS_SOURCE, "identity": {}}
     try:
         verdict = validate(run_dir, rounds, require_live=require_live)
@@ -94,6 +207,7 @@ def stage_audit(run_dir: Path, rounds: int, require_live: bool,
         failures.append(f"capture audit: {message}")
 
     worlds, failed, kinds, identity_events = [], [], Counter(), []
+    seat_turns: dict[tuple[int, int], list[int]] = {}
     try:
         with open(run_dir / "events.jsonl", encoding="utf-8") as stream:
             for number, line in enumerate(stream, start=1):
@@ -107,24 +221,65 @@ def stage_audit(run_dir: Path, rounds: int, require_live: bool,
                 audit = record.get("audit")
                 if audit == "spectator_world":
                     worlds.append(record)
-                    world = record.get("world")
-                    roster = world.get("roster", []) if isinstance(world, dict) else []
-                    for row in roster:
-                        kind = row.get("kind") if isinstance(row, dict) else None
-                        kinds[kind if isinstance(kind, str) else "<absent-kind>"] += 1
                 elif audit == "spectator_world_failed":
                     failed.append(record)
                 elif audit == "run_identity":
                     identity_events.append(record)
+                elif audit == "completed_seat_turn":
+                    row = record.get("row")
+                    seq = record.get("seq")
+                    if (isinstance(row, dict) and type(row.get("player")) is int
+                            and type(row.get("turn")) is int and type(seq) is int):
+                        seat_turns.setdefault(
+                            (row["player"], row["turn"]), []).append(seq)
     except OSError as exc:
         raise QualificationError(f"events.jsonl is unreadable: {exc}") from exc
 
-    after_seats = [row.get("after_seat") for row in worlds]
+    # Codex r1 findings 1+3: the census counts what the log CLAIMS (a novel
+    # kind must never disappear), but only an envelope the producer could
+    # have emitted may take a place in the row-contract sequence.
+    after_seats: list = []
+    rejected: list[dict] = []
+    novel: dict[tuple[str, object], int] = {}
+    prev_turn: int | None = None
+    for record in worlds:
+        world = record.get("world")
+        if isinstance(world, dict) and isinstance(world.get("roster"), list):
+            for row in world["roster"]:
+                kind = row.get("kind") if isinstance(row, dict) else None
+                name = kind if isinstance(kind, str) else "<absent-kind>"
+                kinds[name] += 1
+                if name not in WIRE_ROSTER_KINDS:
+                    pid = row.get("player_id") if isinstance(row, dict) else None
+                    novel[(name, pid)] = novel.get((name, pid), 0) + 1
+        reasons = world_envelope_reasons(record, prev_turn, seat_turns)
+        if reasons:
+            rejected.append({"seq": record.get("seq"),
+                             "after_seat": record.get("after_seat"),
+                             "turn": record.get("turn"),
+                             "reason": "; ".join(reasons)})
+            continue
+        after_seats.append(record.get("after_seat"))
+        prev_turn = record.get("turn")
+
     expected = [-1] + [0, 1] * rounds
     result["spectator_world_rows"] = len(after_seats)
     result["after_seat_sequence"] = after_seats
+    result["spectator_world_rejected"] = rejected
     result["spectator_world_failed"] = len(failed)
     result["roster_kinds_observed"] = dict(sorted(kinds.items()))
+    for entry in rejected:
+        failures.append(
+            f"spectator_world capture at seq {entry['seq']} "
+            f"(after_seat={entry['after_seat']}, turn={entry['turn']}) is not a "
+            "valid world capture and does not count toward the row contract: "
+            f"{entry['reason']}")
+    for (kind, pid), count in sorted(novel.items(),
+                                     key=lambda item: (item[0][0], str(item[0][1]))):
+        failures.append(
+            f"roster kind {kind!r} (pid {pid}) is not wire-admitted: "
+            f"world_capture.parse_roster admits only "
+            f"{', '.join(WIRE_ROSTER_KINDS)} ({count} row(s))")
     if failed:
         seats = [row.get("after_seat") for row in failed]
         failures.append(f"spectator_world_failed capture(s) present: {len(failed)} "
@@ -330,6 +485,14 @@ def coverage_section(coverage_path: Path) -> dict:
             "matrix_rows": sum(1 for line in raw.decode().splitlines() if line.strip())}
 
 
+def _row_line(*cells: object) -> str:
+    """One markdown table row. Codex r1 finding 8: a raw `|` inside a cell
+    (`SPECW|1 roster_read`, a run id, a path) silently shifts every column
+    to its right, so the delimiter is escaped at render time. The JSON
+    verdict document carries the unescaped values."""
+    return "| " + " | ".join(str(cell).replace("|", "\\|") for cell in cells) + " |"
+
+
 def render_report(qualification: dict, export_out: Path, json_path: Path,
                   report_path: Path | None) -> str:
     """Markdown skeleton for evidence card §6: machine cells filled, human
@@ -346,16 +509,17 @@ def render_report(qualification: dict, export_out: Path, json_path: Path,
         f"Generated {qualification['generated_at']} by "
         "scripts/qualify_recording.py (dataset evidence card §6 steps 2-4).",
         "",
-        "| Field | Value |",
+        _row_line("Field", "Value"),
         "|---|---|",
-        f"| Run id | `{Path(qualification['run_dir']).name}` |",
-        f"| Mod version | {PENDING} |",
-        f"| Samples by class | {counts or 'none'} |",
-        f"| Ref-integrity failures | "
-        f"{export_section['ref_integrity']['failures']} "
-        f"(of {export_section['ref_integrity']['refs_checked']} refs checked) |",
-        f"| Flag histogram | `{histogram}` |",
-        f"| Allowed uses for THIS recording | {PENDING} |",
+        _row_line("Run id", f"`{Path(qualification['run_dir']).name}`"),
+        _row_line("Mod version", PENDING),
+        _row_line("Samples by class", counts or "none"),
+        _row_line("Ref-integrity failures",
+                  f"{export_section['ref_integrity']['failures']} "
+                  f"(of {export_section['ref_integrity']['refs_checked']} "
+                  "refs checked)"),
+        _row_line("Flag histogram", f"`{histogram}`"),
+        _row_line("Allowed uses for THIS recording", PENDING),
         "",
         f"Verdict: **{qualification['verdict']}**",
         "",
@@ -366,6 +530,8 @@ def render_report(qualification: dict, export_out: Path, json_path: Path,
         f"- spectator_world rows: {audit['spectator_world_rows']} of "
         f"{audit['expected_rows']} expected; after_seat={audit['after_seat_sequence']}",
         f"- spectator_world_failed: {audit['spectator_world_failed']}",
+        f"- spectator_world captures rejected by the envelope contract: "
+        f"{len(audit['spectator_world_rejected'])}",
         f"- roster kinds observed: {json.dumps(audit['roster_kinds_observed'],
                                                sort_keys=True)} "
         f"({audit['entity_class_source']})",
@@ -421,7 +587,8 @@ def _parser() -> argparse.ArgumentParser:
         epilog="Exit codes: 0 verdict PASS; 1 any stage failure (verdict FAIL, "
                "qualification.json still written); 2 usage/IO error (missing run "
                "dir, unreadable artifact, malformed baseline file, bad --rounds, "
-               "or an output path inside the run dir).")
+               "an output path inside the run dir, an output aliasing the run's "
+               "evidence or another output, or a failed publication).")
     ap.add_argument("run_dir", type=Path, help="captured run directory (read-only)")
     ap.add_argument("--rounds", type=int, required=True,
                     help="requested/completed round count the run was captured for")
@@ -451,6 +618,59 @@ def _refuse_inside_run(path: Path, run_dir: Path, label: str) -> None:
                                  "harness never writes into the run it qualifies")
 
 
+def _resolve(path: Path) -> Path:
+    """Canonical identity of an output target (symlinks, `..` and duplicate
+    separators folded) — export_dataset._resolve_target's shape."""
+    return Path(path).resolve(strict=False)
+
+
+def guard_outputs(outputs: list[tuple[str, Path]], run_dir: Path) -> None:
+    """Codex r1 findings 2+5, applied ONCE up front to EVERY output.
+
+    Containment by resolution is not enough: an existing external HARDLINK
+    to run/events.jsonl resolves outside the run dir yet shares its inode,
+    so write_text() would truncate the sealed source. Mirrors the guard
+    export_dataset.write() already applies to its own two targets
+    (export_dataset.py:214-245): resolve, then os.path.samefile against
+    each consumed artifact and the run dir. The same pass rejects two
+    outputs that would land on one file — including the exporter's
+    `<export-out>.manifest.json` sibling — so no verified artifact is
+    overwritten after it was hashed.
+    """
+    sources = {_resolve(run_dir / name): run_dir / name for name in RUN_EVIDENCE}
+    sources[_resolve(run_dir)] = run_dir
+    for label, path in outputs:
+        _refuse_inside_run(path, run_dir, label)
+        alias = sources.get(_resolve(path))
+        if alias is None and path.exists():
+            alias = next((source for source in sources.values()
+                          if source.exists() and os.path.samefile(path, source)),
+                         None)
+        if alias is not None:
+            raise QualificationError(
+                f"--{label} {path} aliases run evidence {alias} (hardlink or "
+                "path alias); the harness never overwrites the run it qualifies")
+    for index, (label_a, path_a) in enumerate(outputs):
+        for label_b, path_b in outputs[index + 1:]:
+            if _resolve(path_a) == _resolve(path_b):
+                raise QualificationError(
+                    f"--{label_a} and --{label_b} resolve to the same path "
+                    f"({path_a}); every output needs its own file")
+            if (path_a.exists() and path_b.exists()
+                    and os.path.samefile(path_a, path_b)):
+                raise QualificationError(
+                    f"--{label_a} and --{label_b} are the same file ({path_a} "
+                    f"and {path_b} share an inode); every output needs its own file")
+
+
+def _publish(path: Path, text: str, label: str) -> None:
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise QualificationError(
+            f"{label} write failed: {type(exc).__name__}: {exc}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     opts = _parser().parse_args(argv)
     failures: list[str] = []
@@ -473,6 +693,15 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(baseline, list) or not all(
                 isinstance(item, str) for item in baseline):
             raise QualificationError("baseline file must be a JSON array of strings")
+        # Codex r1 finding 4: a supplied baseline is a SPELLING of the
+        # code-owned benign-cap set, never a way to whitelist a real warning
+        # (WORLD_INVALID and friends can never be benign).
+        foreign = [item for item in baseline
+                   if item not in ALLOWED_BASELINE_WARNINGS]
+        if foreign:
+            raise QualificationError(
+                "baseline file names warning(s) outside the code-owned "
+                f"benign-cap allowlist: {foreign}")
         coverage = None
         if opts.coverage is not None:
             coverage = coverage_section(opts.coverage)
@@ -480,26 +709,46 @@ def main(argv: list[str] | None = None) -> int:
         export_out = opts.export_out or out_dir / "samples.jsonl"
         json_path = opts.json or out_dir / "qualification.json"
         report_path = opts.report or out_dir / "qualification-report.md"
-        for path, label in ((export_out, "export-out"), (json_path, "json"),
-                            (report_path, "report")):
-            _refuse_inside_run(path, run_dir, label)
+        outputs = [("export-out", export_out),
+                   ("export-out manifest sibling",
+                    Path(str(export_out) + ".manifest.json")),
+                   ("json", json_path), ("report", report_path)]
+        guard_outputs(outputs, run_dir)
     except QualificationError as exc:
         print(f"qualification: {exc}", file=sys.stderr)
         return 2
 
-    audit = stage_audit(run_dir, opts.rounds, require_live=not opts.allow_fake,
-                        failures=failures)
-    viewer = stage_viewer(run_dir, baseline, failures=failures)
-    export_section = stage_export(run_dir, export_out, failures=failures)
-    qualification = stage_summarize(run_dir, opts.rounds, opts.allow_fake,
-                                    {"audit": audit, "viewer": viewer,
-                                     "export": export_section},
-                                    failures, coverage)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(qualification, indent=2, sort_keys=True) + "\n",
-                         encoding="utf-8")
-    report_path.write_text(render_report(qualification, export_out, json_path,
-                                         report_path), encoding="utf-8")
+    # Codex r1 finding 6: QualificationError is the harness's usage/IO
+    # channel — it never escapes as a traceback, and a publication that
+    # fails part-way leaves no success document behind.
+    preexisting = {path for _label, path in outputs if path.exists()}
+    try:
+        for label, path in outputs:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise QualificationError(
+                    f"--{label} parent directory cannot be created: "
+                    f"{type(exc).__name__}: {exc}") from exc
+        audit = stage_audit(run_dir, opts.rounds, require_live=not opts.allow_fake,
+                            failures=failures)
+        viewer = stage_viewer(run_dir, baseline, failures=failures)
+        export_section = stage_export(run_dir, export_out, failures=failures)
+        qualification = stage_summarize(run_dir, opts.rounds, opts.allow_fake,
+                                        {"audit": audit, "viewer": viewer,
+                                         "export": export_section},
+                                        failures, coverage)
+        _publish(json_path,
+                 json.dumps(qualification, indent=2, sort_keys=True) + "\n", "json")
+        _publish(report_path, render_report(qualification, export_out, json_path,
+                                            report_path), "report")
+    except QualificationError as exc:
+        for _label, path in outputs:
+            if path not in preexisting and path.is_file():
+                with contextlib.suppress(OSError):
+                    path.unlink()
+        print(f"qualification: {exc}", file=sys.stderr)
+        return 2
     print(f"qualification: {qualification['verdict']} — {len(failures)} failure(s); "
           f"verdict {json_path}")
     for failure in failures:

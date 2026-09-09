@@ -23,6 +23,12 @@ produces the family (wire headers from
 | grid | `SPECW\|1 owned_tiles_read` (GRID row) | `world["grid"]` | w, h |
 | fog_audit | `DRIVER fog_audit_for` (driver-side, not a wire read) | `world["fog_audit"]` | requested, engine_visible, engine_not_visible, unavailable, disagree_coords |
 
+`unsupported_or_null` counts an admitted key the payload does not
+support: **absent OR explicitly `null`** (the producer drops None-valued
+optional keys — `world_capture.package`, so a null on the wire is a value
+nobody read). A real `0`, `false`, `""` or `[]` is supported data and is
+never counted.
+
 Row fields: `accessor`, `context` (that event's `world["contexts"]`
 value; `unrecorded` where the world doc records no transport for the
 family), `observed_vs_derived`, `sampling_time` {first_ts, last_ts},
@@ -41,7 +47,12 @@ attributed to a class by resolving their pid through the SAME event's
 roster, and a pid that event's roster does not name is attributed to no
 class. `free_city` is emitted for symmetry with the arena class model
 but no producer can ever name it (the strict parser rejects the kind),
-so it is a permanent GAP row — present, zero, never inferred. Board-global
+so it is a permanent GAP row — present, zero, never inferred. A roster
+row that DOES name a kind outside the wire-admitted set
+(`major`/`city_state`/`barbarian` — `world_capture.parse_roster`) is
+recorded in the matrix's top-level `errors` list and in the markdown's
+`## Errors` section: an explicit coverage error, never a silent
+no-class attribution. Board-global
 families (game_era, grid, fog_audit) carry no class dimension: one
 aggregation, reported for every OBSERVED class; unobserved classes keep
 zero rows everywhere.
