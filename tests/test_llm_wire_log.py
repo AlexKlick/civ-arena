@@ -127,6 +127,86 @@ async def test_cost_ledger_compact_lines(monkeypatch, tmp_path):
     assert row["input_tokens"] == 11 and row["output_tokens"] == 7
     assert row["status_code"] == 200 and row["latency_ms"] >= 0
     assert "request" not in row and "response" not in row  # no payloads
+    # CAR-003 seam: the identity keys are always present; unsupplied == null
+    assert row["turn"] is None and row["match_id"] is None and row["run_id"] is None
+
+
+def test_cost_ledger_rows_carry_join_identity_only_when_supplied(tmp_path):
+    """CAR-003 §8a: turn/match_id/run_id ride on the row when the composer
+    supplies them; an absent, empty, or ill-typed value stays null (a
+    runtime's ``_turn == 0`` is "no turn begun", not turn zero; a bool is
+    not a turn) — nothing is defaulted."""
+    costs = CostLedger(tmp_path)
+    record = {"ts": "t", "request_kind": "generation", "attempt": 0,
+              "status_code": 200, "latency_ms": 1, "model": "m",
+              "payload_hash": "h", "decision_id": "d1",
+              "logical_request_id": "lr1", "request_set_key": "h:generation"}
+    costs.note("a", 0, record, turn=7, match_id="match-x", run_id="run-x")
+    costs.note("a", 0, record)
+    costs.note("a", 0, record, turn=0, match_id="", run_id=None)
+    costs.note("a", 0, record, turn=True, match_id=5, run_id=b"x")
+    rows = [json.loads(line) for line in
+            (tmp_path / "llm_costs.jsonl").read_text().splitlines()]
+    assert [(r["turn"], r["match_id"], r["run_id"]) for r in rows] == [
+        (7, "match-x", "run-x"), (None, None, None), (None, None, None),
+        (None, None, None)]
+    # the CAP-03 identity and the cost fields are untouched by the seam
+    assert all(r["decision_id"] == "d1" and r["logical_request_id"] == "lr1"
+               and r["status_code"] == 200 for r in rows)
+
+
+def test_wire_client_sinks_thread_join_identity_per_attempt(monkeypatch, tmp_path):
+    """CAR-003 §8a: the composer passes match_id/run_id and reads
+    ``turn_of()`` at ATTEMPT time (the turn advances between attempts);
+    a raising ``turn_of`` yields null and the row still lands, with no
+    ledger_write_failed audit — identity is best-effort, cost is not."""
+    from civ_arena.config import AgentSpec
+    from civ_arena.game.civ6.live_driver import _wire_client_sinks
+
+    monkeypatch.setenv("WIRE_LOG_TEST_KEY", SECRET)
+    agent = AgentSpec(agent_id="seat", player_id=1, policy="llm", seed=1,
+                      llm=_spec())
+    audits = []
+
+    class _Runtime:
+        _turn = 0
+
+    runtime = _Runtime()
+    calls = {"n": 0}
+
+    def turn_of():
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("turn source broke")
+        return runtime._turn
+
+    class _FakeClient:
+        def __init__(self):
+            self.posts_sent = 0
+            self.on_post = None
+            self.on_attempt = None
+
+    client = _FakeClient()
+    _wire_client_sinks(client, agent, lambda tag, **f: audits.append(
+        {"audit": tag, **f}), tmp_path, match_id="m-1", run_id="run-1",
+        turn_of=turn_of)
+    record = {"ts": "t", "request_kind": "generation", "attempt": 0,
+              "status_code": 200, "latency_ms": 5, "model": "m",
+              "payload_hash": "h", "request": {}, "response": None,
+              "error": None, "input_tokens": 2, "output_tokens": 1,
+              "decision_id": "d", "logical_request_id": "l",
+              "request_set_key": "h:generation"}
+    client.on_attempt(record)          # before any turn: _turn == 0 -> null
+    runtime._turn = 4
+    client.on_attempt(record)          # turn 4
+    client.on_attempt(record)          # turn_of raises -> null, row still lands
+    rows = [json.loads(line) for line in
+            (tmp_path / "llm_costs.jsonl").read_text().splitlines()]
+    assert [r["turn"] for r in rows] == [None, 4, None]
+    assert all(r["match_id"] == "m-1" and r["run_id"] == "run-1"
+               and r["agent_id"] == "seat" and r["player_id"] == 1
+               for r in rows)
+    assert not any(a["audit"] == "ledger_write_failed" for a in audits)
 
 
 def test_wire_client_sinks_compose(monkeypatch, tmp_path):

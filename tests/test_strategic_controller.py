@@ -472,6 +472,51 @@ async def test_exact_projected_request_is_audited_before_each_model_call(setup, 
     assert len([r for r in records if r['audit'] == 'strategy_request']) == (2 if repair else 1)
 
 
+_STAMPED = ('strategy_request', 'strategy_response_shape', 'strategy_decision')
+
+
+async def test_request_shape_and_decision_audits_carry_the_turn_decision_id(setup):
+    """CAR-003 §8b: the audits describing one provider decision name the
+    decision id the client stamped on its ledger rows — the same id the
+    turn's decision_boundary carries — so a request audit joins its cost
+    rows without ordering guesses. Quiet turns emit none of the three."""
+    controller, runtime, model, facade, records, scout = setup
+    model.script = [[text('repair needed')], [use('submit_directive')]]
+    await advance(controller, runtime, facade, 1)
+    boundary = next(r for r in records if r['audit'] == 'decision_boundary')
+    assert boundary['decision_id'] == model.decision_id
+    stamped = [r for r in records if r['audit'] in _STAMPED]
+    assert [r['audit'] for r in stamped] == [
+        'strategy_request', 'strategy_response_shape',
+        'strategy_request', 'strategy_response_shape', 'strategy_decision']
+    assert all(r['decision_id'] == boundary['decision_id'] for r in stamped)
+    # the envelope pinned elsewhere is untouched
+    assert all(r['controller_version'] == 1 and r['turn'] == 1 for r in stamped)
+    await advance(controller, runtime, facade, 2)  # quiet: no request at all
+    assert not [r for r in records if r['audit'] in _STAMPED and r['turn'] == 2]
+    quiet = next(r for r in records if r['audit'] == 'decision_boundary' and r['turn'] == 2)
+    assert quiet['decision_id'] != boundary['decision_id']
+
+
+async def test_economy_replacement_audits_carry_the_replacement_decision_id(setup):
+    """CAR-003 §8b, economy-refresh path: the replacement decision's
+    request/shape/decision audits carry the REPLACEMENT id (the one on the
+    client during its provider call), never the turn-start id."""
+    controller, runtime, model, facade, records, scout = setup
+    facade.cities = [{"city_id": "c0:1", "owner": 0, "coord": "0,0", "production_queue": []}]
+    facade.get_available_production = AsyncMock(return_value=[{"item_id": "SCOUT", "kind": "unit"}])
+    model.script = [[use('submit_directive', {"unit_targets": {"SCOUT": 0}})],
+                    [use('submit_directive', {"unit_targets": {"SCOUT": 3}})]]
+    await advance(controller, runtime, facade, 1)
+    turn_start, refresh = [r for r in records if r['audit'] == 'decision_boundary']
+    assert turn_start['decision_id'] != refresh['decision_id']
+    stamped = [r for r in records if r['audit'] in _STAMPED]
+    assert [r['decision_id'] for r in stamped] == (
+        [turn_start['decision_id']] * 3 + [refresh['decision_id']] * 3)
+    assert [r['audit'] for r in stamped] == [
+        'strategy_request', 'strategy_response_shape', 'strategy_decision'] * 2
+
+
 @pytest.mark.parametrize("queue_observed", [False, True])
 async def test_production_targets_cover_two_cities_even_before_queue_is_observed(setup,
                                                                                queue_observed):
