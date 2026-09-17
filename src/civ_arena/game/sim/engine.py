@@ -92,8 +92,14 @@ def run_ambient(state: SimState, player_id: int) -> list[MutationRecord]:
 
         prod = _production_per_turn(state, city)
         science_total += 2 * city["population"]
+        # `buildings` is a wire-vocabulary superset of BUILDINGS: the live
+        # city read enumerates GameInfo.Buildings (every capital reports
+        # PALACE), so the belief's own-city passthrough can carry names the
+        # sim catalogue has never heard of. Uncatalogued buildings simply
+        # contribute no sim gold — same tolerance the option layer already
+        # applies (`set(BUILDINGS) <= set(city["buildings"])`).
         gold_total += city["population"] + sum(
-            BUILDINGS[b].get("gold", 0) for b in city["buildings"]
+            BUILDINGS.get(b, {}).get("gold", 0) for b in city["buildings"]
         )
 
         if city["production_queue"]:
