@@ -42,12 +42,13 @@ _TERRAIN_WEIGHTS: list[tuple[str, int]] = [
 
 CIV_NAMES: dict[int, str] = {0: "ROME", 1: "KOREA"}
 
-# Four-seat arena: starts sit on the boundary ring of the radius-7 map, are
-# point-symmetric under 180° rotation, and every seat has exactly two
-# neighbours at hex_dist 7 and one antipode at 14 — no seat is privileged.
+# Four-seat arena: starts at hex_dist 6 on the radius-7 map, point-symmetric
+# under 180° rotation (ring angles 0°/120°/180°/240°). Every seat's ring-1
+# neighbours stay on-map, and every seat has exactly one rival at hex_dist 6
+# and two at 12 — identical per-seat exposure, no privileged corner.
 MAP_RADIUS_4P: int = 7  # 3r²+3r+1 = 169 tiles
 STARTS_4: dict[int, tuple[int, int]] = {
-    0: (7, 0), 1: (0, -7), 2: (-7, 0), 3: (0, 7),
+    0: (6, 0), 1: (0, -6), 2: (-6, 0), 3: (0, 6),
 }
 CIV_NAMES_4: dict[int, str] = {0: "ROME", 1: "KOREA", 2: "EGYPT", 3: "MONGOL"}
 
