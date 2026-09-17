@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from civ_arena.canonical import log_prefix_hash, state_hash
 from civ_arena.arena.coordinator import Arena
+from civ_arena.canonical import log_prefix_hash, state_hash
 from civ_arena.config import AgentSpec, ConfigError, MatchSpec, parse_config
 from civ_arena.game.conformance import assert_adapter_conformance
 from civ_arena.game.sim.layouts import (
@@ -131,7 +131,7 @@ def test_hex_line_greedy_adjacent_and_exact() -> None:
         line = hex_line_greedy(a, b)
         assert line[0] == a and line[-1] == b
         assert len(line) == sum(1 for _ in line)  # sanity: list
-        for (q1, r1), (q2, r2) in zip(line, line[1:]):
+        for (q1, r1), (q2, r2) in zip(line, line[1:], strict=False):
             assert (q2, r2) in set(neighbors(q1, r1)), "steps must be adjacent"
 
 
