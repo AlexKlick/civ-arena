@@ -143,3 +143,30 @@ def test_own_city_wire_buildings_survive_the_ambient_rollout():
     # and no invented gold.
     assert city["buildings"] == ["PALACE", "MONUMENT"]
     assert BUILDINGS["MONUMENT"]["gold"] == 2
+
+
+# -- finding 4: an empty/truncated Status poll must not KeyError the driver --
+
+def test_target_turn_reads_an_empty_status_poll_as_no_target_yet():
+    """poll_status() returns {} with no exception when the Status read times
+    out (parse_kv_lines([]) => {}), and a truncated payload can carry
+    TURN_ACTIVE without the TURN row. _target_turn must read both shapes as
+    "nothing to target yet" — the same -1 sentinel rule 1 already emits for
+    a lease row without LEASE_TURN — so engage()'s probe returns None and
+    the recovery loop re-polls, instead of KeyError('TURN') aborting the
+    match at the first engagement."""
+    from civ_arena.game.civ6.live_driver import _target_turn
+
+    # first engagement (last_driven default -1): the .get default and the
+    # missing key COLLAPSE into the same branch -> bare status["TURN"]
+    assert _target_turn({}, 0, -1, None) == -1
+    # mid-run empty poll (last_driven is a real turn)
+    assert _target_turn({}, 0, 7, None) == -1
+    # truncated payload: TURN_ACTIVE present, TURN row lost
+    assert _target_turn({"TURN_ACTIVE": True}, 0, -1, None) == -1
+    assert _target_turn({"TURN_ACTIVE": True}, 0, 7, None) == -1
+    # partial lease rows without the TURN row are already safe (rule 1)
+    assert _target_turn({"PUPPET_ACTIVE": True, "LEASE_PLAYER": 0}, 0, -1,
+                        None) == -1
+    # a well-formed payload is unchanged
+    assert _target_turn({"TURN": 4, "PUPPET_ACTIVE": False}, 0, 7, None) == 4

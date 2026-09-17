@@ -1648,18 +1648,29 @@ def _target_turn(status: dict[str, Any], player_id: int,
     (TURN=N, inactive, no lease). The hook ring discriminates: our last
     DEACT at turn == TURN => the AI is still on OUR turn (target TURN+1);
     our last DEACT at turn < TURN => the engine has advanced INTO our
-    next turn (target TURN)."""
+    next turn (target TURN).
+
+    A Status poll that timed out returns {} with NO exception (parse of an
+    empty line list), and a truncated payload can carry TURN_ACTIVE without
+    the TURN row. A poll without a readable TURN row targets nothing: the
+    -1 sentinel this function already emits for a lease row without
+    LEASE_TURN makes engage()'s probe return None and the recovery loop
+    re-poll, so a lost payload costs one sweep instead of KeyErroring the
+    whole match at the first engagement."""
     if (status.get("PUPPET_ACTIVE") is True
             and int(status.get("LEASE_PLAYER", -1)) == player_id):
+        # rule 1 needs no TURN row: the engaged lease IS the turn
         return int(status.get("LEASE_TURN", -1))
+    if "TURN" not in status:
+        return -1
+    turn = int(status["TURN"])
     if status.get("TURN_ACTIVE") is True:
-        return int(status["TURN"]) + 1
-    if int(status.get("TURN", -1)) == last_driven:
-        return int(status["TURN"]) + 1
-    if last_deact_turn is not None and last_deact_turn == int(
-            status.get("TURN", -1)):
-        return int(status["TURN"]) + 1
-    return int(status["TURN"])
+        return turn + 1
+    if turn == last_driven:
+        return turn + 1
+    if last_deact_turn is not None and last_deact_turn == turn:
+        return turn + 1
+    return turn
 
 
 async def _resolve_blockers(adapter: FireTunerAdapter, player_id: int,
