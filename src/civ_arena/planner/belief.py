@@ -46,6 +46,7 @@ from civ_arena.arena.visibility import FOREIGN_CITY_FIELDS, FOREIGN_UNIT_FIELDS
 from civ_arena.canonical import rng_to_doc
 from civ_arena.game.sim.layouts import STARTS, _weighted_terrain
 from civ_arena.game.sim.state import (
+    DEFAULT_UNIT_SPEC,
     MAP_RADIUS,
     TECHS,
     UNIT_TECH_REQ,
@@ -309,7 +310,11 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
                 and uid not in belief.current_foreign_ids):
             continue
         q, r = _sim(u["coord"])
-        spec = UNIT_TYPES[u["type"]]
+        # Defensive: the live game can emit unit types outside the sim's
+        # production set (e.g. SLINGER from barbarians, future DLC units).
+        # Defaulting preserves planner continuity; the determinizer
+        # records the actual type for downstream reasoning.
+        spec = UNIT_TYPES.get(u["type"], DEFAULT_UNIT_SPEC)
         units[uid] = {
             "unit_id": uid, "owner": u["owner_id"], "type": u["type"],
             "q": q, "r": r,
@@ -358,7 +363,7 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         if start is None:
             continue
         for type_ in START_ROSTER:
-            spec = UNIT_TYPES[type_]
+            spec = UNIT_TYPES.get(type_, DEFAULT_UNIT_SPEC)
             uid = f"u{prior_uid}"
             prior_uid += 1
             units[uid] = {

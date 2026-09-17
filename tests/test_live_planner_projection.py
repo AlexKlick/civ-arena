@@ -17,6 +17,8 @@ the dispatch at turn 1. Fix landed in `arena/visibility.py` (drop
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from civ_arena.arena.visibility import VisibilityPolicy
@@ -142,6 +144,55 @@ class TestLiveUnitsProjection:
         belief = PlannerBelief(player_id=PLAYER)
         belief.observe_units(projected, turn=TURN)
         assert belief.foreign_units == {}
+
+    def test_foreign_unit_unknown_type_does_not_crash_build_state_doc(self):
+        # The original bug: SLINGER appeared in the wire (barbarian), and
+        # build_state_doc did `UNIT_TYPES[u["type"]]` which raised KeyError.
+        # Two layers of defense: SLINGER is now in UNIT_TYPES, AND the
+        # lookup uses .get() with a conservative default. This test pins
+        # BOTH layers — if a future unit type (e.g. LIGHT_CHARIOT) shows
+        # up before it's catalogued, the planner still runs.
+        lines = ["UNITS|1",
+                 "UNITROW|u1:65536|1|SLINGER|10|10|100|2|2|5|15|false|false|100|true",
+                 "UNITROW|u1:131073|1|LIGHT_CHARIOT|11|10|100|2|4|15|0|false|false|100|true",
+                 "---END---"]
+        wire = parse_units(lines, qualified=True)
+        observable = frozenset({"10,10", "11,10"})
+        projected = _project_units(PLAYER, wire, observable=observable)
+        # Mirror production: EntityBoundary re-encodes qualified string IDs
+        # into Cantor-pair ints before belief.observe_units sees them; the
+        # old test path left them as strings, which crashed build_state_doc's
+        # `int(u[1:])` lookup.
+        from civ_arena.planner.entity_boundary import EntityBoundary
+        import asyncio
+
+        async def _units():
+            return projected
+        facade = SimpleNamespace(
+            get_units=_units, get_cities=_units, get_overview=_units,
+            get_visible_map=_units)
+        boundary = EntityBoundary(facade)
+        belief = PlannerBelief(player_id=PLAYER)
+        belief.observe_units(asyncio.run(boundary.get_units()), turn=TURN)
+        # Should not raise even with LIGHT_CHARIOT (unknown to UNIT_TYPES).
+        from civ_arena.game.sim.state import DEFAULT_UNIT_SPEC
+        from civ_arena.planner.belief import build_state_doc
+        bstate = build_state_doc(belief, seed=24)
+        # SLINGER is catalogued: real stats.
+        slinger = next((u for u in bstate["units"].values()
+                        if u["type"] == "SLINGER"), None)
+        assert slinger is not None
+        assert slinger["strength"] == 5
+        assert slinger["ranged_strength"] == 15
+        # LIGHT_CHARIOT is NOT catalogued: defaults applied, no crash.
+        # Note: build_state_doc uses spec["mv"] but pulls strength/ranged
+        # from the observation directly (the wire already has them).
+        # The DEFAULT only kicks in for movement.
+        unknown = next((u for u in bstate["units"].values()
+                        if u["type"] == "LIGHT_CHARIOT"), None)
+        assert unknown is not None
+        assert unknown["movement"] == DEFAULT_UNIT_SPEC["mv"]
+        assert unknown["max_movement"] == DEFAULT_UNIT_SPEC["mv"]
 
 
 # -- cities -----------------------------------------------------------------

@@ -35,7 +35,22 @@ UNIT_TYPES: dict[str, dict[str, int]] = {
     "SPEARMAN": {"strength": 25, "ranged": 0, "mv": 2, "cost": 50},
     "ARCHER": {"strength": 15, "ranged": 25, "mv": 2, "cost": 50},
     "SCOUT": {"strength": 5, "ranged": 0, "mv": 3, "cost": 25},
+    # Ancient ranged (no tech prereq). Barbarians field SLINGERs from
+    # turn ~10; the planner runtime's belief layer needs the stats to
+    # build plans around foreign sightings instead of KeyError-crashing.
+    "SLINGER": {"strength": 5, "ranged": 15, "mv": 2, "cost": 35},
+    # Builder (ancient, free). Not in the sim production set but the
+    # live game spawns them for human players; the planner needs to
+    # reason about foreign sightings without crashing.
+    "BUILDER": {"strength": 0, "ranged": 0, "mv": 2, "cost": 50},
 }
+
+# Defensive default for unit types the planner runtime hasn't catalogued
+# (e.g. classical/medieval/renaissance units the AI fields). Stats are
+# conservative (low combat power, full movement) so the planner doesn't
+# OVER- or UNDER-estimate. The live game may emit types outside the sim
+# production set; this default is the safety net.
+DEFAULT_UNIT_SPEC: dict[str, int] = {"strength": 10, "ranged": 10, "mv": 2, "cost": 60}
 UNIT_TECH_REQ: dict[str, str] = {"SPEARMAN": "BRONZE_WORKING", "ARCHER": "ARCHERY"}
 
 BUILDINGS: dict[str, dict[str, int]] = {
