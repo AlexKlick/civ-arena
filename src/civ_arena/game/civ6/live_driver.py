@@ -619,6 +619,16 @@ def _strategic_audit(driver: LiveDriver, payload: dict) -> None:
     driver._write("HEARTBEAT", **doc)
 
 
+def _flagged_anomaly_rows(rows: list[dict]) -> list[dict]:
+    """The per-turn rows the watchdog flagged (an unexplained digest change
+    or a referee violation) under flag_and_continue. The binary `clean`
+    verdict stays completion-scoped by contract — flag_and_continue means
+    "record the anomaly and continue", and folding benign engine-side events
+    (barbarians, free techs) into the verdict would fail every long run —
+    but the summary must surface them instead of burying them in per_turn."""
+    return [r for r in rows if r.get("unexpected") or r.get("violations")]
+
+
 def _agent_profile(agent: AgentSpec) -> AgentProfile:
     """The ONE AgentSpec -> AgentProfile mapping for every live dispatch
     path (M14d single-seat and M18 hotseat). Both paths MUST go through
@@ -1137,6 +1147,7 @@ async def phase_dispatch_hotseat(
             "phase": "dispatch-hotseat", "strategy": strategy,
             "per_turn": ledger.rows, "completed_rounds": ledger.rounds,
             "requested_rounds": rounds, "clean": ok, "aborted": failure,
+            "flagged_anomaly_count": len(_flagged_anomaly_rows(ledger.rows)),
             "failure_reason": failure, "failure_stage": stage if failure else None,
             "last_completed_turn": ledger.rows[-1] if ledger.rows else None,
             "active_lease": asdict(lease) if lease and not lease.released else None,

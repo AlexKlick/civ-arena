@@ -213,3 +213,46 @@ async def test_persistent_phase_guard_aborts_after_eight_sweeps(tmp_path, monkey
     assert summary['recovery_attempts'] == 8
     assert summary['per_turn'] == []
     assert 'sweep limit' in summary['failure_reason']
+
+
+async def test_flag_and_continue_anomaly_records_and_completes(tmp_path, monkeypatch):
+    """The smoke contract for watchdog_mode=flag_and_continue (the ONLY legal
+    live mode, configs/live-hotseat-001.yaml): an undeclared engine-side
+    mutation is recorded on the per-turn row and the round COMPLETES. The
+    branch read `self.spec` inside this module-level function, so the first
+    flagged anomaly aborted the run with `NameError: name 'self' is not
+    defined` instead of writing the watchdog_flag HEARTBEAT."""
+    spec = load_config(ld.MOD_DEFAULT.parents[2] / 'configs/live-hotseat-001.yaml')
+    server = FakeTunerServer(mod=FakeMod(hotseat=[0, 1]))
+    port = await server.start()
+    adapter = FireTunerAdapter('127.0.0.1', port, simulate_hook=ld._fake_hook)
+
+    class Runtime:
+        async def take_turn(self, facade):
+            # one undeclared engine-side mutation: booked as an actual with no
+            # manifest -> a referee violation on the seat's row
+            await adapter.read_raw('Simulate.Ledger(move, unit, 7, movement, 2, 0)')
+            for unit in await facade.get_units():
+                await facade.fortify(unit['unit_id'])
+            await facade.end_turn()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(ld, 'build_runtime', lambda _, **_context: Runtime())
+    try:
+        code = await ld.phase_dispatch_hotseat(
+            spec, adapter, tmp_path, 1, 'h1', ld.MOD_DEFAULT.read_text(),
+            limits=ld.HotseatLimits(match=60))
+    finally:
+        await server.stop()
+    summary = json.loads((tmp_path / 'summary.json').read_text())
+    events = [json.loads(line) for line in (tmp_path / 'events.jsonl').read_text().splitlines()]
+    flags = [e for e in events if e.get('audit') == 'watchdog_flag']
+    # both seats' rows carry the injected violation and both are flagged
+    assert len(flags) == 2, summary['failure_reason']
+    assert all(row['violations'] >= 1 for row in summary['per_turn'])
+    # completion-scoped verdict, with the anomaly surfaced beside it
+    assert code == 0
+    assert summary['clean'] is True
+    assert summary['flagged_anomaly_count'] == 2
