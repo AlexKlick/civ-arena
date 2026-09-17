@@ -79,7 +79,6 @@ OWN_UNIT_FIELDS = frozenset({
 # observation.
 OWN_CITY_REQUIRED = frozenset({
     "city_id", "owner", "name", "coord", "q", "r", "population",
-    "production_queue",
 })
 OWN_CITY_DEFAULTS: dict[str, Any] = {
     "border_radius": 2,  # the sim's founded-city territory radius
@@ -87,11 +86,21 @@ OWN_CITY_DEFAULTS: dict[str, Any] = {
     "food_bucket": 0,
     "production_bucket": 0,
     "buildings": [],
+    # Minor cities (city-states) report `?` for production_queue on the
+    # live wire — the parser strips it (pcall-guarded accessor). Default
+    # to an empty queue rather than rejecting the observation.
+    "production_queue": [],
 }
 
 
-def _hp_from_bucket(bucket: int) -> int:
-    """Pure function of the projected bucket — never of true hp."""
+def _hp_from_bucket(bucket: int | None) -> int:
+    """Pure function of the projected bucket — never of true hp.
+
+    None (unknown health — the live observation couldn't read native HP)
+    defaults to full health 100, matching the planner prior for unseen state.
+    """
+    if bucket is None:
+        return 100
     return min(100, max(1, 25 * bucket + 12))
 
 
@@ -182,9 +191,12 @@ class PlannerBelief:
             if u["owner_id"] == self.player_id:
                 fields = set(u)
                 health_fields = {"max_hp", "health_valid"}
+                # health_fields present + health_valid=False is a legitimate
+                # "unknown health" observation (live wire couldn't read native
+                # HP); only run the numeric checks when health_valid is True.
                 if (fields not in (OWN_UNIT_FIELDS, OWN_UNIT_FIELDS | health_fields)
-                        or (fields & health_fields and (
-                            u["health_valid"] is not True or type(u["max_hp"]) is not int
+                        or (fields & health_fields and u["health_valid"] is True and (
+                            type(u["max_hp"]) is not int
                             or type(u["hp"]) is not int
                             or not 0 <= u["hp"] <= u["max_hp"] <= 1_000_000
                             or u["max_hp"] == 0))):

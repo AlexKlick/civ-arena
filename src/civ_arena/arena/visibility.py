@@ -137,6 +137,12 @@ class VisibilityPolicy:
                   if "max_hp" in u and type(u.get("health_valid")) is bool else {})
         hp_bucket = u["hp"] // 25 if type(u.get("hp")) is int else None
         if u["owner"] == player_id:
+            # Own units are never barbarian (barbarians are AI-controlled
+            # by a separate BarbarianPlayer; capturing one kills it). The
+            # `is_barbarian` field is foreign-only per FOREIGN_UNIT_FIELDS
+            # (visibility.py:32); including it on own entries would push
+            # `fields` outside OWN_UNIT_FIELDS and trip the strict shape
+            # check at planner/belief.py:185.
             return {
                 "unit_id": u["unit_id"],
                 "owner_id": u["owner"],
@@ -150,7 +156,6 @@ class VisibilityPolicy:
                 "strength": u["strength"],
                 "ranged_strength": u["ranged_strength"],
                 "fortified": u["fortified"],
-                **metadata,
             }
         if key not in observable:
             return None  # hidden: absent, not masked

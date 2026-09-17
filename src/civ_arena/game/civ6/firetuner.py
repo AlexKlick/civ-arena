@@ -37,12 +37,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import time
 from collections.abc import Callable
 from typing import Any
 
 from civ_arena.canonical import state_hash as _sha
+
+# M18-streaming: log Moonlight jitter events so dispatch.log captures them
+# as evidence (not noise). Same convention as vendor/connection.py:25.
+log = logging.getLogger(__name__)
+
+# Wire-retry knobs for transient empty responses (Moonlight streaming adds
+# latency spikes of 3-5s where the Lua executed but the response is lost
+# in the IPC hop). 3 attempts, 500ms apart, then let parse_act raise.
+_WIRE_RETRY_MAX = 3
+_WIRE_RETRY_SLEEP_S = 0.5
 from civ_arena.game.adapter import (
     ActionCommand,
     ActionResult,
@@ -850,8 +861,28 @@ class FireTunerAdapter:
                 async with asyncio.timeout(_PRODUCTION_VERIFY_TIMEOUT_S):
                     lines = await productive_native.execute_once(self._conn, lua)
             else:
-                lines = await (self._conn.execute_write(lua) if ingame
-                               else self._conn.execute_read(lua))
+                # Moonlight-streaming wire jitter: occasionally Lua runs
+                # but the response is lost in the IPC hop, surfacing as
+                # an empty `lines` list and a hard ValueError from
+                # parse_act. Retry the read up to _WIRE_RETRY_MAX times,
+                # sleeping _WIRE_RETRY_SLEEP_S between attempts, then let
+                # parse_act raise if it still fails. Re-sending the same
+                # Lua is safe here: the engine treats these commands as
+                # no-ops on repeat (move_unit = unit already there,
+                # end_turn = no-op, set_goal = appends to journal).
+                lines = []
+                for _wire_attempt in range(_WIRE_RETRY_MAX):
+                    lines = await (self._conn.execute_write(lua) if ingame
+                                   else self._conn.execute_read(lua))
+                    if lines:
+                        break
+                    log.warning(
+                        "firetuner.act: empty wire response from %s "
+                        "(attempt %d/%d) — retrying in %.2fs",
+                        cmd.tool, _wire_attempt + 1, _WIRE_RETRY_MAX,
+                        _WIRE_RETRY_SLEEP_S)
+                    if _wire_attempt < _WIRE_RETRY_MAX - 1:
+                        await asyncio.sleep(_WIRE_RETRY_SLEEP_S)
             verdict = response_parser.parse_act(lines)
         except BaseException:
             if reward_nonce is not None:

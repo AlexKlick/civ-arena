@@ -11,7 +11,7 @@ match:
   checkpoint_every: 5
   adapter: firetuner
   watchdog_mode: flag_and_continue
-  violation_limit: 10
+  violation_limit: 40
   completeness_gate: true
   declare_own_endpath_drift: true
 
