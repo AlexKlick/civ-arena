@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import signal
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -165,7 +166,14 @@ class Arena:
         self,
         resume_state: CheckpointState | None = None,
         crash_after_turn: int | None = None,
+        *,
+        on_turn_end: Callable[[int, dict[str, dict[str, int]]], None] | None = None,
     ) -> dict[str, Any]:
+        """Run the match. ``on_turn_end`` (keyword-only, default None) is an
+        OBSERVATION hook for research harnesses: called once per completed
+        turn with (turn, scores) — the same component dict the summary
+        carries. It must not mutate match state; it sees scores only, so
+        the event log and state hashes are untouched."""
         spec = self.spec
         if resume_state is not None and any(
                 agent.decision_mode == "strategic_autopilot" for agent in spec.agents):
@@ -215,6 +223,8 @@ class Arena:
                         if callable(begin):
                             begin(turn)
                         await self.sessions[pid].take_turn(lease, self.runtimes[pid])
+                    if on_turn_end is not None:
+                        on_turn_end(turn, self._scores())
                     self.checkpoints.maybe_save(turn, self._checkpoint_state(turn))
                 final_turn = spec.max_turns
             finally:

@@ -1,0 +1,13 @@
+# Batch 1 — the 4-seat null baseline (16 games).
+#
+# Roster of KNOWN doctrines only: this batch validates the 4-seat sim and
+# the harness, and gives the flash analyst a reference for what familiar
+# doctrines' trajectories look like before any novel roster is judged.
+# 4 seed blocks x 4 Latin rotations: within every seed block every doctrine
+# occupies every seat exactly once, so seat and seed are orthogonal to
+# doctrine by construction.
+batch:
+  batch_id: batch-001
+  roster: [turtler, turtler, expansionist, expansionist]
+  seeds: [947381, 300003, 300011, 300029]
+  max_turns: 40
