@@ -17,6 +17,7 @@ the dispatch at turn 1. Fix landed in `arena/visibility.py` (drop
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -65,6 +66,26 @@ def _project_map(player_id: int, map_doc: dict, *, observable=None, remembered=N
         map_doc, "visible_map", player_id,
         observable=observable or frozenset(),
         remembered=remembered or frozenset())
+
+
+def _boundary_reencode(projected):
+    """Mirror production: EntityBoundary re-encodes qualified string ids
+    into Cantor-pair ints before PlannerBelief ever sees them."""
+    from civ_arena.planner.entity_boundary import EntityBoundary
+
+    async def _same():
+        return projected
+    facade = SimpleNamespace(
+        get_units=_same, get_cities=_same, get_overview=_same,
+        get_visible_map=_same)
+    boundary = EntityBoundary(facade)
+
+    async def _units():
+        return await boundary.get_units()
+
+    async def _cities():
+        return await boundary.get_cities()
+    return _units, _cities
 
 
 # -- units ------------------------------------------------------------------
@@ -291,3 +312,40 @@ class TestLiveVisibleMapProjection:
         # Remembered tile stays without owner_id.
         remembered_tile = projected["tiles"]["10,10"]
         assert "owner_id" not in remembered_tile
+
+
+# -- own-entity determinization ---------------------------------------------
+
+class TestOwnEntityDeterminization:
+    """The hop `test_own_unit_with_unknown_health_is_observed_lite` does not
+    cover: what `build_state_doc` WRITES into the SimState doc for OWN
+    entities read off the live wire.
+
+    Accepting an unread native HP (the 2af3804 tolerance) is only half the
+    seam — the determinized doc is what `legal_actions` / `run_ambient` /
+    `search_option` do arithmetic on, and a None (or an engine-only
+    vocabulary token) that survives determinization is a planner crash on
+    the seat's next search, not an honest unknown."""
+
+    def test_own_unit_unknown_hp_determinizes_and_ambient_rolls_out(self):
+        # Wire-exact own row for a health pcall failure (lua_translator emits
+        # hp/maxhp="unknown", healthValid="false"): the belief accepts it and
+        # the determinizer must default the rollout hp like the FOREIGN path
+        # already does via _hp_from_bucket. Own units sit at full movement at
+        # a lease start, so run_ambient's healing guard is the first `None`
+        # comparison the rollout hits.
+        lines = ["UNITS|1",
+                 "UNITROW|u0:65536|0|WARRIOR|36|20|unknown|2|2|20|0|false|false|unknown|false",
+                 "---END---"]
+        wire = parse_units(lines, qualified=True)
+        belief = PlannerBelief(player_id=PLAYER)
+        units, _ = _boundary_reencode(_project_units(PLAYER, wire))
+        belief.observe_units(asyncio.run(units()), turn=TURN)
+
+        from civ_arena.game.sim.engine import run_ambient
+        from civ_arena.game.sim.state import SimState
+        from civ_arena.planner.belief import build_state_doc
+        state = SimState.from_doc(build_state_doc(belief, seed=24))
+        run_ambient(state, PLAYER)  # was: TypeError: '<' not supported ... NoneType/int
+        assert [u["hp"] for u in state.units.values()] == [100]
+

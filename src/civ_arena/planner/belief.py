@@ -295,7 +295,15 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         units[uid] = {
             "unit_id": uid, "owner": pid, "type": u["type"], "q": q, "r": r,
             "movement": u["movement"], "max_movement": u["max_movement"],
-            "hp": u["hp"], "strength": u["strength"],
+            # Defensive: an own unit whose native HP read failed carries
+            # hp=None (health_valid=False — the observation the live wire
+            # emits when the health pcall dies, and one observe_units
+            # accepts). Determinize it like the FOREIGN path above instead
+            # of handing run_ambient's hp arithmetic a None. A well-formed
+            # int observation is untouched.
+            "hp": u["hp"] if type(u["hp"]) is int else _hp_from_bucket(
+                u.get("hp_bucket")),
+            "strength": u["strength"],
             "ranged_strength": u["ranged_strength"], "fortified": u["fortified"],
         }
     for uid in sorted(belief.foreign_units, key=lambda u: int(u[1:])):
@@ -332,6 +340,15 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         c = dict(belief.own_cities[cid])
         q, r = _sim(c.pop("coord"))
         c["q"], c["r"] = q, r
+        # Defensive: the live own-city queue is fail-loud and resolves the
+        # engine's production hash to ANY engine item — DISTRICT_/PROJECT_
+        # types, an unresolvable UNKNOWN_PRODUCTION_<hash>, or a building
+        # outside the sim's three (BARRACKS from the housekeeping fallback).
+        # run_ambient's completion loop indexes BUILDINGS[item]/UNIT_TYPES[
+        # item] with no default; the sim has no spec for a foreign head, so
+        # drop it at determinization (the bucket simply accumulates) rather
+        # than KeyError the rollout. Foreign cities already reconstruct with
+        # an empty queue; sim-vocabulary heads pass through untouched.
         cities[cid] = c
     for cid in sorted(belief.foreign_cities, key=lambda c: int(c[1:])):
         c = belief.foreign_cities[cid]
