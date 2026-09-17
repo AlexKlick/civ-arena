@@ -13,10 +13,10 @@ from types import SimpleNamespace
 import pytest
 
 from civ_arena.config import load_config
-from civ_arena.game.civ6.vendor.connection import LuaError
 from civ_arena.game.civ6 import live_driver as ld
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
+from civ_arena.game.civ6.vendor.connection import LuaError
 
 PLAYER = 0
 TURN = 1

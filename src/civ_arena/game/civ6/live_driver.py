@@ -1761,9 +1761,22 @@ async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
             continue
         if cur != 0 or city.get("production_queue"):
             continue
-        items = await adapter.observe(ObserveRequest(
-            kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=player_id,
-            subject_id=city["city_id"]))
+        try:
+            items = await adapter.observe(ObserveRequest(
+                kind=ObserveKind.AVAILABLE_PRODUCTION, player_id=player_id,
+                subject_id=city["city_id"]))
+        except Exception as exc:  # noqa: BLE001 — best-effort fill, never fatal
+            # This read is the one un-pcall'd fail-loud Lua block the
+            # housekeeping executes (a Lua error surfaces as LuaError), and
+            # its parser raises on a truncated payload (a missing
+            # PRODUCTIVE_OPTIONS_END marker is exactly what a lost IPC
+            # response looks like). Both are transient wire/VM shapes at a
+            # lease start: skipping degrades to the status quo (the agent's
+            # own turn can still fill the queue), while an escape here
+            # aborts the match from the one place a failure is never urgent.
+            print(f"housekeep[{turn}]: {city['name']} production options "
+                  f"unread ({type(exc).__name__}); skipping")
+            continue
         by_id = {i["item_id"]: i for i in items}
         pick = next((p for p in _BUILD_PREFERENCE if p in by_id), None)
         if pick is None:
