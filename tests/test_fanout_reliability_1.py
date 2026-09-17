@@ -8,8 +8,12 @@ CONTINUES — the flag_and_continue contract every live config declares.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from civ_arena.config import load_config
+from civ_arena.game.civ6.vendor.connection import LuaError
 from civ_arena.game.civ6 import live_driver as ld
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
@@ -170,3 +174,84 @@ def test_target_turn_reads_an_empty_status_poll_as_no_target_yet():
                         None) == -1
     # a well-formed payload is unchanged
     assert _target_turn({"TURN": 4, "PUPPET_ACTIVE": False}, 0, 7, None) == 4
+
+
+# -- findings 5/6/7: lease-start production housekeeping must degrade, never
+#    abort, and must never leave a provably-idle queue empty ---------------
+
+class _HousekeepAdapter:
+    """One own city, provably idle (CURPROD|0), with a scripted
+    AVAILABLE_PRODUCTION read. Everything else is a test bug."""
+
+    def __init__(self, items=(), *, city=None, options_error=None):
+        self.items = list(items)
+        self.city = city or {
+            "city_id": "c0:65536", "owner": 0, "name": "ROME",
+            "production_queue": [],
+        }
+        self.options_error = options_error
+        self.commands = []
+
+    async def observe(self, req):
+        from civ_arena.game.adapter import ObserveKind
+        if req.kind is ObserveKind.CITIES:
+            return [dict(self.city)]
+        if req.kind is ObserveKind.AVAILABLE_PRODUCTION:
+            if self.options_error is not None:
+                raise self.options_error
+            return [dict(i) for i in self.items]
+        raise AssertionError(f"unexpected observe {req.kind}")
+
+    async def write_raw(self, _lua):
+        return ["CURPROD|0", "---END---"]
+
+    async def act(self, command):
+        self.commands.append(command)
+        return SimpleNamespace(status="accepted")
+
+
+def _items(*names):
+    """ITEMROW docs; the sim-era vocabulary so the preference can miss."""
+    return [{"item_id": n, "kind": "unit" if n in ("BUILDER", "TRADER", "ARCHER")
+             else "building", "cost": 50, "turns": 5} for n in names]
+
+
+async def test_empty_queue_fills_from_a_non_preference_pick():
+    """A grown/late-era city can offer nothing off _BUILD_PREFERENCE. The
+    reactive fill must still pick — deterministically, the same doctrine
+    _ensure_research already implements — because the production blocker
+    only ever lists at turn END, when the wire can no longer resolve it
+    (glm-g1 turn 12's freeze)."""
+    from civ_arena.game.civ6 import live_driver as ld
+
+    adapter = _HousekeepAdapter(_items("TRADER", "ARCHER", "BUILDER"))
+    await ld._fill_empty_queues(adapter, 0, turn=15)
+    assert [c.args["item_id"] for c in adapter.commands] == ["ARCHER"]
+
+
+async def test_empty_queue_with_no_producible_item_is_skipped():
+    """Nothing offerable at all: skip fail-closed (the P2-11 rule) rather
+    than issue a command the engine cannot take."""
+    from civ_arena.game.civ6 import live_driver as ld
+
+    adapter = _HousekeepAdapter([])
+    await ld._fill_empty_queues(adapter, 0, turn=15)
+    assert adapter.commands == []
+
+
+@pytest.mark.parametrize("error", [
+    ValueError("productive options completeness marker unavailable"),
+    LuaError("O: InGame: productive target result unavailable"),
+])
+async def test_production_options_read_failure_skips_the_city(error):
+    """The options read is the one un-pcall'd fail-loud Lua block this
+    proactive housekeeping runs, and its parser raises on a truncated
+    payload. Both are transient wire/VM shapes at a lease start of a
+    30-round match: the fill is best-effort, so the city is skipped and
+    the exception must never reach _resolve_blockers' caller."""
+    from civ_arena.game.civ6 import live_driver as ld
+
+    adapter = _HousekeepAdapter(_items("MONUMENT"), options_error=error)
+    await ld._fill_empty_queues(adapter, 0, turn=15)  # must not raise
+    await ld._resolve_blockers(adapter, 0, turn=15)  # same: no escape
+    assert adapter.commands == []

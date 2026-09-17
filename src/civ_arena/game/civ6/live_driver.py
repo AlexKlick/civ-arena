@@ -1767,7 +1767,18 @@ async def _fill_empty_queues(adapter: FireTunerAdapter, player_id: int,
         by_id = {i["item_id"]: i for i in items}
         pick = next((p for p in _BUILD_PREFERENCE if p in by_id), None)
         if pick is None:
-            continue
+            # _ensure_research's doctrine: an empty slot IS the freeze —
+            # the production blocker only lists at turn END, when the wire
+            # can no longer resolve it (glm-g1 t12). A grown/late-era city
+            # can offer nothing off the sim-era preference list, so fall
+            # back to a deterministic pick among items this one-call fill
+            # can actually place (a unit or a building; districts need a
+            # placement the command does not carry). Nothing offerable
+            # stays fail-closed.
+            pick = min((i["item_id"] for i in items
+                        if i.get("kind") in ("unit", "building")), default=None)
+            if pick is None:
+                continue
         res = await adapter.act(ActionCommand(
             tool="set_city_production",
             args={"city_id": city["city_id"], "item_id": pick},
