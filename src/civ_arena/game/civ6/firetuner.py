@@ -621,7 +621,23 @@ class FireTunerAdapter:
         return self.state_hash()
 
     async def _refresh_digest(self) -> None:
-        lines = await self._conn.execute_read(lua_translator.mod_digest())
+        # Same Moonlight jitter the act() path retries below: a >5s Lua stall
+        # expires the connection's read deadline, execute_read returns []
+        # silently, and parse_digest would raise ValueError off a read that
+        # sits on the critical path 2-4x per seat turn (lease open,
+        # begin_phase, the end_phase seal, every accepted act). A re-read is
+        # side-effect free — the digest is a read-only whole-board dump.
+        lines: list[str] = []
+        for attempt in range(_WIRE_RETRY_MAX):
+            lines = await self._conn.execute_read(lua_translator.mod_digest())
+            if lines:
+                break
+            log.warning(
+                "firetuner.digest: empty wire response "
+                "(attempt %d/%d) — retrying in %.2fs",
+                attempt + 1, _WIRE_RETRY_MAX, _WIRE_RETRY_SLEEP_S)
+            if attempt < _WIRE_RETRY_MAX - 1:
+                await asyncio.sleep(_WIRE_RETRY_SLEEP_S)
         self._digest_text = response_parser.parse_digest(lines, qualified=True)
 
     async def _await(

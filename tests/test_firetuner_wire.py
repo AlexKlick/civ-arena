@@ -330,3 +330,46 @@ def test_visible_map_context_ctor_validates():
     for bad in ("GameCore", "lua", "", "ingame "):
         with pytest.raises(ValueError, match="visible_map_context"):
             FireTunerAdapter("unused.invalid", 0, visible_map_context=bad)
+
+
+# -- digest read wire jitter (pure unit: a stub connection, no server) -------
+
+class _StubDigestConn:
+    """execute_read stand-in serving one canned response per call."""
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.reads: list[str] = []
+
+    async def execute_read(self, lua_code, *args, **kwargs):
+        self.reads.append(lua_code)
+        return self.responses.pop(0)
+
+
+async def test_refresh_digest_retries_one_empty_wire_read(monkeypatch):
+    """Moonlight jitter hits the digest read too: a >5s Lua stall expires the
+    connection's read deadline, GameConnection returns [] silently, and
+    parse_digest raises ValueError off a read that sits on the critical path
+    (begin_phase, end_phase seal, every accepted act, lease open). The act()
+    path already retries; the digest read gets the same bounded retry — a
+    re-read is side-effect free (a read-only whole-board dump)."""
+    from civ_arena.canonical import state_hash
+    from civ_arena.game.civ6 import firetuner, lua_translator
+    monkeypatch.setattr(firetuner, "_WIRE_RETRY_SLEEP_S", 0)
+    conn = _StubDigestConn([[], ["DIGEST|u0:1|0|1", "---END---"]])
+    adapter = FireTunerAdapter(conn=conn)
+
+    digest = await adapter.refresh_digest()
+
+    assert conn.reads == [lua_translator.mod_digest(), lua_translator.mod_digest()]
+    assert digest == state_hash({"live_digest": "u0:1|0|1"})
+
+
+async def test_refresh_digest_still_raises_once_retries_exhaust(monkeypatch):
+    from civ_arena.game.civ6 import firetuner
+    monkeypatch.setattr(firetuner, "_WIRE_RETRY_SLEEP_S", 0)
+    conn = _StubDigestConn([[], [], []])
+    adapter = FireTunerAdapter(conn=conn)
+
+    with pytest.raises(ValueError, match="DIGEST"):
+        await adapter.refresh_digest()
+    assert len(conn.reads) == firetuner._WIRE_RETRY_MAX
