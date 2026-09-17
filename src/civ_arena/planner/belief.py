@@ -9,8 +9,12 @@ ground truth; this reconstruction is its only world.
 Fairness at the input seam is SHAPE validation, honestly scoped: foreign
 entries carrying any field beyond the projection allowlists are refused
 loudly, own entries must match the own-projection field set exactly, and
-determinized values are pure functions of allowlisted fields (hp from
-hp_bucket, movement from the type table, fortified False). This defends
+determinized values are pure functions of allowlisted fields (hp from the
+observed hp, falling back to the hp_bucket prior when the native read was
+unknown; movement from the type table; fortified False for foreign
+sightings). Vocabulary the sim does not catalogue never reaches the doc:
+unknown foreign unit types take DEFAULT_UNIT_SPEC and an own-city queue
+head outside BUILDINGS/UNIT_TYPES is dropped. This defends
 against buggy or mis-scoped callers, NOT against a caller that fabricates
 perfectly-shaped docs from ground truth — the ownership discriminators
 (``owner_id``/``owner``) and the map's observable-vs-remembered shape are
@@ -46,6 +50,7 @@ from civ_arena.arena.visibility import FOREIGN_CITY_FIELDS, FOREIGN_UNIT_FIELDS
 from civ_arena.canonical import rng_to_doc
 from civ_arena.game.sim.layouts import STARTS, _weighted_terrain
 from civ_arena.game.sim.state import (
+    BUILDINGS,
     DEFAULT_UNIT_SPEC,
     MAP_RADIUS,
     TECHS,
@@ -349,6 +354,9 @@ def build_state_doc(belief: PlannerBelief, seed: int) -> dict[str, Any]:
         # drop it at determinization (the bucket simply accumulates) rather
         # than KeyError the rollout. Foreign cities already reconstruct with
         # an empty queue; sim-vocabulary heads pass through untouched.
+        c["production_queue"] = [
+            item for item in c.get("production_queue", [])
+            if item in BUILDINGS or item in UNIT_TYPES]
         cities[cid] = c
     for cid in sorted(belief.foreign_cities, key=lambda c: int(c[1:])):
         c = belief.foreign_cities[cid]

@@ -349,3 +349,62 @@ class TestOwnEntityDeterminization:
         run_ambient(state, PLAYER)  # was: TypeError: '<' not supported ... NoneType/int
         assert [u["hp"] for u in state.units.values()] == [100]
 
+    @pytest.mark.parametrize("queue_token", [
+        "TRADER",                      # engine unit outside the sim roster
+        "BARRACKS",                    # engine building outside the sim's 3
+        "UNKNOWN_PRODUCTION_123456",   # unresolvable production hash
+    ])
+    def test_own_city_queue_outside_sim_vocabulary_is_inert(self, queue_token):
+        # The live own-city queue is fail-loud and resolves the engine's
+        # production hash to ANY engine item (prefix-stripped by
+        # lua_translator); it rides the own-city projection verbatim into the
+        # determinized doc, where run_ambient's completion loop does
+        # BUILDINGS[item]["cost"] / UNIT_TYPES[item]["cost"] with no default.
+        # The sim cannot reason about an item it has no spec for: the head is
+        # inert at determinization (dropped, bucket accumulates) instead of
+        # KeyError-ing the rollout.
+        unit_lines = ["UNITS|1",
+                      "UNITROW|u0:65536|0|SETTLER|36|20|100|0|2|0|0|false|false|100|true",
+                      "---END---"]
+        city_lines = ["CITIES|2",
+                      f"CITYROW|c0:7|0|CITY_A|36|20|1|{queue_token}|true|true|100|100|0|2|0|10|10|BUILDING_GRANARY|-",
+                      "---END---"]
+        belief = PlannerBelief(player_id=PLAYER)
+        units, _ = _boundary_reencode(
+            _project_units(PLAYER, parse_units(unit_lines, qualified=True)))
+        _, cities = _boundary_reencode(
+            _project_cities(PLAYER, parse_cities(city_lines, qualified=True)))
+        belief.observe_units(asyncio.run(units()), turn=TURN)
+        belief.observe_cities(asyncio.run(cities()), turn=TURN)
+
+        from civ_arena.game.sim.engine import run_ambient
+        from civ_arena.game.sim.state import SimState
+        from civ_arena.planner.belief import build_state_doc
+        state = SimState.from_doc(build_state_doc(belief, seed=24))
+        run_ambient(state, PLAYER)  # was: KeyError: queue_token (engine.py:106)
+        assert list(state.cities.values())[0]["production_queue"] == []
+
+    def test_own_city_queue_in_sim_vocabulary_is_untouched(self):
+        # Zero behavior change for well-formed data: a queue head the sim
+        # catalogues still determinizes verbatim and still completes.
+        unit_lines = ["UNITS|1",
+                      "UNITROW|u0:65536|0|SETTLER|36|20|100|0|2|0|0|false|false|100|true",
+                      "---END---"]
+        city_lines = ["CITIES|2",
+                      "CITYROW|c0:7|0|CITY_A|36|20|1|WARRIOR|true|true|100|100|0|2|0|10|10|BUILDING_GRANARY|-",
+                      "---END---"]
+        belief = PlannerBelief(player_id=PLAYER)
+        units, _ = _boundary_reencode(
+            _project_units(PLAYER, parse_units(unit_lines, qualified=True)))
+        _, cities = _boundary_reencode(
+            _project_cities(PLAYER, parse_cities(city_lines, qualified=True)))
+        belief.observe_units(asyncio.run(units()), turn=TURN)
+        belief.observe_cities(asyncio.run(cities()), turn=TURN)
+
+        from civ_arena.game.sim.engine import run_ambient
+        from civ_arena.game.sim.state import SimState
+        from civ_arena.planner.belief import build_state_doc
+        state = SimState.from_doc(build_state_doc(belief, seed=24))
+        run_ambient(state, PLAYER)
+        city = list(state.cities.values())[0]
+        assert city["production_queue"] == ["WARRIOR"]
