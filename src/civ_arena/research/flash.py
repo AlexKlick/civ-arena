@@ -37,7 +37,11 @@ MODEL = "glm-4.5-flash"
 
 # the zai lane degrades above 3 under sustained parallelism: hard ceiling
 MAX_INFLIGHT = 3
-MAX_TOKENS = 4096
+# glm-4.5-flash THINKS before answering: reasoning_content tokens count
+# against max_tokens (measured: an 8-token probe died at finish_reason
+# "length" with empty content). Every call needs thinking headroom.
+MAX_TOKENS = 8192
+PROBE_TOKENS = 512
 TEMPERATURE = 0.2
 BACKOFF_S = 0.5
 
@@ -219,13 +223,15 @@ class FlashClient:
                                 max_tokens=MAX_TOKENS)
 
     async def probe(self) -> bool:
-        """Minimal connectivity check (max_tokens 8): True iff the reply
-        parsed as a JSON object. The prompt asks for JSON because the
-        request pins ``response_format: json_object`` — a prose reply would
-        parse-fail and read as a dead lane. It consumes a call slot and
-        writes spend rows like any call."""
+        """Minimal connectivity check: True iff the reply parsed as a JSON
+        object. The prompt asks for JSON because the request pins
+        ``response_format: json_object`` — a prose reply would parse-fail
+        and read as a dead lane. max_tokens clears the model's thinking
+        phase first (reasoning counts against the cap). It consumes a call
+        slot and writes spend rows like any call."""
         result = await self._call('Reply with the JSON object {"pong": true}',
-                                  purpose="probe", system=None, max_tokens=8)
+                                  purpose="probe", system=None,
+                                  max_tokens=PROBE_TOKENS)
         return result.status == "ok"
 
     async def aclose(self) -> None:

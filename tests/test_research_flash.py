@@ -11,6 +11,7 @@ import pytest
 from civ_arena.research.flash import (
     BACKOFF_S,
     MAX_TOKENS,
+    PROBE_TOKENS,
     TEMPERATURE,
     FlashClient,
     FlashSpec,
@@ -306,8 +307,10 @@ async def test_probe_true_and_request_shape(monkeypatch, tmp_path):
         assert await client.probe() is True
     finally:
         await client.aclose()
-    assert captured[0]["max_tokens"] == 8
-    assert captured[0]["messages"] == [{"role": "user", "content": "Reply PONG"}]
+    assert captured[0]["max_tokens"] == PROBE_TOKENS
+    assert captured[0]["messages"] == [
+        {"role": "user",
+         "content": 'Reply with the JSON object {"pong": true}'}]
     assert spend_rows(spend)[0]["purpose"] == "probe"
 
 
