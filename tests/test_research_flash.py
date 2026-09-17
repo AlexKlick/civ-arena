@@ -41,7 +41,7 @@ class PeakTransport(httpx.AsyncBaseTransport):
 DEFAULT_USAGE = {"prompt_tokens": 11, "completion_tokens": 3}
 
 
-def openai_reply(payload=None, *, model="glm-4.5-flash", usage=DEFAULT_USAGE,
+def openai_reply(payload=None, *, model="glm-5.3-flash", usage=DEFAULT_USAGE,
                  content=None):
     """An OpenAI chat-completions 200: ``payload`` as the JSON content, or
     a raw ``content`` string for parse-path tests. ``usage=None`` omits the
@@ -90,10 +90,10 @@ async def test_ok_path_parses_and_writes_one_spend_row(monkeypatch, tmp_path):
     assert result.data == {"answer": 42, "nested": {"ok": True}}
     assert result.raw == ""
     assert result.attempts == 1 and result.call_id
-    assert result.model == "glm-4.5-flash"
+    assert result.model == "glm-5.3-flash"
     assert (result.input_tokens, result.output_tokens) == (11, 3)
     assert client.calls_sent == 1 and client.attempts_sent == 1
-    assert captured == [{"model": "glm-4.5-flash",
+    assert captured == [{"model": "glm-5.3-flash",
                          "messages": [{"role": "user", "content": "hello"}],
                          "response_format": {"type": "json_object"},
                          "max_tokens": MAX_TOKENS,
@@ -398,7 +398,7 @@ def test_default_spec_pins_the_lane():
     spec = FlashSpec()
     assert spec.base_url == "https://api.z.ai/api/coding/paas/v4/chat/completions"
     assert spec.api_key_env == "ZAI_CODING_API_KEY"
-    assert spec.model == "glm-4.5-flash"
+    assert spec.model == "glm-5.3-flash"
     assert (spec.concurrency, spec.max_retries, spec.timeout_s,
             spec.max_calls) == (2, 5, 120.0, 12)
 

@@ -33,13 +33,14 @@ import httpx
 
 BASE_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 API_KEY_ENV = "ZAI_CODING_API_KEY"
-MODEL = "glm-4.5-flash"
+MODEL = "glm-5.3-flash"
 
 # the zai lane degrades above 3 under sustained parallelism: hard ceiling
 MAX_INFLIGHT = 3
-# glm-4.5-flash THINKS before answering: reasoning_content tokens count
-# against max_tokens (measured: an 8-token probe died at finish_reason
-# "length" with empty content). Every call needs thinking headroom.
+# glm flash models THINK before answering: reasoning_content tokens count
+# against max_tokens (measured on glm-4.5-flash: an 8-token probe died at
+# finish_reason "length" with empty content). Every call needs thinking
+# headroom regardless of the pinned model.
 MAX_TOKENS = 8192
 PROBE_TOKENS = 512
 TEMPERATURE = 0.2
