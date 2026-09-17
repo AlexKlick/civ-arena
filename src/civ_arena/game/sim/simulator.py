@@ -41,11 +41,12 @@ class SimulatorAdapter:
 
     # -- lifecycle ---------------------------------------------------------
     async def setup(self, cfg: dict[str, Any]) -> None:
-        self.state = SimState.from_doc(duel_start(int(cfg["seed"])))
+        self._player_count = int(cfg.get("player_count", 2))
+        self.state = SimState.from_doc(
+            duel_start(int(cfg["seed"]), self._player_count))
         self._broken_freeze = bool(cfg.get("broken_freeze", False))
         self._stock_ai = bool(cfg.get("stock_ai", False))
         self._chaos = cfg.get("chaos_director")
-        self._player_count = 2
 
     async def teardown(self) -> None:
         self.state = None

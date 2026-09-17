@@ -16,11 +16,13 @@ async def assert_adapter_conformance(
     setup: Callable[[], Awaitable[Any]],
     probes: list[dict[str, Any]],
     seed: int = 1,
+    player_count: int = 2,
 ) -> None:
     """Run the contract suite on a fresh adapter from ``setup()``.
 
     ``probes`` is a list of ``{"cmd": ActionCommand, "expect": "accepted" |
     "rejected"}`` evaluated in order inside player-0's first phase.
+    ``player_count`` drives the phase-cycle assertion (seats 0..n-1 per turn).
     """
     adapter = await setup()
     try:
@@ -78,10 +80,11 @@ async def assert_adapter_conformance(
         adapter.import_state(doc)
         assert adapter.state_hash() == h_doc
 
-        # phase ordering through a full turn
-        await adapter.end_phase(0, 1)
-        await adapter.begin_phase(1, 1)
-        await adapter.end_phase(1, 1)
+        # phase ordering through a full turn (every seat exactly once)
+        for pid in range(player_count):
+            if pid > 0:
+                await adapter.begin_phase(pid, 1)
+            await adapter.end_phase(pid, 1)
         phase = await adapter.current_phase()
         assert phase["turn"] == 2 and phase["phase_index"] == 0, (
             f"turn must advance after all phases: {phase}"

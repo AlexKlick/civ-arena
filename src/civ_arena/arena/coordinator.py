@@ -171,7 +171,10 @@ class Arena:
                 agent.decision_mode == "strategic_autopilot" for agent in spec.agents):
             raise ValueError("strategic_autopilot resume is unsupported; start a fresh match")
         if resume_state is None:
-            await self.adapter.setup({"seed": spec.seed, "chaos_director": self.chaos})
+            await self.adapter.setup({
+                "seed": spec.seed, "chaos_director": self.chaos,
+                "player_count": spec.player_count,
+            })
             (self.run_dir / "init.json").write_text(json.dumps(
                 self.adapter.export_state(), sort_keys=True))
             self.log.write(
@@ -306,6 +309,7 @@ class Arena:
         # and match identity above covers the config's match).
         await self.adapter.setup({
             "seed": self.spec.seed, "chaos_director": self.chaos,
+            "player_count": self.spec.player_count,
         })
         self.adapter.import_state(state.sim_doc)
         self.log.truncate_to(state.seq)

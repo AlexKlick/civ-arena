@@ -287,6 +287,10 @@ class MatchSpec:
     watchdog_mode: str
     violation_limit: int
     checkpoint_every: int
+    # Seat count for the adapter's start layout (2 = historical duel, 4 =
+    # point-symmetric arena). Absent from the yaml => 2 and no cross-
+    # validation happens, so every existing config parses identically.
+    player_count: int = 2
     agents: list[AgentSpec] = field(default_factory=list)
     chaos: list[ChaosSpec] = field(default_factory=list)
     # M13 cross-match recall: prior match_ids whose logs form the corpus.
@@ -321,6 +325,7 @@ class MatchSpec:
 VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner"})
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
+VALID_SEAT_COUNTS = frozenset({2, 4})
 
 
 def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
@@ -341,6 +346,14 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
     completeness_gate = bool(match.get("completeness_gate", False))
     declare_own_endpath_drift = bool(
         match.get("declare_own_endpath_drift", False))
+    player_count_raw = match.get("player_count")
+    player_count = 2
+    if player_count_raw is not None:
+        player_count = int(player_count_raw)
+        if player_count not in VALID_SEAT_COUNTS:
+            raise ConfigError(
+                f"match.player_count must be one of {sorted(VALID_SEAT_COUNTS)}, "
+                f"got {player_count}")
 
     if adapter not in VALID_ADAPTERS:
         raise ConfigError(f"unknown adapter {adapter!r}")
@@ -413,6 +426,30 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
         seen_players.add(agent.player_id)
         seen_agent_ids.add(agent.agent_id)
         agents.append(agent)
+    if player_count_raw is not None:
+        # Cross-validation only fires when player_count is explicit: an
+        # absent key means every existing config keeps today's behavior.
+        if player_count != len(agents):
+            raise ConfigError(
+                f"match.player_count {player_count} != {len(agents)} agents")
+        if sorted(a.player_id for a in agents) != list(range(player_count)):
+            # end_phase advances phase_index against player_count, so gaps
+            # or out-of-range seats would strand phases mid-turn.
+            raise ConfigError(
+                "player_ids must be contiguous 0..player_count-1 when "
+                "match.player_count is explicit")
+        if player_count != 2:
+            for a in agents:
+                if a.policy == "planner":
+                    raise ConfigError(
+                        f"agents[{a.agent_id}]: policy 'planner' is bilateral "
+                        f"(one-rival belief prior) and unsupported at "
+                        f"player_count={player_count}")
+                if a.decision_mode == "strategic_autopilot":
+                    raise ConfigError(
+                        f"agents[{a.agent_id}]: decision_mode "
+                        f"'strategic_autopilot' is bilateral and unsupported "
+                        f"at player_count={player_count}")
     spectate_raw = doc.get("spectate")
     if not agents and spectate_raw is None:
         raise ConfigError("at least one agent is required")
@@ -483,7 +520,8 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
         completeness_gate=completeness_gate,
         declare_own_endpath_drift=declare_own_endpath_drift,
         watchdog_mode=watchdog_mode, violation_limit=violation_limit,
-        checkpoint_every=checkpoint_every, agents=agents, chaos=chaos,
+        checkpoint_every=checkpoint_every, player_count=player_count,
+        agents=agents, chaos=chaos,
         recall_runs=recall_runs, spectate=spectate,
         spectator_capture=spectator_capture, live=live,
     )
