@@ -1085,8 +1085,26 @@ async def phase_dispatch_hotseat(
                         _pending_capture = (turn, agent.player_id)
                         print(f"hotseat turn {turn} p{seat_pid}: "
                               f"{len(ledger.rows)} completed", flush=True)
+                        # Watchdog: digest changed without any recorded
+                        # actions (a popup, an AI-side event, a free tech
+                        # bonus, a barbarian spawn). watchdog_mode
+                        # `flag_and_continue` (the only legal mode for the
+                        # live adapter, see live_driver.py:198) means
+                        # "record the anomaly in the per-turn row and
+                        # continue". The previous unconditional raise here
+                        # meant flag_and_continue aborts on the first benign
+                        # engine-side event — a regression the smoke-004
+                        # 30-round stress caught at turn 27 (turtler's
+                        # allowed=0 + digest_changed=true).
                         if row["unexpected"] or row["violations"]:
-                            raise RuntimeError("watchdog or unexplained digest anomaly")
+                            if self.spec.watchdog_mode == "flag_and_continue":
+                                driver._write(
+                                    "HEARTBEAT", turn=turn,
+                                    audit="watchdog_flag",
+                                    row=row,
+                                    note="digest changed without allowed mutations; continuing")
+                            else:
+                                raise RuntimeError("watchdog or unexplained digest anomaly")
                     # After the agent_turn scope exits (success OR
                     # CancelledError raised by the watchdog), run the
                     # spectator capture with its OWN deadline. If the
