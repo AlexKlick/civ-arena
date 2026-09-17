@@ -851,3 +851,38 @@ def test_fake_mod_curprod_tracks_queue():
     city["queue"] = "MONUMENT"   # the act handler's effect, set directly
     rows = mod.respond(read)
     assert rows and rows[0] == f"CURPROD|{mod._production_hash('MONUMENT')}"
+
+
+def test_no_self_outside_self_binding_scopes():
+    """smoke-005 regression: commit 9c43559 introduced
+    `self.spec.watchdog_mode` inside module-level phase_dispatch_hotseat
+    (no self in scope). The first benign digest anomaly of the run raised
+    NameError, wrapped by the task group as 'ExceptionGroup during
+    recovery' — after 30/30 rounds had completed. Guard the whole class:
+    a Name node `self` is only legal inside a function that binds self
+    as an argument, or nested (closure) within one that does."""
+    import ast
+
+    path = REPO / "src" / "civ_arena" / "game" / "civ6" / "live_driver.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    offenders: list[str] = []
+    # Closure semantics: a nested function that does not bind self can
+    # still legally read self from an enclosing self-binding function,
+    # so the inherited flag carries through; it only ever turns True.
+    fn_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def check(node, self_ok: bool) -> None:
+        if isinstance(node, fn_types):
+            a = node.args
+            binds = any(arg.arg == "self" for arg in
+                        list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs))
+            self_ok = binds or self_ok
+        if isinstance(node, ast.Name) and node.id == "self" and not self_ok:
+            offenders.append(f"live_driver.py:{node.lineno}")
+        for child in ast.iter_child_nodes(node):
+            check(child, self_ok)
+
+    check(tree, False)
+    assert offenders == [], (
+        "`self` referenced outside any self-binding scope — this raises "
+        f"NameError at runtime, not import time: {offenders}")

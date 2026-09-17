@@ -1097,7 +1097,7 @@ async def phase_dispatch_hotseat(
                         # 30-round stress caught at turn 27 (turtler's
                         # allowed=0 + digest_changed=true).
                         if row["unexpected"] or row["violations"]:
-                            if self.spec.watchdog_mode == "flag_and_continue":
+                            if spec.watchdog_mode == "flag_and_continue":
                                 driver._write(
                                     "HEARTBEAT", turn=turn,
                                     audit="watchdog_flag",
