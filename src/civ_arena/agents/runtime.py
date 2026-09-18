@@ -25,6 +25,7 @@ class AgentProfile:
     case_base: Any = None  # config.CaseBaseSpec when policy == "planner" + case_base
     decision_mode: str = "legacy"
     growth_autopilot: bool = False
+    adaptive: Any = None  # config.AdaptiveSpec when policy == "adaptive"
 
 
 @dataclass
@@ -93,6 +94,14 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
         return ScriptedRuntime(profile=profile)
     if profile.policy == "turtler":
         return ScriptedRuntime(profile=profile)
+    if profile.policy == "adaptive":
+        from civ_arena.agents.adaptive import AdaptiveRuntime
+
+        if profile.adaptive is None:
+            raise ValueError(
+                f"agent {profile.agent_id!r}: policy 'adaptive' requires an "
+                "adaptive spec (config validation should have caught this)")
+        return AdaptiveRuntime(profile=profile, spec=profile.adaptive)
     if profile.policy == "planner":
         from civ_arena.planner.runtime import PlannerRuntime
 

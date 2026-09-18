@@ -136,6 +136,7 @@ class Arena:
                     proposer=agent_spec.proposer,
                     case_base=agent_spec.case_base, decision_mode=agent_spec.decision_mode,
                     growth_autopilot=agent_spec.growth_autopilot,
+                    adaptive=agent_spec.adaptive,
                 )
                 self.runtimes[agent_spec.player_id] = build_runtime(
                     profile, telemetry=self.telemetry, diary=self.diary,

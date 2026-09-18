@@ -11,7 +11,10 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from civ_arena.agents.adaptive import AdaptiveSpec
 
 import yaml
 
@@ -164,7 +167,7 @@ def _parse_case_base(block: Any, where: str) -> CaseBaseSpec:
 class AgentSpec:
     agent_id: str
     player_id: int
-    policy: str  # "expansionist" | "turtler" | "llm" | "planner"
+    policy: str  # "expansionist" | "turtler" | "llm" | "planner" | "adaptive"
     seed: int
     model: str | None = None  # display hint; parsed and ignored
     llm: LLMSpec | None = None
@@ -174,6 +177,8 @@ class AgentSpec:
     case_base: CaseBaseSpec | None = None
     decision_mode: str = "legacy"
     growth_autopilot: bool = False
+    # Research loop: doctrine-switcher spec for policy "adaptive" only.
+    adaptive: AdaptiveSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -322,7 +327,8 @@ class MatchSpec:
         raise ConfigError(f"no agent for player {player_id}")
 
 
-VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner"})
+VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner",
+                            "adaptive"})
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
 VALID_SEAT_COUNTS = frozenset({2, 4})
@@ -332,6 +338,55 @@ def _require(mapping: dict[str, Any], key: str, where: str) -> Any:
     if key not in mapping:
         raise ConfigError(f"{where}: missing required key {key!r}")
     return mapping[key]
+
+
+def _parse_adaptive(raw: Any, where: str) -> AdaptiveSpec:
+    """The research loop's doctrine-switcher spec: initial doctrine,
+    evaluation interval, and first-match-wins memoryless triggers."""
+    from civ_arena.agents.adaptive import (
+        PREDICATES,
+        AdaptiveSpec,
+        AdaptiveTrigger,
+    )
+    from civ_arena.agents.scripted import DOCTRINES
+
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where}.adaptive must be a mapping")
+    initial = str(_require(raw, "initial", f"{where}.adaptive"))
+    if initial not in DOCTRINES:
+        raise ConfigError(
+            f"{where}.adaptive.initial: unknown doctrine {initial!r}")
+    interval = int(raw.get("interval", 5))
+    if interval < 1:
+        raise ConfigError(f"{where}.adaptive.interval must be >= 1")
+    triggers_raw = raw.get("triggers")
+    if not isinstance(triggers_raw, list) or not triggers_raw:
+        raise ConfigError(
+            f"{where}.adaptive.triggers must be a non-empty list")
+    triggers: list[AdaptiveTrigger] = []
+    for i, entry in enumerate(triggers_raw):
+        twhere = f"{where}.adaptive.triggers[{i}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{twhere} must be a mapping")
+        switch_to = str(_require(entry, "switch_to", twhere))
+        if switch_to not in DOCTRINES:
+            raise ConfigError(
+                f"{twhere}.switch_to: unknown doctrine {switch_to!r}")
+        when = entry.get("when")
+        if not isinstance(when, dict) or not when:
+            raise ConfigError(f"{twhere}.when must be a non-empty mapping")
+        clean: dict[str, float] = {}
+        for key, value in when.items():
+            if key not in PREDICATES:
+                raise ConfigError(
+                    f"{twhere}.when: unknown predicate {key!r} "
+                    f"(known: {sorted(PREDICATES)})")
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(f"{twhere}.when.{key} must be a number")
+            clean[key] = value
+        triggers.append(AdaptiveTrigger(when=clean, switch_to=switch_to))
+    return AdaptiveSpec(initial=initial, interval=interval,
+                        triggers=tuple(triggers))
 
 
 def parse_config(doc: dict[str, Any]) -> MatchSpec:
@@ -380,6 +435,8 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             if "proposer" in entry else None,
             case_base=_parse_case_base(entry["case_base"], f"{where}.case_base")
             if "case_base" in entry else None,
+            adaptive=_parse_adaptive(entry["adaptive"], where)
+            if "adaptive" in entry else None,
         )
         if agent.decision_mode not in ("legacy", "strategic_autopilot"):
             raise ConfigError(f"{where}: unknown decision_mode {agent.decision_mode!r}")
@@ -399,6 +456,14 @@ def parse_config(doc: dict[str, Any]) -> MatchSpec:
             raise ConfigError(f"{where}: unknown policy {agent.policy!r}")
         if agent.policy == "llm" and agent.llm is None:
             raise ConfigError(f"{where}: policy 'llm' requires an llm: block")
+        if agent.policy == "adaptive" and agent.adaptive is None:
+            raise ConfigError(
+                f"{where}: policy 'adaptive' requires an adaptive: block")
+        if agent.policy != "adaptive" and agent.adaptive is not None:
+            raise ConfigError(
+                f"{where}: adaptive: block on policy {agent.policy!r} — "
+                "the switcher rides the scripted doctrines (set policy: "
+                "adaptive)")
         if agent.policy != "llm" and agent.llm is not None:
             raise ConfigError(
                 f"{where}: llm: block on policy {agent.policy!r} — remove it "

@@ -50,9 +50,16 @@ def _steps_toward(unit: dict[str, Any], target: tuple[int, int]) -> list[str]:
     return [f"{nq},{nr}" for nq, nr in candidates[:3]]
 
 
-async def run_policy(runtime: Any, facade: Any) -> None:
+async def run_policy(runtime: Any, facade: Any,
+                     doctrine: dict[str, Any] | None = None) -> None:
     profile = runtime.profile
-    doctrine = DOCTRINES[profile.policy]
+    if doctrine is None:
+        # default: the runtime's own doctrine (policy name == doctrine key)
+        if profile.policy not in DOCTRINES:
+            raise ValueError(
+                f"policy {profile.policy!r} is not a doctrine; the caller "
+                "must pass one explicitly (e.g. the adaptive switcher)")
+        doctrine = DOCTRINES[profile.policy]
     rng: random.Random = runtime.rng
     pid = profile.player_id
 
