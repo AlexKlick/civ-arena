@@ -55,8 +55,10 @@ class FlashSpec:
     api_key_env: str = API_KEY_ENV
     model: str = MODEL
     concurrency: int = 2  # zai lane degrades above 3 under sustained parallelism
-    max_retries: int = 5
-    timeout_s: float = 120.0
+    max_retries: int = 3
+    # thinking models on large prompts routinely exceed 120s per attempt
+    # (measured: 6 consecutive 120s timeouts on the roster-proposal call)
+    timeout_s: float = 480.0
     max_calls: int = 12  # hard cap per iteration
 
 

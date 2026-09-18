@@ -400,7 +400,7 @@ def test_default_spec_pins_the_lane():
     assert spec.api_key_env == "ZAI_CODING_API_KEY"
     assert spec.model == "glm-5.3-flash"
     assert (spec.concurrency, spec.max_retries, spec.timeout_s,
-            spec.max_calls) == (2, 5, 120.0, 12)
+            spec.max_calls) == (2, 3, 480.0, 12)
 
 
 def test_spec_from_env_overrides(monkeypatch):
@@ -411,7 +411,7 @@ def test_spec_from_env_overrides(monkeypatch):
     assert spec.base_url == "https://alt.test/v4/chat/completions"
     assert spec.api_key_env == "OTHER_KEY_ENV"
     assert spec.model == "glm-4.6"
-    assert (spec.concurrency, spec.max_retries, spec.max_calls) == (2, 5, 12)
+    assert (spec.concurrency, spec.max_retries, spec.max_calls) == (2, 3, 12)
 
 
 def test_spec_from_env_defaults_when_unset_or_blank(monkeypatch):
