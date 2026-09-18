@@ -20,5 +20,18 @@
    "secondary": "with the seat confound removed the doctrine gap widened: turtler mean_rank 1.75 (14 wins) vs expansionist 3.25 (2 wins); pre-seam 2.31 vs 2.66",
    "residual": "seat2 remains mildly elevated (2.875 vs ~2.37 pooled elsewhere) - n=16, descriptive only; candidate for a later paired test if it persists across rosters"
   }
+ },
+ {
+  "id": "H2",
+  "statement": "settler_broker loses because of a self-inflicted purchase-gate interaction, not income: the gate (scripted.py, turn%3==0, gold>=120) fires while SETTLER (160 gold) is unaffordable, and the next preference GRANARY (exactly 120) spends the settler bank before it can ever reach 160 on a gate turn.",
+  "prediction": "If the purchase step holds gold below a bank floor until the top purchase preference is affordable (bank_floor=160 for settler_broker), it founds >=3 cities by turn 25 in the large majority of games and mean_rank improves by >=0.5; granary purchases drop to near zero.",
+  "test": {
+   "kind": "param_change",
+   "doctrine": "settler_broker",
+   "param": "purchase bank floor (scripted.py gate, needs a doctrine-level opt-in field)",
+   "value": 160
+  },
+  "status": "open",
+  "evidence": "batch-002 trajectories: cities flat at 2 in every inspected match while gold sawtooths 38-173 and CLEARS 160 between gate turns (t=25: 162, t=35: 173 in batch-002-s300003-r2); drops of ~110-120 gold right after gate turns match GRANARY purchases exactly (rules.py purchase_cost = 2x production: SETTLER 160, GRANARY 120)"
  }
 ]
