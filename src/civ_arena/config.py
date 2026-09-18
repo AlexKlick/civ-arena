@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 import yaml
 
+from civ_arena.agents.scripted import DOCTRINES
+
 
 class ConfigError(ValueError):
     pass
@@ -167,7 +169,8 @@ def _parse_case_base(block: Any, where: str) -> CaseBaseSpec:
 class AgentSpec:
     agent_id: str
     player_id: int
-    policy: str  # "expansionist" | "turtler" | "llm" | "planner" | "adaptive"
+    # a DOCTRINES key (scripted.py registry) | "llm" | "planner" | "adaptive"
+    policy: str
     seed: int
     model: str | None = None  # display hint; parsed and ignored
     llm: LLMSpec | None = None
@@ -327,8 +330,7 @@ class MatchSpec:
         raise ConfigError(f"no agent for player {player_id}")
 
 
-VALID_POLICIES = frozenset({"expansionist", "turtler", "llm", "planner",
-                            "adaptive"})
+VALID_POLICIES = frozenset(DOCTRINES) | {"llm", "planner", "adaptive"}
 VALID_ADAPTERS = frozenset({"simulator", "firetuner"})
 VALID_WATCHDOG_MODES = frozenset({"flag_and_continue", "rollback"})
 VALID_SEAT_COUNTS = frozenset({2, 4})

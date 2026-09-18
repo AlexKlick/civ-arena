@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from civ_arena.agents.scripted import DOCTRINES
 from civ_arena.session.player_session import AgentRuntime
 
 
@@ -90,9 +91,10 @@ def build_runtime(profile: AgentProfile, *, telemetry: Any = None,
                 growth_autopilot=profile.growth_autopilot,
                 economic_forecast=economic))
         return runtime
-    if profile.policy == "expansionist":
-        return ScriptedRuntime(profile=profile)
-    if profile.policy == "turtler":
+    if profile.policy in DOCTRINES:
+        # every doctrine in the registry dispatches identically — new
+        # DOCTRINES entries (e.g. the flash-proposed research roster) are
+        # runnable the moment they land in scripted.py
         return ScriptedRuntime(profile=profile)
     if profile.policy == "adaptive":
         from civ_arena.agents.adaptive import AdaptiveRuntime

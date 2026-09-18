@@ -1,0 +1,16 @@
+# Batch 2 — the flash-proposed 4-doctrine roster (user-approved 2026-09-17).
+#
+# Roster proposed by glm-5.3-flash from the Lane F review briefs + the
+# batch-001/001b baseline (research/iterations/000/proposal.json, 0 drops):
+#   hyperwide_flood — wide: 6 cities, settler-first compounding
+#   granary_engine  — tall: 3 cities, granary pop-cap lifting
+#   archer_horde    — military: ARCHERY beeline, 6 attacks/turn
+#   settler_broker  — economic: bank gold, buy settlers at the purchase gate
+# Same seed blocks x Latin rotations as batch-001/001b so seat and seed stay
+# orthogonal to doctrine by construction and results are comparable across
+# batches. Runs on the post-seam geometry (3015cb4).
+batch:
+  batch_id: batch-002
+  roster: [hyperwide_flood, granary_engine, archer_horde, settler_broker]
+  seeds: [947381, 300003, 300011, 300029]
+  max_turns: 40
