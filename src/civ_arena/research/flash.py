@@ -39,9 +39,10 @@ MODEL = "glm-5.3-flash"
 MAX_INFLIGHT = 3
 # glm flash models THINK before answering: reasoning_content tokens count
 # against max_tokens (measured on glm-4.5-flash: an 8-token probe died at
-# finish_reason "length" with empty content). Every call needs thinking
-# headroom regardless of the pinned model.
-MAX_TOKENS = 8192
+# finish_reason "length" with empty content; glm-5.3-flash burned a full
+# 8192 cap on the roster proposal and truncated mid-answer). Every call
+# needs thinking headroom regardless of the pinned model.
+MAX_TOKENS = 16384
 PROBE_TOKENS = 512
 TEMPERATURE = 0.2
 BACKOFF_S = 0.5
@@ -160,6 +161,28 @@ def _content(doc: Any) -> str:
     if isinstance(content, list):
         return "".join(block.get("text", "") for block in content
                        if isinstance(block, dict))
+    return ""
+
+
+def _reasoning_content(doc: Any) -> str:
+    """Thinking text from the glm wire shape. A parse SOURCE of last
+    resort: thinking models sometimes finish the JSON answer inside the
+    reasoning field while the content field stays empty (truncation or
+    early-answer behavior). Never preferred over a real content field."""
+    if not isinstance(doc, dict):
+        return ""
+    choices = doc.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+    return reasoning if isinstance(reasoning, str) else ""
+
+
+def _finish_reason(doc: Any) -> str:
+    choices = doc.get("choices") if isinstance(doc, dict) else None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        return str(choices[0].get("finish_reason", ""))
     return ""
 
 
@@ -334,11 +357,17 @@ class FlashClient:
         if isinstance(doc, dict) and doc.get("model"):
             model = str(doc["model"])
         content = _content(doc)
-        data = parse_json_object(content)
+        # parse tier 2: a thinking model that exhausted its cap can leave
+        # the answer only inside reasoning_content (measured on 5.3-flash)
+        parse_source = content or _reasoning_content(doc)
+        data = parse_json_object(parse_source)
         if data is None:
             self._spend(call_id, purpose, "parse_error", attempts,
                         input_tokens, output_tokens)
-            return FlashResult(status="parse_error", raw=_redact(content, key),
+            raw = parse_source or (
+                f"(empty content and reasoning; finish_reason="
+                f"{_finish_reason(doc)!r}; output_tokens={output_tokens})")
+            return FlashResult(status="parse_error", raw=_redact(raw, key),
                                call_id=call_id, model=model,
                                input_tokens=input_tokens,
                                output_tokens=output_tokens, attempts=attempts)
