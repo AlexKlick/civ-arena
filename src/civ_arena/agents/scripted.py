@@ -1,9 +1,15 @@
-"""Deterministic scripted policies: expansionist + turtler.
+"""Deterministic scripted policies: expansionist + turtler (+ research-loop
+roster doctrines behind the same DOCTRINES registry).
 
 The bots see ONLY their projected observations (the facade) — the same view
 an LLM runtime will get. Decisions key on (turn, observation, rng) with no
 wall clock, so matches replay and resume deterministically. Rejected tool
 calls are normal policy noise and stay in the log.
+
+Geometry seam: every seat-count-dependent constant routes through
+``_march_target`` / ``_settler_target`` / ``_corners``. The 2-seat paths
+return the historical literals verbatim (bit-identity is pinned by
+tests/test_four_seat_sim.py golden hashes + test_learned_weights).
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import random
 from typing import Any
 
+from civ_arena.game.sim.layouts import STARTS_4, hex_line_greedy
 from civ_arena.game.sim.state import hex_dist, neighbors, parse_key
 
 DOCTRINES: dict[str, dict[str, Any]] = {
@@ -36,6 +43,39 @@ DOCTRINES: dict[str, dict[str, Any]] = {
 
 _MILITARY = ("WARRIOR", "SPEARMAN", "ARCHER")
 _CORNERS = [(4, 1), (1, 4), (-4, -1), (-1, -4)]
+# radius-7 scaling of the scout corners (4*7//5)
+_CORNERS_4 = [(5, 1), (1, 5), (-5, -1), (-1, -5)]
+_MAP_ORIGIN = (0, 0)
+
+
+def _march_target(pid: int, n_players: int,
+                  my_start: tuple[int, int]) -> tuple[int, int]:
+    """Military push destination. 2 seats: the historical duel-axis
+    literals. 4 seats: the NEAREST foreign start (deterministic tie-break
+    by seat id) — the seat-luck the research loop measures comes from
+    contact timing, and this seam is where the batch-1 seat-2 anomaly
+    (constant last place) was traced to."""
+    if n_players == 2:
+        return (4, -3) if pid == 0 else (-4, 3)
+    others = [(hex_dist(my_start, start), other, start)
+              for other, start in STARTS_4.items() if other != pid]
+    return min(others)[2]
+
+
+def _settler_target(pid: int, n_players: int, expand_ring: int) -> tuple[int, int]:
+    """Settler push destination. 2 seats: historical literals. 4 seats:
+    ``expand_ring + 2`` hexes from the own start along the start→origin
+    line — the +2 guarantees the walk crosses the founding threshold
+    (founding needs dist > 2 from any city) before reaching the target."""
+    if n_players == 2:
+        return (2, 2) if pid == 0 else (-2, -2)
+    start = STARTS_4[pid]
+    line = hex_line_greedy(start, _MAP_ORIGIN)
+    return line[min(len(line) - 1, expand_ring + 2)]
+
+
+def _corners(n_players: int) -> list[tuple[int, int]]:
+    return _CORNERS if n_players == 2 else _CORNERS_4
 
 
 def _coord_of(entity: dict[str, Any]) -> tuple[int, int]:
@@ -69,6 +109,10 @@ async def run_policy(runtime: Any, facade: Any,
     cities = await facade.get_cities()
     if turn % 7 == 1:
         await facade.get_visible_map()
+    # seat-count-dependent geometry routes through one seam (2 seats =>
+    # historical literals, bit-identical)
+    n_players = len(overview.get("public", {}).get("players", [])) or 2
+    my_start = STARTS_4[pid] if n_players != 2 else (0, 0)
 
     # research: first doctrine tech still available
     options = await facade.get_available_research()
@@ -99,23 +143,26 @@ async def run_policy(runtime: Any, facade: Any,
 
     my_units = [u for u in units if u["owner_id"] == pid]
     foreigners = [u for u in units if u["owner_id"] != pid]
-    settled = await _handle_settlers(facade, my_units, cities, profile, turn)
+    settled = await _handle_settlers(facade, my_units, cities, profile,
+                                     turn, n_players, doctrine)
 
     attacks_this_turn = 0
+    aggression_cap = doctrine.get("aggression", 2)
     for unit in my_units:
         if unit["type"] == "SETTLER":
             continue  # handled above
         if unit["type"] in _MILITARY:
             target = _in_range_target(unit, foreigners) if foreigners else None
-            if target and unit["movement"] > 0 and attacks_this_turn < 2:
+            if target and unit["movement"] > 0 and attacks_this_turn < aggression_cap:
                 await facade.attack(unit["unit_id"], target["unit_id"])
                 attacks_this_turn += 1
             elif doctrine["fortify_idle"] and not unit["fortified"]:
                 await facade.fortify(unit["unit_id"])
             elif doctrine["march"] and unit["movement"] > 0:
-                await _march(facade, unit, (4, -3) if pid == 0 else (-4, 3))
+                await _march(facade, unit, _march_target(pid, n_players, my_start))
         elif unit["type"] == "SCOUT" and unit["movement"] > 0:
-            corner = _CORNERS[rng.randint(0, len(_CORNERS) - 1)]
+            corners = _corners(n_players)
+            corner = corners[rng.randint(0, len(corners) - 1)]
             await _march(facade, unit, corner)
 
     # TURN-COMPLETENESS GATE contract: on the structured unmoved_units
@@ -146,7 +193,8 @@ def _in_range_target(unit: dict[str, Any],
 
 
 async def _handle_settlers(facade: Any, my_units: list[dict], cities: list[dict],
-                           profile: Any, turn: int) -> int:
+                           profile: Any, turn: int, n_players: int,
+                           doctrine: dict[str, Any]) -> int:
     founded = 0
     for unit in (u for u in my_units if u["type"] == "SETTLER"):
         pos = _coord_of(unit)
@@ -157,7 +205,8 @@ async def _handle_settlers(facade: Any, my_units: list[dict], cities: list[dict]
             if doc.get("status") == "accepted":
                 founded += 1
         else:
-            await _march(facade, unit, (2, 2) if profile.player_id == 0 else (-2, -2))
+            await _march(facade, unit, _settler_target(
+                profile.player_id, n_players, doctrine.get("expand_ring", 2)))
     return founded
 
 
