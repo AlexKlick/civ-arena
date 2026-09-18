@@ -1,0 +1,14 @@
+{"attempt": 1, "call_id": "16565233d6be441ab8bcbcf2101e9fdc", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 2, "call_id": "16565233d6be441ab8bcbcf2101e9fdc", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 3, "call_id": "16565233d6be441ab8bcbcf2101e9fdc", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 1, "call_id": "3daaaa20337741bc9dd08379cb276953", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 2, "call_id": "3daaaa20337741bc9dd08379cb276953", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 3, "call_id": "3daaaa20337741bc9dd08379cb276953", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 1, "call_id": "148ce582634d44c998862593024f1439", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 2, "call_id": "148ce582634d44c998862593024f1439", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 3, "call_id": "148ce582634d44c998862593024f1439", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 4, "call_id": "148ce582634d44c998862593024f1439", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 1, "call_id": "a4031fa316394e72a7ae78ecd56c5527", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 2, "call_id": "a4031fa316394e72a7ae78ecd56c5527", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 3, "call_id": "a4031fa316394e72a7ae78ecd56c5527", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}
+{"attempt": 4, "call_id": "a4031fa316394e72a7ae78ecd56c5527", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "analyze", "status": "http_error"}

@@ -44,3 +44,44 @@ Append-only record of the research loop: one section per iteration, written by t
   (gitignored; aggregates in results.md there, H1 outcome in
   research/hypotheses.json).
 
+## Iteration 002 — the flash-proposed roster ran; broker mechanism proven; analysis leg degraded-transport (2026-09-17)
+
+- Roster: glm-5.3-flash proposal (iteration 000) transcribed verbatim —
+  hyperwide_flood (wide, 6 cities), granary_engine (tall, 3),
+  archer_horde (military, ARCHERY beeline, aggression 6), settler_broker
+  (economic, gold->settler purchases). User-approved before
+  implementation (02924b6); gate 2554 passed / 2 skipped / 1 pre-existing
+  base failure.
+- 16 games, 16/16 clean, same seed blocks x Latin rotations (batch-002).
+  Per-strategy mean_rank: hyperwide_flood 1.5625 (11 wins, scalar
+  1137.9), archer_horde 2.0625 (3, 1044.5), granary_engine 3.0 (2,
+  977.4), settler_broker 3.375 (0, 899.1). Seat decomposition shows no
+  structural seat artifact (H1's fix holding on a new roster).
+- VERIFIED MECHANISM (H2, trajectories + rules arithmetic): settler_broker
+  never founds a 3rd city because the purchase gate (turn%3==0,
+  gold>=120) fires while SETTLER (160 gold) is unaffordable and the next
+  preference GRANARY (exactly 120) drains the settler bank. Gold clears
+  160 BETWEEN gate turns (162@t25, 173@t35 in s300003-r2) but the bank
+  never survives TO a gate turn. Cities flat at 2 all game in every
+  inspected match; in horde-adjacent matches its units collapse to 0 and
+  stay there (farmed while turtling at pop 14).
+- Cross-batch tension: batch-001b's expansionist (4 cities, march on)
+  LOST to turtler, but hyperwide_flood (6 cities, march off, settler
+  first) dominates everything. Leading reconciliation: the losing variable
+  is military spending/marching, not city count — flood pays zero army
+  tax and out-compounds the field. Untested against turtler directly
+  (different rosters, never met on a map).
+- FLASH ANALYSIS LEG: DEGRADED-TRANSPORT. 4 consecutive full retry
+  budgets (~14 attempts, 480s timeout each) returned 0 bytes while the
+  512-token probe passed throughout — the endpoint hangs on this prompt
+  size tonight. Typed http_error recorded in
+  research/iterations/002/analysis.json (fail-soft held: no crash, no
+  fabricated data, spend trail complete). This is a retry condition, not
+  the 2x-unparseable termination criterion; retry analyze when the lane
+  recovers, possibly with a slimmer prompt (drop the static briefs).
+- Standing questions for batch 3: (a) does the H2 bank_floor fix rescue
+  the broker (prediction registered in hypotheses.json); (b) does
+  hyperwide_flood beat batch-001b champion turtler head-to-head; (c) do
+  adaptive switcher seats (flood->turtler under pressure) beat both
+  static parents.
+
