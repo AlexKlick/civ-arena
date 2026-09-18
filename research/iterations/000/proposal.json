@@ -1,0 +1,141 @@
+{
+ "status": "ok",
+ "accepted": [
+  {
+   "doctrine_id": "hyperwide_flood",
+   "research": [
+    "POTTERY",
+    "ARCHERY",
+    "BRONZE_WORKING",
+    "WRITING",
+    "MINING",
+    "MASONRY",
+    "ANIMAL_HUSBANDRY",
+    "IRRIGATION"
+   ],
+   "march": false,
+   "fortify_idle": true,
+   "build_order": [
+    "SETTLER",
+    "GRANARY",
+    "ARCHER",
+    "SPEARMAN"
+   ],
+   "purchase_pref": [
+    "GRANARY",
+    "SETTLER",
+    "SCOUT",
+    "MONUMENT"
+   ],
+   "max_cities": 6,
+   "aggression": 1,
+   "expand_ring": 3,
+   "thesis": "Convert every point of production into settlers to reach 5-6 cities before turn 30, winning on the compounding city/pop/science curve while the high max_cities cap shrugs off foreign-city sight corruption.",
+   "expected_signature": "Cities 2->3 by turn ~10 then step to 5-6 by turn ~30; steepest population and tech curves in the field (science = 2*pop/city); units stuck around 5-8 (one archer/spear per city); gold low, sawtoothing at the 120 gate on granary buys.",
+   "failure_mode": "An early archer/marcher neighbor that camps settler corridors kills 80-prod settlers and unfortified pop-1 cities faster than new foundings compound, while its own production never stops paying the settler tax; also a map where founding space inside ring 3 runs out leaves settlers idling at 16 turns apiece."
+  },
+  {
+   "doctrine_id": "granary_engine",
+   "research": [
+    "POTTERY",
+    "ARCHERY",
+    "WRITING",
+    "MINING",
+    "BRONZE_WORKING",
+    "MASONRY",
+    "ANIMAL_HUSBANDRY",
+    "IRRIGATION"
+   ],
+   "march": false,
+   "fortify_idle": true,
+   "build_order": [
+    "GRANARY",
+    "MONUMENT",
+    "SPEARMAN",
+    "ARCHER"
+   ],
+   "purchase_pref": [
+    "GRANARY",
+    "MONUMENT",
+    "SPEARMAN",
+    "SCOUT"
+   ],
+   "max_cities": 3,
+   "aggression": 0,
+   "expand_ring": 2,
+   "thesis": "Lock 3 cities fast, then maximize per-city efficiency: granaries lift the pop cap 7->9 (stacking 20-pt pop and compounding science) while monument income banks gold to buy granaries outright on every turn%3 gate.",
+   "expected_signature": "Cities flat at 3 by ~turn 8; the highest per-city population trajectory (climbing toward 9/city late); techs steady and near-front of pack on 3-city science; small fortified defensive core (~5 units, healing 10/turn); gold sawtooths 120+ with 120-gold granary purchases replacing unit padding.",
+   "failure_mode": "Any wide opponent that reaches a fixed 3-city ceiling-beating 4-5 cities is mathematically out of reach within 40 turns under own-minus-strongest-rival scoring, and aggression 0 means archers farm its perimeter for free 10-point kills it never answers."
+  },
+  {
+   "doctrine_id": "archer_horde",
+   "research": [
+    "ARCHERY",
+    "BRONZE_WORKING",
+    "POTTERY",
+    "WRITING",
+    "MINING",
+    "MASONRY",
+    "ANIMAL_HUSBANDRY",
+    "IRRIGATION"
+   ],
+   "march": true,
+   "fortify_idle": true,
+   "build_order": [
+    "ARCHER",
+    "SPEARMAN",
+    "WARRIOR",
+    "GRANARY"
+   ],
+   "purchase_pref": [
+    "ARCHER",
+    "SPEARMAN",
+    "SCOUT",
+    "WARRIOR"
+   ],
+   "max_cities": 2,
+   "aggression": 6,
+   "expand_ring": 1,
+   "thesis": "Beeline ARCHERY for the earliest ranged unlock, spam archers from a compact 2-city base, and march them into rivals to farm 10-point kills per turn via range-2 attacks that take no melee counter while keeping 6 attacks/turn of tempo.",
+   "expected_signature": "Cities flat at 2 from turn ~3; middling pop/techs on the small base; units climbing steadily toward 12-16 as archers are built and purchased at the gate, punctuated by near-zero losses (ranged chip + fortify/heal when idle); each rival's unit count visibly decaying; gold low from 100-gold archer purchases.",
+   "failure_mode": "Opponents who refuse contact and silently out-expand: unit kills (10 pts) cannot close a 3-city (300+ pts) differential, and the hardcoded shared march lanes mean three seats' hordes funnel to the same tile, arriving stacked, unhealed, and trading piecemeal into a fortified spearmen-with-archer-backline defense."
+  },
+  {
+   "doctrine_id": "settler_broker",
+   "research": [
+    "POTTERY",
+    "MINING",
+    "ARCHERY",
+    "BRONZE_WORKING",
+    "WRITING",
+    "MASONRY",
+    "ANIMAL_HUSBANDRY",
+    "IRRIGATION"
+   ],
+   "march": false,
+   "fortify_idle": true,
+   "build_order": [
+    "MONUMENT",
+    "GRANARY",
+    "SETTLER",
+    "ARCHER"
+   ],
+   "purchase_pref": [
+    "SETTLER",
+    "GRANARY",
+    "MONUMENT",
+    "ARCHER"
+   ],
+   "max_cities": 4,
+   "aggression": 1,
+   "expand_ring": 2,
+   "thesis": "Run 3 quick cities on monument income, then treat the turn%3 gold gate as a settler market: bank to 160 and buy settlers directly, converting gold into instant +100 foundings that skip the 16-turn production pipeline entirely.",
+   "expected_signature": "Cities 3 by ~turn 8, then discrete +1 jumps every few gated turns as 160-gold purchases land (4-5 by turn ~25); strong pop/techs on the mid-wide base; modest defensive units; gold oscillating 120-160 as banked income drains into settler and granary buys.",
+   "failure_mode": "If per-turn income stalls (cities harassed, monuments delayed) gold never clears the 160 threshold and the doctrine is left with few mid-game units and no expansion engine; a flood opponent that saturates all legal founding spots first also converts every banked settler purchase into a dead 160-gold liability."
+  }
+ ],
+ "dropped": [],
+ "input_tokens": 12301,
+ "output_tokens": 8699,
+ "model": "glm-5.3-flash"
+}

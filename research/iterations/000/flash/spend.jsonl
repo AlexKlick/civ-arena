@@ -1,0 +1,13 @@
+{"attempt": 1, "call_id": "80dc961098354a7d97cb0cdeaeb1dfcf", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 2, "call_id": "80dc961098354a7d97cb0cdeaeb1dfcf", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 3, "call_id": "80dc961098354a7d97cb0cdeaeb1dfcf", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 4, "call_id": "80dc961098354a7d97cb0cdeaeb1dfcf", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 5, "call_id": "80dc961098354a7d97cb0cdeaeb1dfcf", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 6, "call_id": "80dc961098354a7d97cb0cdeaeb1dfcf", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 1, "call_id": "e93116d8b8064b07bbe422752766bdb0", "input_tokens": 12267, "model": "glm-5.3-flash", "output_tokens": 8192, "purpose": "brief-roster", "status": "parse_error"}
+{"attempt": 1, "call_id": "1d30dacf7e864831a2636ebab7406403", "input_tokens": 12267, "model": "glm-5.3-flash", "output_tokens": 13088, "purpose": "brief-roster", "status": "ok"}
+{"attempt": 1, "call_id": "ce4dda54ce0144d98b4d2ad5426702a1", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 1, "call_id": "c5ab719519c5404186fa0a5ec292a8f6", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 2, "call_id": "c5ab719519c5404186fa0a5ec292a8f6", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 3, "call_id": "c5ab719519c5404186fa0a5ec292a8f6", "input_tokens": 0, "model": "glm-5.3-flash", "output_tokens": 0, "purpose": "brief-roster", "status": "http_error"}
+{"attempt": 4, "call_id": "c5ab719519c5404186fa0a5ec292a8f6", "input_tokens": 12301, "model": "glm-5.3-flash", "output_tokens": 8699, "purpose": "brief-roster", "status": "ok"}
