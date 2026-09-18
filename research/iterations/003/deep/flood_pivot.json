@@ -1,0 +1,42 @@
+{
+ "facts_summary": {
+  "games": 8,
+  "mean_rank": 1.5,
+  "wins": 5
+ },
+ "input_tokens": 9319,
+ "model": "glm-5.3-flash",
+ "output_tokens": 5480,
+ "status": "ok",
+ "verdict": {
+  "deviations": [
+   "Expansion signature unmet: expected 2->3 by t10 then 5-6 by t30; actual ceiling was 3 cities in 4 games and 2 in the other 4, so hyperwide_flood's entire compounding-cities thesis was effectively never executed.",
+   "Units stuck at 5-8 under flood only briefly visible pre-pivot (3-7 units at t10-20); from the pivot onward every game diverges into 120-253 units by t160, far outside the flood signature.",
+   "Pop plateaus mid-game (s300003-r1 flat at 24 from t70; s947381-r0 flat at 16 from t60) instead of the 'steepest population curve in the field' - production is being poured into units, not growth.",
+   "First pivot fired as early as t10 (s947381-r2) before any settler founding, and 3 of 8 games oscillated on the exact 5-turn check interval, indicating triggers riding thresholds rather than tracking real state changes."
+  ],
+  "evidence": [
+   "Pivot mechanics ran in all 8 games: every match shows hyperwide_flood -> turtler, first switch at t10-t30, and 'doctrines_played' confirms both phases were actually loaded, not just nominal.",
+   "Post-pivot behavior matches turtler spec: cities held at the 2-3 cap while unit counts ramp relentlessly (s300003-r1: 6 units at t20 -> 253 at t160; s947381-r0: 7 -> 169), consistent with WALLS/MONUMENT/WARRIOR/SPEARMAN spam.",
+   "The flood thesis never materialized anywhere: cities peaked at 3 (e.g., s947381-r2 and s300003-r0 hit 3 at t20) versus the expected_signature of 5-6 cities by t30; four games (s947381-r0, s947381-r1, s300003-r2, s300003-r3) never exceeded 2 cities for all 160 turns.",
+   "Research lists completed as written: techs reach the full 8 by t20 in most games (t30 in s947381-r0), so the 8-item queues were followed to completion.",
+   "Flip-flop games were the worst results: s300003-r3 (5 switches between t20-t40) finished with the lowest scalar of its seed (2009, rank 3) and pop stuck at 11; s947381-r1 (3 switches) hit 2115, rank 2. Single-pivot games took the wins (3354, 3578, 3655, 2999, 2532 all rank 1).",
+   "Gold sawtooths hard post-pivot (s300003-r0 cycles 8/88/168; t60/t90/t120 dips to 8), matching purchase-driven spending but at turtler's MONUMENT/GRANARY/WARRIOR gate, not the flood's 120 granary gate."
+  ],
+  "executing_strategy": true,
+  "execution_score_0_10": 6,
+  "pivot_assessment": {
+   "fired": true,
+   "flip_flops": 4,
+   "notes": "Switches fired in 8/8 games and the initial pivot plausibly reflected threat (unit counts then ramp defensively), and results were strong (5 wins, mean_rank 1.5). But timing quality is questionable: every pivot landed by t30, i.e., before the flood phase achieved anything (max 3 cities vs the 5-6 thesis), converting all 8 games into turtler games. s947381-r2 flipped at t10/t15/t20 and s300003-r3 alternated doctrine on every 5-turn check from t20-t40 - a threshold-rider pattern showing triggers hover at boundary instead of tracking sustained state. Flip-flopping hurt: the two flip-flop games posted the lowest final scalars in their batches (2009 rank 3; 2115 rank 2), likely from build-order churn (SETTLER/GRANARY vs WALLS/MONUMENT/WARRIOR queues reset every 5 turns), while clean single-pivot games won 5 times.",
+   "timing_sensible": false
+  },
+  "recommended_changes": [
+   "Add hysteresis: require a trigger to hold for 2 consecutive checks (interval 5) or impose a minimum 15-turn dwell time before switching back, eliminating the t20-t40 oscillation seen in s300003-r3 and the t10-20 churn in s947381-r2/r1.",
+   "Restrict min_foreign_units_seen=4 to units within a radius of own territory and exclude scouts, so early contact/sight at t10 doesn't abort the flood before a single settler is founded.",
+   "Gate pivot eligibility until at least 2 settlers are founded or turn >= 20, since every game pivoted before the expansion thesis could even start (cities never passed 3).",
+   "Cap turtler military output (e.g., stop land units near ~10-12 or 2x cities) and redirect production to granary/monument to fix flat pop (24 from t70 in s300003-r1) and gold dips to single digits (8 at t60/t90/t120 in s300003-r0).",
+   "Consider raising turtler max_cities from 2 to 3: the third city, founded during brief flood windows, correlated with the wins (all rank-1 games reached 3 cities)."
+  ]
+ }
+}

@@ -85,3 +85,48 @@ Append-only record of the research loop: one section per iteration, written by t
   adaptive switcher seats (flood->turtler under pressure) beat both
   static parents.
 
+## Iteration 003 — long games, pivot seats enter, per-bot flash audit (2026-09-17/18)
+
+- Batch-003 (operator directive: much longer games, test pivoting, deep
+  per-bot execution analysis): 160 turns, 2 seed blocks x 4 Latin
+  rotations, 8 games, 8/8 clean. Roster: hyperwide_flood + turtler (the
+  never-met champions) + flood_pivot (expand until punished -> turtler
+  on hp-below-0.5 or 4 foreign units seen) + turtle_pivot (turtler ->
+  flood at turn>=30 with 2 cities). 6973b93.
+- HEADLINE — A PIVOT SEAT WON THE BATCH. flood_pivot mean_rank 1.50, 5/8
+  wins, mean_scalar 2821 — beating BOTH static parents (turtler 2.00/2
+  wins/2436; hyperwide_flood 2.625/1 win/1864). turtle_pivot 3.875, 0
+  wins, 1490 — WORSE than its own parent. Pivoting direction and timing
+  decide everything: early state-triggered pivot = champion; late
+  clock-triggered pivot = dead last.
+- Mechanism (local, from trajectories): flood_pivot founded 2-3 cities
+  in flood's opening, pivoted at t10-t30 when pressure arrived, then
+  defended what it kept (units ramp 6->253; wins came holding 2-3
+  cities). 6/8 games = one clean switch held; 2/8 oscillated (memoryless
+  flip-flops). turtle_pivot switched at exactly t30 in 8/8 games (clock
+  trigger + cities>=2 true since t10 = deterministic) and founded ZERO
+  cities after — the map's founding space was gone; it played flood's
+  build order from a 2-city base for 130 turns.
+- PER-BOT FLASH AUDIT (new lane, one glm-5.3-flash analyst per seat;
+  facts computed locally, model audits — research/iterations/003/deep/):
+  all four EXECUTING=True; execution fidelity turtler 8/10 (cap honored
+  perfectly, exact tech curve, monotonic unit treadmill), flood_pivot 6,
+  turtle_pivot 4, hyperwide_flood 3/10.
+- AUDIT'S BIG CATCH: hyperwide_flood's thesis NEVER materialized —
+  expected 5-6 cities by t30, actual peak 3 in every game INCLUDING its
+  batch-002 championship (founding space exhausts at 4 seats). Its
+  batch-002 win was opposition-dependent; against turtler + another
+  early expander it collapsed (1 win) and converted production into
+  60-131 units instead of settlers. The champion's stated theory of
+  victory was wrong even when it won.
+- Universal structural findings (all four seats): research lists
+  exhaust by t20-30 and science freezes for 130+ turns; late-game unit
+  overproduction regardless of doctrine (100-250 units by t160); pop
+  plateaus mid-game everywhere. The scalar's late game is a unit-count
+  contest between defenses, not an economy contest.
+- Batch-004 candidates (flash-recommended, grounded): pivot hysteresis
+  (dwell time / 2-consecutive-check triggers), radius-restricted threat
+  predicates (exclude scouts), unit caps tied to city count, research
+  overflow after list completion, earlier signal-gated turtle_pivot
+  (t12-18), settler escorts. H3/H4 registered in hypotheses.json.
+

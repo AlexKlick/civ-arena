@@ -1,0 +1,42 @@
+{
+ "facts_summary": {
+  "games": 8,
+  "mean_rank": 2.625,
+  "wins": 1
+ },
+ "input_tokens": 8422,
+ "model": "glm-5.3-flash",
+ "output_tokens": 3248,
+ "status": "ok",
+ "verdict": {
+  "deviations": [
+   "Thesis target of 5-6 cities by turn 30 was missed by 100% of games; best case was 3 cities (reached only at t20, not the '2->3 by t10' signature), and half the games never founded a third city at all.",
+   "Instead of converting production into settlers, from ~t30 onward the bot converted production into units (60-131 by t160 vs signature 5-8), abandoning the compounding city/pop/science engine the doctrine is built on.",
+   "Pop plateaus by t30-t50 in every game (13, 15, 16, 19, 22, 25), so the claimed 'steepest population and tech curves in the field' held only for the first ~25 turns; techs froze at 8 for 130+ turns.",
+   "The bot had no response when ring-3 space ran out - the doctrine's own stated failure mode - and just idled production into units rather than relaxing expand_ring or switching build_order."
+  ],
+  "evidence": [
+   "Early game tracks the build order: cities hit 2 by t10 in all 8 games and 3 by t20 in 4 of 8 (s947381-r0/r1, s300003-r2/r3), with units still low at t20 (5-7) as the doctrine's 5-8 unit band predicts.",
+   "Tech curve matches the 8-tech research list: every game reaches 8 techs by t20-t30 (e.g., s947381-r1: 3 techs at t10, 8 at t20), then goes flat exactly as the finite list implies.",
+   "The 120-gate granary-buy sawtooth is visible: s947381-r0 gold oscillates 150/55/140/70/160/90/20 between t30-t90; s300003-r0 gold builds 154->177 then crashes to 27 at t90 on a large purchase.",
+   "The core flood never happened: no game ever exceeded 3 cities across all 160 turns, and 4 of 8 games (s947381-r2, s947381-r3, s300003-r1, plus none past 2) sat at 2 cities for every sample vs the thesis of 5-6 cities by turn 30.",
+   "Unit production diverged hard from 'stuck around 5-8': units grow almost linearly late game to 116 (s947381-r0), 103 (r1), 128 (s300003-r2), 131 (s300003-r3) - roughly 0.7-0.8 units/turn for 140 turns.",
+   "Pop and scalar plateau once expansion dies: s947381-r0 pop is flat at 22 from t50-t160; the best game (s300003-r2, rank 1) still shows pop flat at 25 from t80 and scalar gains coming mostly from unit count.",
+   "No adaptation occurred anywhere: doctrines_played and switches are empty in all 8 games, including the two games stuck at 2 cities where the failure mode (founding space exhausted inside ring 3) plainly triggered."
+  ],
+  "executing_strategy": true,
+  "execution_score_0_10": 3,
+  "pivot_assessment": {
+   "fired": false,
+   "flip_flops": 0,
+   "notes": "No switches were recorded in any of the 8 games (switches: [] throughout), so there was no adaptive behavior to evaluate; the bot played one static plan even in the four games where it stayed at 2 cities for 160 turns, exactly the contingency its failure_mode says requires a response.",
+   "timing_sensible": false
+  },
+  "recommended_changes": [
+   "Add a settler-blocked trigger: if no valid founding site exists within expand_ring=3 for N turns (e.g., 8), either escalate expand_ring to 4-5 or switch build_order to economic/defense; currently blocked expansion silently degrades into ~0.75 units/turn with no payoff.",
+   "Enforce a soft unit cap (~2x cities) so production returns to settlers/city infrastructure once the 1 archer + 1 spear per city garrison exists; games show 100+ units guarding 3 cities.",
+   "Address the anti-settler failure mode directly by pairing each settler with an escort (alternate SETTLER/SPEARMAN in build_order) instead of building settlers naked, and only start a settler when a ring-3 site is confirmed visible.",
+   "Extend or repurpose after the 8 listed techs complete (techs flat at 8 from ~t20-t30 onward); with cities capped, science = 2*pop/city stalls, so the doctrine needs either more tech targets or a pop-growth lever (happier/food focus) to keep the curve compounding."
+  ]
+ }
+}

@@ -1,0 +1,5 @@
+{"attempt": 1, "call_id": "578195c49ffc4eed93dcb7a708458f0a", "input_tokens": 83, "model": "glm-5.3-flash", "output_tokens": 57, "purpose": "probe", "status": "ok"}
+{"attempt": 1, "call_id": "93b08463390c48bb88175bbddb8c4dd0", "input_tokens": 8422, "model": "glm-5.3-flash", "output_tokens": 3248, "purpose": "deep:hyperwide_flood", "status": "ok"}
+{"attempt": 1, "call_id": "39d9470d9efb4bbe84692f0ec44d5bba", "input_tokens": 8225, "model": "glm-5.3-flash", "output_tokens": 3027, "purpose": "deep:turtler", "status": "ok"}
+{"attempt": 1, "call_id": "eab2996fadb34226974b5ecbf9e717f6", "input_tokens": 9319, "model": "glm-5.3-flash", "output_tokens": 5480, "purpose": "deep:flood_pivot", "status": "ok"}
+{"attempt": 1, "call_id": "f13b5b29cf014f50b97b7fc9521d4310", "input_tokens": 9019, "model": "glm-5.3-flash", "output_tokens": 4684, "purpose": "deep:turtle_pivot", "status": "ok"}

@@ -1,0 +1,40 @@
+{
+ "facts_summary": {
+  "games": 8,
+  "mean_rank": 2.0,
+  "wins": 2
+ },
+ "input_tokens": 8225,
+ "model": "glm-5.3-flash",
+ "output_tokens": 3027,
+ "status": "ok",
+ "verdict": {
+  "deviations": [
+   "No adaptive behavior ever fired: doctrines_played=[] and switches=[] in all 8 games; the bot is a pure static turtler with no response to being behind (s300003-r2 stalled at pop 11, 129 units, scalar 2009, rank 3) or ahead.",
+   "Unit production is a rigid linear treadmill (~+11 units per 10 turns in nearly every game) regardless of game state; by t=160 there are 129-177 units for only 2 cities, well past any plausible defensive need, and gold repeatedly bottoms out at 45-77 (e.g., s947381-r0 at t=120, s300003-r2 at t=90), suggesting maintenance drag from the oversized army.",
+   "After the 8-tech list completes (~t=20), research output has no replacement use for the remaining 140 turns; pop plateaus by t=60-70 in most games, so the late-game economy adds nothing beyond unit spam.",
+   "Worst seed (s300003-r2) shows the doctrine has no catch-up lever: pop stuck at 11, slowest unit ramp (129 final), and the only rank-3 besides s947381-r0 \u2014 behavior identical to winning games despite the different position."
+  ],
+  "evidence": [
+   "City cap honored perfectly: cities=2 at every sample in all 8 games (t=10 through t=160), never exceeding max_cities: 2.",
+   "Tech curve matches the doctrine's finite research list exactly: techs plateau at 8 in every game, reached by t=20 in 7 of 8 games (s300003-r2 by t=30), consistent with completing MINING through IRRIGATION and then stopping.",
+   "Unit buildup is the turtle signature: monotonic unit growth from ~3 at t=10 to 129-177 at t=160 with zero declines (e.g., s947381-r1: 2\u2192177; s300003-r3: 3\u2192175), consistent with march:false + fortify_idle massing defenders that never leave or die.",
+   "Gold cycles in 30-60g swings (e.g., s947381-r2: 139\u219299\u219259\u219299\u2192139\u219259) consistent with periodic purchases per purchase_pref and warrior buys rather than hoarding.",
+   "Pop ramps early then plateaus at 11-16 across all games, and scalar climbs a steady ~+100-170 per 10 turns driven mainly by unit accumulation, ending 2009-2628 with mean rank 2.0 and 2 wins \u2014 the turtle scaling delivered mid-to-top finishes."
+  ],
+  "executing_strategy": true,
+  "execution_score_0_10": 8,
+  "pivot_assessment": {
+   "fired": false,
+   "flip_flops": 0,
+   "notes": "Zero switches and zero doctrines_played across all 8 recorded games. This seat ran the static turtler doctrine start-to-finish every game, so there is no pivot timing or flip-flop behavior to evaluate. Given identical behavior in both the rank-1 and rank-3 games, the absence of any adaptive trigger is the main ceiling on this doctrine.",
+   "timing_sensible": false
+  },
+  "recommended_changes": [
+   "Add a unit cap or garrison threshold (e.g., stop military builds near ~1 unit per pop point, or ~60-80 total for 2 cities) and redirect overflow production to GRANARY/infrastructure; the current +11 units/10t treadmill runs to t=160 with gold floors of 45-59.",
+   "Give GRANARY priority over MONUMENT in purchase_pref (currently 2nd): pop plateaus at 11-16 in every game and pop is the main non-unit scalar contributor after techs finish at t=20.",
+   "Add a research overflow rule after the 8-tech list completes (~t=20): convert science to gold/wealth or an optional tech list so 140 idle turns of research capacity aren't wasted.",
+   "Add a deficit trigger: if scalar trails the field at a mid-game checkpoint (as in s300003-r2, scalar 1099 at t=60 vs 1307-1388 in same-seed peers), allow a third city or shift to economic purchases instead of replaying identical unit spam into a rank-3."
+  ]
+ }
+}

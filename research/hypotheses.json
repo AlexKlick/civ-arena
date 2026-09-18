@@ -33,5 +33,31 @@
   },
   "status": "open",
   "evidence": "batch-002 trajectories: cities flat at 2 in every inspected match while gold sawtooths 38-173 and CLEARS 160 between gate turns (t=25: 162, t=35: 173 in batch-002-s300003-r2); drops of ~110-120 gold right after gate turns match GRANARY purchases exactly (rules.py purchase_cost = 2x production: SETTLER 160, GRANARY 120)"
+ },
+ {
+  "id": "H3",
+  "statement": "hyperwide_flood's batch-002 dominance was opposition-dependent, not thesis-achieved: its expected signature (5-6 cities by t30) never materialized in ANY game across batches 002 and 003 (peak 3 cities; founding space exhausts at 4 seats). Against a defender-competent field it collapses and converts production to units.",
+  "prediction": "In any roster containing turtler or a turtler-like defense plus a second early expander, static hyperwide_flood finishes below both; its unit count exceeds 2x its city count by t60.",
+  "test": {
+   "kind": "roster_swap",
+   "doctrine": "hyperwide_flood",
+   "param": "opposition composition",
+   "value": "defender + second expander present"
+  },
+  "status": "supported",
+  "evidence": "batch-003: flood 1 win / mean_rank 2.625 vs turtler 2.0 and flood_pivot 1.5; deep-dive audit execution score 3/10, thesis missed by 100% of games across both batches"
+ },
+ {
+  "id": "H4",
+  "statement": "Pivot value is dominated by trigger source and timing, not by the pivot itself: state-triggered early pivots (pressure detection t10-t30) beat both static parents; clock-triggered late pivots (t30 with no threat check) lose to both.",
+  "prediction": "Adding hysteresis (dwell time or 2-consecutive-check triggers) to flood_pivot removes its t20-t40 oscillations and improves mean_rank further; moving turtle_pivot's switch to a state signal at t12-18 lifts it above static turtler.",
+  "test": {
+   "kind": "param_change",
+   "doctrine": "flood_pivot + turtle_pivot",
+   "param": "trigger predicates + hysteresis",
+   "value": "state-gated, dwell-time"
+  },
+  "status": "open",
+  "evidence": "batch-003: flood_pivot 5/8 wins mean_rank 1.50 (pivots t10-t30 on pressure, 6/8 single clean switch); turtle_pivot 0/8 mean_rank 3.875 (deterministic t30 clock switch, zero post-pivot foundings); flash audit timing_sensible=False for both"
  }
 ]
