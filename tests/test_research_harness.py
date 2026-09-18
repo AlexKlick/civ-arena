@@ -9,7 +9,7 @@ import pytest
 
 from civ_arena.config import parse_config
 from civ_arena.research.aggregate import aggregate, seat_ranks
-from civ_arena.research.matrix import latin_seats, plan_batch
+from civ_arena.research.matrix import latin_seats, plan_batch, seat_spec
 from civ_arena.research.runner import config_doc, run_game, summarize_existing
 
 ROSTER = ["turtler", "turtler", "expansionist", "expansionist"]
@@ -33,7 +33,7 @@ def test_plan_batch_shape_and_ids() -> None:
     assert len(set(ids)) == 8
     for seed in (7, 9):
         block = [p for p in plans if p.seed == seed]
-        pairs = {(pid, d) for p in block for pid, d in p.seats}
+        pairs = {(pid, spec.label) for p in block for pid, spec in p.seats}
         assert pairs == {(pid, d) for pid in range(4)
                          for d in ROSTER}, "latin coverage within seed block"
     with pytest.raises(ValueError):
@@ -127,3 +127,57 @@ async def test_run_game_end_to_end_tiny(tmp_path) -> None:
     # and summarize_existing reproduces the same row
     again = summarize_existing(plan, run_dir)
     assert again == row
+
+
+# --- adaptive pivot seats in research rosters (batch-003 shape) -------
+
+PIVOT = {
+    "spec_id": "flood_pivot",
+    "initial": "hyperwide_flood",
+    "interval": 5,
+    "triggers": [{"when": {"min_foreign_units_seen": 3},
+                  "switch_to": "turtler"}],
+}
+
+
+def test_seat_spec_normalizes_strings_and_mappings() -> None:
+    static = seat_spec("turtler")
+    assert static.label == "turtler" and static.policy == "turtler"
+    assert static.adaptive is None
+    pivot = seat_spec(PIVOT)
+    assert pivot.label == "flood_pivot" and pivot.policy == "adaptive"
+    assert pivot.adaptive["initial"] == "hyperwide_flood"
+    assert pivot.adaptive["triggers"] == PIVOT["triggers"]
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        seat_spec({"initial": "turtler"})  # no spec_id
+    with _pytest.raises(ValueError):
+        seat_spec({"spec_id": "x", "policy": "turtler"})  # maps are adaptive
+    with _pytest.raises(ValueError):
+        seat_spec(7)
+
+
+def test_mixed_roster_plans_and_parses() -> None:
+    roster = ["hyperwide_flood", "turtler", PIVOT, dict(
+        PIVOT, spec_id="turtle_pivot", initial="turtler",
+        triggers=[{"when": {"turn_gte": 30, "own_cities_gte": 2},
+                   "switch_to": "hyperwide_flood"}])]
+    plans = plan_batch("b3", roster, [947381])
+    assert len(plans) == 4
+    labels = {spec.label for p in plans for _, spec in p.seats}
+    assert labels == {"hyperwide_flood", "turtler",
+                      "flood_pivot", "turtle_pivot"}
+    # the full config path: adaptive blocks must survive parse_config's
+    # DOCTRINES/predicate validation (flood_pivot seeds are real doctrines)
+    doc = config_doc(plans[0])
+    spec = parse_config(doc)
+    adaptive = [a for a in spec.agents if a.policy == "adaptive"]
+    assert len(adaptive) == 2
+    assert {a.agent_id.rsplit("-", 1)[0] for a in adaptive} == {
+        "flood_pivot", "turtle_pivot"}
+    # pivot labels never masquerade as their parent doctrines in rows
+    for plan in plans:
+        row_doc = config_doc(plan)
+        assert all(a["policy"] in ("adaptive", "hyperwide_flood", "turtler")
+                   for a in row_doc["agents"])

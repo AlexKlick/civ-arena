@@ -22,15 +22,18 @@ from civ_arena.research.matrix import GamePlan
 def config_doc(plan: GamePlan) -> dict[str, Any]:
     """The match config dict for one planned game (parse_config-validated)."""
     agents = []
-    for player_id, doctrine in plan.seats:
-        agents.append({
-            "agent_id": f"{doctrine}-{player_id}",
+    for player_id, spec in plan.seats:
+        agent: dict[str, Any] = {
+            "agent_id": f"{spec.label}-{player_id}",
             "player_id": player_id,
-            "policy": doctrine,
+            "policy": spec.policy,
             # config default (seed*10 + i) would double-offset by index; pin
             # the same shape explicitly so rows can cite agent seeds
             "seed": plan.seed * 10 + player_id,
-        })
+        }
+        if spec.adaptive is not None:
+            agent["adaptive"] = spec.adaptive
+        agents.append(agent)
     return {
         "match": {
             "match_id": plan.match_id,
@@ -47,17 +50,18 @@ def config_doc(plan: GamePlan) -> dict[str, Any]:
 
 
 def _row_from_summary(plan: GamePlan, summary: dict[str, Any],
-                      seats: tuple[tuple[int, str], ...]) -> dict[str, Any]:
+                      seats: tuple[tuple[int, Any], ...]) -> dict[str, Any]:
     """Integer-first per-match result row (ranks are derived in aggregate)."""
     by_pid = {entry["player_id"]: (civ, entry)
               for civ, entry in summary["scores"].items()}
     seats_doc = []
-    for player_id, doctrine in seats:
+    for player_id, spec in seats:
+        label = spec.label if hasattr(spec, "label") else spec
         civ, comp = by_pid[player_id]
         seats_doc.append({
             "player_id": player_id,
-            "agent_id": f"{doctrine}-{player_id}",
-            "doctrine": doctrine,
+            "agent_id": f"{label}-{player_id}",
+            "doctrine": label,
             "civ_name": civ,
             "scalar": scalarize(comp),
         })
@@ -110,8 +114,8 @@ async def run_game(plan: GamePlan, runs_root: Path) -> dict[str, Any]:
                 civ: {**comp, "scalar": scalarize(comp)}
                 for civ, comp in scores.items()
             },
-            # doctrine map is None everywhere until Lane E's adaptive
-            # runtime exists; recorded from day one so the schema is stable
+            # static doctrines: None; adaptive seats: the switcher's
+            # current doctrine that turn (pivot moments are visible here)
             "doctrines": {
                 str(pid): getattr(rt, "current_doctrine", None)
                 for pid, rt in arena.runtimes.items()

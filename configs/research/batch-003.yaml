@@ -1,0 +1,41 @@
+# Batch 3 — long games + pivot seats + per-bot deep-dive audit.
+#
+# 160 turns (4x batch-002): long enough for pivots to matter and for the
+# compounding curves to separate. 2 seed blocks x 4 Latin rotations = 8
+# games (same orthogonality; fewer games because each carries 4x the
+# information and wall-clock).
+#
+# Roster — every seat answers a standing question:
+#   hyperwide_flood  static champion (batch-002, 11/16 wins)
+#   turtler          static champion of batch-001b (the cross-batch clash
+#                    these two never had: flood never met turtler)
+#   flood_pivot      adaptive twin of flood: expand until punished
+#                    (units bleeding or an army at the door), then turtle.
+#                    Tests: does pivoting beat its static parent?
+#   turtle_pivot     adaptive twin of turtler: defend to turn 30, then
+#                    grow wide. Tests the opposite pivot direction.
+#
+# Pivot specs are memoryless (stateless resolve, resume-safe): flood_pivot
+# returns to flood when pressure clears — flip-flops under flickering
+# pressure are a real behavior the deep-dive analyst will see and judge.
+batch:
+  batch_id: batch-003
+  roster:
+    - hyperwide_flood
+    - turtler
+    - spec_id: flood_pivot
+      initial: hyperwide_flood
+      interval: 5
+      triggers:
+        - when: {own_units_hp_below_frac: 0.5}
+          switch_to: turtler
+        - when: {min_foreign_units_seen: 4}
+          switch_to: turtler
+    - spec_id: turtle_pivot
+      initial: turtler
+      interval: 5
+      triggers:
+        - when: {turn_gte: 30, own_cities_gte: 2}
+          switch_to: hyperwide_flood
+  seeds: [947381, 300003]
+  max_turns: 160

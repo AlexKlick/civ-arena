@@ -34,11 +34,13 @@ def load_batch(path: Path) -> dict:
     for key in ("batch_id", "roster", "seeds"):
         if key not in batch:
             raise SystemExit(f"{path}: batch.{key} is required")
-    roster = [str(r) for r in batch["roster"]]
+    roster_raw = batch["roster"]
+    if not isinstance(roster_raw, list):
+        raise SystemExit(f"{path}: batch.roster must be a list")
     seeds = [int(s) for s in batch["seeds"]]
     return {
         "batch_id": str(batch["batch_id"]),
-        "roster": roster,
+        "roster": roster_raw,  # doctrine names and adaptive seat maps mix
         "seeds": seeds,
         "max_turns": int(batch.get("max_turns", 40)),
     }
@@ -50,8 +52,8 @@ def cmd_plan(args: argparse.Namespace) -> None:
                        max_turns=batch["max_turns"])
     print(f"{len(plans)} games: {batch['batch_id']} roster={batch['roster']}")
     for plan in plans:
-        seating = ", ".join(f"seat{pid}={doctrine}"
-                            for pid, doctrine in plan.seats)
+        seating = ", ".join(f"seat{pid}={spec.label}"
+                            for pid, spec in plan.seats)
         print(f"  {plan.match_id}  seed={plan.seed} rot={plan.rotation}"
               f"  {seating}")
 
