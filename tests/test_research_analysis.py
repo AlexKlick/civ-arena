@@ -58,8 +58,8 @@ def test_validate_proposal_rejects_wrong_size_and_duplicates() -> None:
 
 def test_validate_proposal_field_rejections() -> None:
     cases = [
-        (lambda e, i: e.update(research=["ARCHERY"]), "prereq"),  # POTTERY first
         (lambda e, i: e.update(research=["NO SUCH"]), "unknown tech"),
+        (lambda e, i: e.update(research=["MINING", "MINING"]), "duplicate tech"),
         (lambda e, i: e.update(build_order=["SPACESHIP"]), "unknown item"),
         (lambda e, i: e.update(build_order=["SLINGER"]), "not player-producible"),
         (lambda e, i: e.update(doctrine_id="llm"), "reserved"),
@@ -72,6 +72,15 @@ def test_validate_proposal_field_rejections() -> None:
     for mutate, needle in cases:
         _, dropped = validate_proposal(_roster(mutate))
         assert any(needle in d for d in dropped), (needle, dropped)
+
+
+def test_validate_proposal_accepts_beeline_research_order() -> None:
+    # ARCHERY before its prereq POTTERY: legal preference-order semantics —
+    # the sim enforces prereqs at set_research time, the validator must not
+    accepted, dropped = validate_proposal(_roster(
+        lambda e, i: e.update(research=["ARCHERY", "POTTERY", "MINING"])))
+    assert accepted and dropped == []
+    assert accepted[0]["research"] == ["ARCHERY", "POTTERY", "MINING"]
 
 
 def test_proposer_rules_name_the_whole_vocabulary() -> None:

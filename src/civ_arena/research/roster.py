@@ -43,8 +43,10 @@ PROPOSER_CONTRACT = """{
 _RULES = """Rules:
 - exactly 4 doctrines, distinct doctrine_id (lowercase snake_case)
 - doctrine_id must not be llm, planner, or adaptive (reserved policies)
-- research: an ordered list drawn from TECHS (prereqs must appear earlier
-  in the list); the doctrine re-issues the FIRST entry still available
+- research: an ordered PREFERENCE list drawn from TECHS — each turn the
+  doctrine re-issues the FIRST entry that is currently researchable, and
+  the sim itself enforces tech prereqs, so you may beeline (put a late
+  unlock first; its prereq is researched while the unlock is locked)
 - build_order / purchase_pref: items drawn from units and buildings the
   sim can produce
 - max_cities: 1..6; aggression: 0..6 attacks per turn (default 2);
@@ -61,6 +63,13 @@ def proposer_rules() -> str:
 
 
 def _research_ok(research: Any) -> str | None:
+    """Membership + duplicates only — the list is a PREFERENCE over the
+    currently-researchable techs (run_policy picks the first entry still
+    in available_research), and the SIM enforces prereqs at set_research
+    time. A beeline ordering (ARCHERY before POTTERY = 'prefer the archer
+    unlock the moment it opens') is legal and meaningful; the first
+    validator draft wrongly required prereq-earlier ordering and dropped
+    two well-formed flash doctrines for it (2026-09-17, iteration 000)."""
     if not isinstance(research, list) or not research:
         return "research must be a non-empty list"
     seen: list[str] = []
@@ -69,9 +78,6 @@ def _research_ok(research: Any) -> str | None:
             return f"unknown tech {tech!r}"
         if tech in seen:
             return f"duplicate tech {tech!r}"
-        missing = [p for p in TECHS[tech]["prereq"] if p not in seen]
-        if missing:
-            return f"{tech}: prereqs {missing} not earlier in research order"
         seen.append(tech)
     return None
 
