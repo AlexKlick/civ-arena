@@ -1,0 +1,24 @@
+[
+ {
+  "id": "H1",
+  "statement": "The batch-1 seat-2 constant-last-place anomaly (mean_rank 4.0 in all 16 games) is caused by duel-hardcoded doctrine geometry (march target (-4,3) sitting beside seat-2 territory), not by doctrine quality.",
+  "prediction": "After the geometry seam (3015cb4), the same 16-game baseline shows seat-2 mean_rank < 3.5 (was 4.0) and seat spread across seats shrinks.",
+  "test": {
+   "kind": "seed_plan",
+   "doctrine": "baseline",
+   "param": "rerun-batch-001-post-seam",
+   "value": 16
+  },
+  "status": "confirmed",
+  "outcome": {
+   "batch": "batch-001b",
+   "games": "16/16 clean",
+   "seat2_pooled_mean_rank": 2.875,
+   "pooled_seat_means": {"seat0": 2.375, "seat1": 2.438, "seat2": 2.875, "seat3": 2.312},
+   "seat_spread_before": 2.75,
+   "seat_spread_after": 0.563,
+   "secondary": "with the seat confound removed the doctrine gap widened: turtler mean_rank 1.75 (14 wins) vs expansionist 3.25 (2 wins); pre-seam 2.31 vs 2.66",
+   "residual": "seat2 remains mildly elevated (2.875 vs ~2.37 pooled elsewhere) - n=16, descriptive only; candidate for a later paired test if it persists across rosters"
+  }
+ }
+]

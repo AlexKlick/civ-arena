@@ -1,0 +1,14 @@
+# Batch 1b — the H1 rerun: batch-001's exact seed/rotation plan, re-run on
+# the geometry seam (3015cb4: 4-seat march/settler/corner targets stopped
+# being duel-hardcoded literals).
+#
+# H1 (research/hypotheses.json): batch-001's seat-2 structural anomaly
+# (mean_rank 4.0 in ALL 16 games, both doctrines) was caused by the
+# hardcoded geometry, not by seat 2 itself. Falsifiable prediction: post-seam
+# seat-2 mean_rank < 3.5. Everything else (roster, seeds, rotations, turns)
+# is identical so the diff is attributable to the seam alone.
+batch:
+  batch_id: batch-001b
+  roster: [turtler, turtler, expansionist, expansionist]
+  seeds: [947381, 300003, 300011, 300029]
+  max_turns: 40
