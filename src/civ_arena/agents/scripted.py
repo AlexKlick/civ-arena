@@ -161,6 +161,34 @@ DOCTRINES: dict[str, dict[str, Any]] = {
                         "first also converts every banked settler purchase "
                         "into a dead 160-gold liability.",
     },
+    # settler_broker + the H2 fix, field-identical otherwise: the purchase
+    # gate waits for the bank floor instead of opening at 120.
+    "settler_broker_banked": {
+        "research": ["POTTERY", "MINING", "ARCHERY", "BRONZE_WORKING",
+                     "WRITING", "MASONRY", "ANIMAL_HUSBANDRY", "IRRIGATION"],
+        "march": False,
+        "fortify_idle": True,
+        "build_order": ["MONUMENT", "GRANARY", "SETTLER", "ARCHER"],
+        "purchase_pref": ["SETTLER", "GRANARY", "MONUMENT", "ARCHER"],
+        "max_cities": 4,
+        "aggression": 1,
+        "expand_ring": 2,
+        "bank_floor": 160,
+        "thesis": "Identical market thesis to settler_broker, minus the "
+                  "self-defeating gate: purchases wait for the bank floor "
+                  "(160) so the settler bank is never spent on granaries "
+                  "first (H2's registered fix, batch-004 test seat).",
+        "expected_signature": "Gold climbs past 160 before each gate turn "
+                              "and drops by exactly 160 (SETTLER), discrete "
+                              "founding jumps earlier and more often than "
+                              "settler_broker's; granary purchases near "
+                              "zero until max_cities saturates.",
+        "failure_mode": "If the gate now rarely opens (income below 160 "
+                        "between gate turns) the seat banks gold it never "
+                        "spends — the fix can starve purchases the old "
+                        "gate would have made; that asymmetry is exactly "
+                        "what batch-004 measures.",
+    },
 }
 
 # The flash-proposed doctrine ids (research loop, iteration 000) — pinned so
@@ -260,7 +288,13 @@ async def run_policy(runtime: Any, facade: Any,
         item = _pick_build(opts, doctrine, len(cities))
         if item:
             await facade.set_city_production(city["city_id"], item)
-        if turn % 3 == 0 and overview["you"]["gold"] >= 120:
+        # H2 (research/RESEARCH-LEDGER.md): a flat 120 gate opens while
+        # SETTLER (160) is unaffordable, and the next pref GRANARY (exactly
+        # 120) drains the settler bank before it can ever reach 160 on a
+        # gate turn. bank_floor raises the gate to the top preference's
+        # cost, so when the gate opens the first affordable pick IS the top.
+        floor = doctrine.get("bank_floor", 120)
+        if turn % 3 == 0 and overview["you"]["gold"] >= floor:
             opts = await facade.get_available_production(city["city_id"])
             item = _pick_purchase(opts, doctrine)
             if item:

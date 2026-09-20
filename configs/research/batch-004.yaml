@@ -1,0 +1,50 @@
+# Batch 4 — H2's fix and H4's hysteresis, head-to-head with the incumbents.
+#
+# 160 turns (batch-003 length), 4 seed blocks x 4 Latin rotations = 16 games
+# (double batch-003's n at the same per-game wall-clock; every question here
+# is a paired comparison that benefits from the extra seeds).
+#
+# Roster — every seat answers a standing question:
+#   turtler              static benchmark (batch-001b champion, the parent
+#                        both pivots switch into)
+#   flood_pivot          batch-003 incumbent champion VERBATIM (hp<0.5 or
+#                        >=4 foreign units -> turtler). The H4a comparison
+#                        arm: same field, same seeds as its challenger.
+#   flood_pivot_sticky   H4a challenger: hysteresis as stickiness within the
+#                        memoryless design — ONE trigger at the lowest
+#                        threshold (any foreign unit seen -> turtler), so
+#                        the pivot can never oscillate under flickering
+#                        pressure; it returns to flood only when contact
+#                        fully clears. True dwell-time hysteresis needs the
+#                        deferred history-dependent trigger extension; this
+#                        is its memoryless proxy (batch-003: 6/8 wins came
+#                        from exactly one clean early switch).
+#   settler_broker_banked  H2's registered fix: purchase gate holds for the
+#                        bank floor (160) so the settler bank is never
+#                        spent on granaries first. Prediction: >=3 cities
+#                        by t25 in the majority of games, mean_rank up
+#                        >=0.5 vs settler_broker's batch-002 showing,
+#                        granary purchases near zero.
+#
+# Registered predictions: H2 and H4 in research/hypotheses.json.
+batch:
+  batch_id: batch-004
+  roster:
+    - turtler
+    - spec_id: flood_pivot
+      initial: hyperwide_flood
+      interval: 5
+      triggers:
+        - when: {own_units_hp_below_frac: 0.5}
+          switch_to: turtler
+        - when: {min_foreign_units_seen: 4}
+          switch_to: turtler
+    - spec_id: flood_pivot_sticky
+      initial: hyperwide_flood
+      interval: 5
+      triggers:
+        - when: {min_foreign_units_seen: 1}
+          switch_to: turtler
+    - settler_broker_banked
+  seeds: [409921, 587233, 731447, 881029]
+  max_turns: 160
