@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from civ_arena.game.civ6.response_parser import drop_status_rows
+
 
 def _identity(player: int, turn: int, seats: tuple[int, ...]) -> str:
     if (type(player) is not int or type(turn) is not int or not 0 < turn < 2**53
@@ -106,7 +108,10 @@ async def _rpc(conn, operation, player, turn, seats):
                     raise RuntimeError("human handoff VM unavailable or ambiguous")
                 rows = await conn._locked_execute(indices[0], lua, 5)
                 expected = f"HUMAN_HANDOFF|{token}|{operation}|{player}|{turn}|observed"
-                if rows != [expected]:
+                # An interleaved mod status print (AMBIENT_WINDOW et al) is
+                # noise, not a mismatch — chain match-001's death. Anything
+                # else unexpected still fails the exact-shape check below.
+                if drop_status_rows(list(rows)) != [expected]:
                     raise RuntimeError("human handoff receipt missing or mismatched")
     except BaseException:
         # A following game action must never reuse an ambiguous response stream.
