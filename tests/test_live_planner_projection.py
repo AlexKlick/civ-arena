@@ -184,8 +184,9 @@ class TestLiveUnitsProjection:
         # into Cantor-pair ints before belief.observe_units sees them; the
         # old test path left them as strings, which crashed build_state_doc's
         # `int(u[1:])` lookup.
-        from civ_arena.planner.entity_boundary import EntityBoundary
         import asyncio
+
+        from civ_arena.planner.entity_boundary import EntityBoundary
 
         async def _units():
             return projected

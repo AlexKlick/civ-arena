@@ -44,16 +44,6 @@ from collections.abc import Callable
 from typing import Any
 
 from civ_arena.canonical import state_hash as _sha
-
-# M18-streaming: log Moonlight jitter events so dispatch.log captures them
-# as evidence (not noise). Same convention as vendor/connection.py:25.
-log = logging.getLogger(__name__)
-
-# Wire-retry knobs for transient empty responses (Moonlight streaming adds
-# latency spikes of 3-5s where the Lua executed but the response is lost
-# in the IPC hop). 3 attempts, 500ms apart, then let parse_act raise.
-_WIRE_RETRY_MAX = 3
-_WIRE_RETRY_SLEEP_S = 0.5
 from civ_arena.game.adapter import (
     ActionCommand,
     ActionResult,
@@ -70,6 +60,16 @@ from civ_arena.game.terrain_metadata import (
     static_tile_fields,
     visible_tile_fields,
 )
+
+# M18-streaming: log Moonlight jitter events so dispatch.log captures them
+# as evidence (not noise). Same convention as vendor/connection.py:25.
+log = logging.getLogger(__name__)
+
+# Wire-retry knobs for transient empty responses (Moonlight streaming adds
+# latency spikes of 3-5s where the Lua executed but the response is lost
+# in the IPC hop). 3 attempts, 500ms apart, then let parse_act raise.
+_WIRE_RETRY_MAX = 3
+_WIRE_RETRY_SLEEP_S = 0.5
 
 _LIVE_POINTER = (
     "live FireTuner support is not implemented yet — see "

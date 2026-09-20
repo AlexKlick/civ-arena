@@ -53,7 +53,9 @@ GameInfo={Units={[1]={UnitType='UNIT_WARRIOR'}}}
                                          frozenset({'99,0'}))
     assert {u['unit_id'] for u in visible} == {'u0:131073', 'u12:131073', 'u63:131073'}
     by_owner = {u['owner_id']: u for u in visible}
-    assert by_owner[0]['is_barbarian'] is False
+    # 2af3804 pinned the contract: is_barbarian is FOREIGN-only
+    # (visibility.py FOREIGN_UNIT_FIELDS) — own rows stay clean.
+    assert 'is_barbarian' not in by_owner[0]
     assert by_owner[12]['is_barbarian'] is False
     assert by_owner[63]['is_barbarian'] is True
     assert 'movement' not in by_owner[63]
