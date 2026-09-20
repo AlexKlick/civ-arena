@@ -130,3 +130,42 @@ Append-only record of the research loop: one section per iteration, written by t
   overflow after list completion, earlier signal-gated turtle_pivot
   (t12-18), settler escorts. H3/H4 registered in hypotheses.json.
 
+
+## Iteration 004 — H2 refuted, the incumbent pivot replicates (2026-09-20)
+
+- Batch-004 (26cf3a9): 160 turns, 4 seed blocks x 4 Latin rotations,
+  16/16 clean. Roster: turtler (static benchmark) + flood_pivot (the
+  batch-003 incumbent VERBATIM) + flood_pivot_sticky (hysteresis as
+  stickiness: single {min_foreign_units_seen: 1} trigger, returns to
+  flood only when contact fully clears — the memoryless proxy for the
+  deferred dwell-time extension) + settler_broker_banked (H2's fix:
+  doctrine-level bank_floor=160; the gate waits for the top preference).
+- HEADLINE — H2 REFUTED IN ITS STRONG FORM. The mechanism was real but
+  not the binding constraint: the banked broker's gold clears 160 in
+  13/16 games (peaks 148-213, so purchases CAN fire) yet cities@t25 =
+  3 in only 4/16 (prediction: majority; old broker was 2/16-of-16 at
+  2.00, banked mean 2.25). Mean_rank 3.9375, 0/16 wins — no >=0.5
+  improvement. Founding-space competition (H3's mechanism) dominates a
+  gold-banking strategy: seats founding via production from turn 1 take
+  the legal spots before a banked 160-gold settler can walk to one.
+- H4A — STICKINESS IS NOT THE IMPROVEMENT. flood_pivot_sticky 5/16,
+  mean_rank 2.0 — beats turtler (3/16, 2.125) but does NOT beat the
+  incumbent dual-trigger flood_pivot (8/16, 1.875). Always-turtle-on-
+  first-contact is better than the late clock pivot (turtle_pivot 0/8)
+  but worse than pressure-responsive pivoting: the incumbent's
+  hp-or-count triggers capture "punished enough to stop" better than
+  "any contact". The true dwell-time/2-check extension remains
+  untested (needs the history-dependent trigger machinery).
+- THE INCUMBENT REPLICATES: flood_pivot wins 8/16 at rank 1.875
+  (batch-003: 5/8 at 1.50, overlapping field composition). The
+  state-triggered pivot result is now n=24 across two batches — the
+  loop's most robust finding alongside H1/H3.
+- Seat decomposition: flood_pivot@seat2 = 3.0 vs @seat1 = 1.0 (n=4
+  cells) — the seat-2 mild elevation from batch-001b's residual is
+  visible again in one doctrine; descriptive only.
+- Batch-005 candidates from this batch's evidence: (a) H3-directed —
+  a broker that founds via PRODUCTION early and banks LATE (bank_floor
+  only after own_cities >= 3); (b) the research-overflow fix now that
+  every doctrine's science freezes by t30; (c) unit caps tied to city
+  count (the t160 unit treadmill); (d) settler escorts (purchased
+  settlers walking through contested space).

@@ -31,7 +31,17 @@
    "param": "purchase bank floor (scripted.py gate, needs a doctrine-level opt-in field)",
    "value": 160
   },
-  "status": "open",
+  "status": "refuted",
+  "outcome": {
+   "batch": "batch-004",
+   "doctrine": "settler_broker_banked",
+   "games": "16/16 clean",
+   "cities_t25_majority": "4/16 >= 3 (prediction: majority); old broker 16/16 at 2",
+   "mean_rank": 3.9375,
+   "wins": 0,
+   "gold_peaks": "148-213; clears 160 in 13/16 games - the bank CAN fire",
+   "verdict": "mechanism real, outcome refuted: the gate was not the binding constraint on expansion; founding-space competition (H3) dominates gold banking"
+  },
   "evidence": "batch-002 trajectories: cities flat at 2 in every inspected match while gold sawtooths 38-173 and CLEARS 160 between gate turns (t=25: 162, t=35: 173 in batch-002-s300003-r2); drops of ~110-120 gold right after gate turns match GRANARY purchases exactly (rules.py purchase_cost = 2x production: SETTLER 160, GRANARY 120)"
  },
  {
@@ -57,7 +67,13 @@
    "param": "trigger predicates + hysteresis",
    "value": "state-gated, dwell-time"
   },
-  "status": "open",
-  "evidence": "batch-003: flood_pivot 5/8 wins mean_rank 1.50 (pivots t10-t30 on pressure, 6/8 single clean switch); turtle_pivot 0/8 mean_rank 3.875 (deterministic t30 clock switch, zero post-pivot foundings); flash audit timing_sensible=False for both"
+  "status": "partially_tested",
+  "outcome": {
+   "batch": "batch-004",
+   "hysteresis_proxy": "flood_pivot_sticky (single min_foreign_units_seen>=1 trigger, memoryless stickiness): 5/16, mean_rank 2.0 - beats turtler, does NOT beat the incumbent",
+   "incumbent_replication": "flood_pivot 8/16 wins mean_rank 1.875 (batch-003: 5/8, 1.50) - n=24 across two batches",
+   "verdict": "stickiness is not the improvement; the incumbent's dual hp/count pressure triggers capture 'punished enough' better than 'any contact'. True dwell-time / 2-consecutive-check hysteresis remains untested (needs the history-dependent trigger extension)"
+  },
+  "evidence": "batch-003: flood_pivot 5/8 wins mean_rank 1.50 (pivots t10-t30 on pressure, 6/8 single clean switch); turtle_pivot 0/8 mean_rank 3.875 (deterministic t30 clock switch, zero post-pivot foundings); flash audit timing_sensible=False for both; batch-004 results.md per-strategy table"
  }
 ]
