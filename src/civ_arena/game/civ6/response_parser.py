@@ -94,6 +94,36 @@ def _coerce_strict(value: str) -> Any:
     return _coerce(value)
 
 
+# The mod's complete non-ledger print vocabulary (every print() in
+# PuppeteerMod.lua except the LEDGER/AMBIENT data rows). Hooks fire
+# mid-request, so any of these can land between a dump (or receipt)
+# command and its read — the M18 match-012 race, which killed chain
+# matches 001 (HUMAN_HANDOFF receipt) and 003 (ledger dump) at the same
+# round-8 hand-off. They are STATUS prints, not response data: drop
+# them from response reads. Torn LEDGER/AMBIENT rows still fail closed.
+# Keep in sync with the mod's prints.
+STATUS_ROW_PREFIXES = frozenset({
+    "AMBIENT_WINDOW", "ATTACH_CURRENT", "DIGEST", "ERR",
+    "FINISHED_MOVES", "FROZEN", "HANDOFF", "MOD_VERSION",
+    "PUPPET_ACTIVE", "PUPPET_SET", "SUPPORTS_AMBIENT_WINDOWS",
+    "SUPPORTS_COMMAND_DIFF", "SUPPORTS_DIGEST", "SUPPORTS_FREEZE",
+    "SUPPORTS_GUARDED_HANDOFF", "SUPPORTS_LEDGER",
+    "SUPPORTS_REWARD_RECEIPTS", "SUPPORTS_ROSTER",
+})
+
+
+def drop_status_rows(rows: list[str]) -> list[str]:
+    """Remove the mod's status prints from a response read.
+
+    Used by every exact-shape consumer (the human-handoff receipt check)
+    so an interleaved hook print is noise, not a mismatch. Anything not
+    in the vocabulary survives — an unexpected row must still fail loud
+    at the consumer's own check.
+    """
+    return [row for row in rows
+            if row.partition("|")[0].strip() not in STATUS_ROW_PREFIXES]
+
+
 def parse_ledger_lines(lines: list[str], *, qualified: bool = False) -> list[dict[str, Any]]:
     """LEDGER|/AMBIENT| rows -> MutationRecord docs.
 
@@ -108,6 +138,8 @@ def parse_ledger_lines(lines: list[str], *, qualified: bool = False) -> list[dic
         if not line or line.startswith("---END---"):
             continue
         prefix, _, rest = line.partition("|")
+        if prefix in STATUS_ROW_PREFIXES:
+            continue
         if prefix not in ("LEDGER", "AMBIENT"):
             raise ValueError(f"non-ledger row in ledger dump: {line!r}")
         parts = rest.split("|")

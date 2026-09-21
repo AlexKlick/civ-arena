@@ -337,8 +337,13 @@ def generation(connection):
 
 async def execute_once(connection, lua: str) -> list[str]:
     """No reconnect or fallback after dispatch; native client must already be ready."""
+    # Unwrap the read-correlation proxy: its one-shot semantics ride the
+    # inner transport's lock directly (the proxy only decorates the
+    # execute_read/execute_write surface, never this path).
+    from civ_arena.game.civ6.read_correlation import CorrelatedConnection
     from civ_arena.game.civ6.vendor.connection import GameConnection
-
+    while isinstance(connection, CorrelatedConnection):
+        connection = connection._inner
     if isinstance(connection, GameConnection):
         before = generation(connection)
         async with connection._lock:

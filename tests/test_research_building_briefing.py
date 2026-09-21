@@ -263,8 +263,12 @@ async def test_controller_keyword_is_auditable_and_replayed_without_new_model_to
 
 async def test_optin_observation_dispatches_one_read_and_checks_player(monkeypatch, tmp_path):
     from civ_arena.game.civ6.firetuner import FireTunerAdapter
+    from civ_arena.game.civ6.read_correlation import echoed_response
     rows = run_lua(tmp_path).stdout.splitlines()
-    connection = SimpleNamespace(execute_read=AsyncMock(return_value=rows))
+    # correlation-aware stub: echo the ARENA_READ marker of the lua it was
+    # sent, exactly like the real tuner executing the injected print
+    connection = SimpleNamespace(
+        execute_read=AsyncMock(side_effect=lambda lua, *a, **k: echoed_response(lua, rows)))
     adapter = FireTunerAdapter(conn=connection)
     value = await adapter.observe(ObserveRequest(ObserveKind.AVAILABLE_RESEARCH, 0,
                                                  research_building_briefing=True))

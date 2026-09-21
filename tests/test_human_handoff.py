@@ -133,7 +133,17 @@ async def test_ambiguous_results_never_replay_or_send_later_operations(result):
     conn.result = result
     with pytest.raises((RuntimeError, ConnectionError, OSError)):
         await hh.end_current(conn, 0, 1, (0, 1))
-    assert len(conn.calls) == 1 and conn.mod.local_player == 0
+    # 'end' (the mutating op) is never dispatched. A LOST [] read on the
+    # verify observation retries the SAME pure read with fresh tokens,
+    # bounded by hh._VERIFY_ATTEMPTS; every other shape aborts on the
+    # first dispatch (a wrong receipt is never retried).
+    if result == []:
+        assert len(conn.calls) == hh._VERIFY_ATTEMPTS
+        assert all('arena:human_handoff=verify' in code
+                   for _, code in conn.calls)
+    else:
+        assert len(conn.calls) == 1
+    assert conn.mod.local_player == 0
 
 
 async def test_lost_end_receipt_does_not_repeat_end_or_switch():
