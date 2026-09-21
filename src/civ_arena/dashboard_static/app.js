@@ -6,7 +6,9 @@
   const state = {runId: '', runPinned: false, turn: null, follow: true, filter: 'all',
     data: null, selectedCall: null, busy: false, timer: null, lastCards: '',
     callsByKey: new Map(), lastStrategy: '', expandedTurns: new Set(), expandedRuns: new Set(),
-    journalCenter: null, runHint: null};
+    journalCenter: null, runHint: null,
+    runs: [], chains: [], chainsAt: 0, showStartups: false,
+    librarySort: {key: 'updated', dir: -1}};
   const observation = tool => /^(get_|observe|read_|list_|query_|inspect_)/.test(tool || '');
   const noteTool = tool => /(diary|journal|goal|prediction|lesson|note|recall|strategy)/.test(tool || '');
   const kindOf = tool => observation(tool) ? 'Observation' : noteTool(tool) ? 'Note' : 'Action';
@@ -324,6 +326,133 @@
     });
     $('strategyChoices').replaceChildren(...panels);
   }
+  // The library reports what the records say. 'running' means events arrived in the
+  // last 30 s; the server never inspects the game process, so neither do these labels.
+  const RESULT_LABELS = {completed: 'Complete', aborted: 'Stopped', running: 'Playing now',
+    stalled: 'No recent events', incomplete: 'Incomplete record'};
+  const resultOf = run => run.results || {};
+  const numberOr = (value, fallback) => finite(value) ? value : fallback;
+  const LIBRARY_SORTS = {
+    id: run => run.id,
+    result: run => RESULT_LABELS[run.status] || humanize(run.status || ''),
+    rounds: run => numberOr(resultOf(run).completed_rounds, -1),
+    violations: run => numberOr(resultOf(run).violations_total, -1),
+    elapsed: run => numberOr(resultOf(run).elapsed_s, -1),
+    updated: run => timestamp(run.updated_at)?.getTime() || 0};
+  function selectRun(id) {
+    if (!id || id === state.runId) return;
+    state.runId = id; state.runPinned = true; state.turn = null;
+    state.selectedCall = null; state.data = null; state.lastCards = '';
+    resetJournal();
+    render(); refresh();
+  }
+  function liveRounds(run) {
+    // The selected run has parsed metrics; the others only carry their summary.
+    if (run.id === state.runId && state.data) return state.data.metrics?.completed_rounds;
+    return resultOf(run).completed_rounds;
+  }
+  function renderSpotlight() {
+    const node = $('liveSpotlight');
+    const live = state.runs.filter(run => run.status === 'running');
+    if (!live.length) { node.hidden = true; node.replaceChildren(); return; }
+    node.hidden = false;
+    const heading = append(element('div', 'spotlight-head'),
+      element('strong', 'spotlight-title', live.length === 1 ? 'A game is being played right now'
+        : `${live.length} games are being played right now`),
+      element('span', 'subtle', 'Events are still arriving. Recorded activity, not a live check of the game process.'));
+    const rows = live.map(run => {
+      const rounds = liveRounds(run);
+      const requested = resultOf(run).requested_rounds;
+      const progress = finite(rounds)
+        ? `round ${count(rounds)}${finite(requested) ? ` of ${count(requested)}` : ''}`
+        : 'rounds not recorded yet';
+      const jump = element('button', 'spotlight-jump',
+        run.id === state.runId ? 'Now showing' : 'Watch this match');
+      jump.type = 'button';
+      jump.disabled = run.id === state.runId;
+      jump.addEventListener('click', () => selectRun(run.id));
+      return append(element('div', 'spotlight-row'),
+        element('span', 'live-dot', ''),
+        append(element('div', 'spotlight-text'),
+          element('strong', '', run.id),
+          element('span', 'subtle', `${progress} · last event ${localTime(run.updated_at)}`)),
+        jump);
+    });
+    node.replaceChildren(heading, ...rows);
+  }
+  function renderChains() {
+    const node = $('chainRollups');
+    const chains = state.chains.filter(chain => chain?.totals?.matches > 0);
+    node.hidden = chains.length === 0;
+    node.replaceChildren(...chains.map(chain => {
+      const totals = chain.totals;
+      const summary = element('summary', 'chain-summary');
+      append(summary, element('strong', '', chain.id.replace(/^chain-/, '')),
+        element('span', 'subtle', `${totals.pass} pass · ${totals.partial} partial · ` +
+          `${totals.fail} fail · ${count(totals.completed_rounds)} rounds · ${duration(totals.wall_s)}`));
+      const list = element('div', 'chain-matches');
+      append(list, ...chain.matches.map(row => {
+        const known = state.runs.some(run => run.id === row.run_id);
+        const button = element('button', `chain-match ${row.verdict}`, `${row.run_id} · ${row.verdict}`);
+        button.type = 'button';
+        button.disabled = !known;
+        if (!known) button.title = 'This match is not in the served runs directory.';
+        else button.addEventListener('click', () => selectRun(row.run_id));
+        return button;
+      }));
+      const details = element('details', 'chain-group');
+      append(details, summary, list);
+      if (!chain.complete) append(details, element('p', 'subtle',
+        'This ledger stopped being readable; later rows are not shown.'));
+      return details;
+    }));
+  }
+  function libraryRow(run) {
+    const results = resultOf(run), row = element('tr', run.id === state.runId ? 'selected' : '');
+    if (run.id === state.runId) row.setAttribute('aria-current', 'true');
+    const open = element('button', 'library-open', run.id);
+    open.type = 'button';
+    open.addEventListener('click', () => selectRun(run.id));
+    const name = element('td', 'library-name');
+    append(name, open);
+    if (run.kind === 'startup') append(name, element('span', 'tag', 'launch record'));
+    const status = element('td', '');
+    append(status, badge(run.status, RESULT_LABELS[run.status] || humanize(run.status || 'Unknown')));
+    const rounds = finite(results.completed_rounds)
+      ? `${count(results.completed_rounds)}${finite(results.requested_rounds) ? ` / ${count(results.requested_rounds)}` : ''}`
+      : '—';
+    return append(row, name, status,
+      element('td', 'numeric', rounds),
+      element('td', `numeric${results.violations_total > 0 ? ' has-violations' : ''}`,
+        count(results.violations_total)),
+      element('td', 'numeric', duration(results.elapsed_s)),
+      element('td', '', run.updated_at ? localTime(run.updated_at) : '—'));
+  }
+  function renderLibrary() {
+    const visible = state.runs.filter(run => state.showStartups || run.kind !== 'startup');
+    const sort = LIBRARY_SORTS[state.librarySort.key] || LIBRARY_SORTS.updated;
+    const ordered = [...visible].sort((a, b) => {
+      // Whatever the chosen column, a match still producing events leads the table.
+      const live = (b.status === 'running') - (a.status === 'running');
+      if (live) return live;
+      const left = sort(a), right = sort(b);
+      const delta = typeof left === 'string' ? left.localeCompare(right) : left - right;
+      return delta * state.librarySort.dir;
+    });
+    $('libraryBody').replaceChildren(...(ordered.length ? ordered.map(libraryRow)
+      : [append(element('tr', ''), Object.assign(element('td', 'subtle', 'No matches recorded yet.'),
+        {colSpan: 6}))]));
+    const hidden = state.runs.length - visible.length;
+    $('libraryCount').textContent = `${ordered.length} ${ordered.length === 1 ? 'match' : 'matches'}` +
+      (hidden > 0 ? ` · ${hidden} launch ${hidden === 1 ? 'record' : 'records'} folded` : '');
+    document.querySelectorAll('[data-sort]').forEach(button => {
+      const active = button.dataset.sort === state.librarySort.key;
+      button.setAttribute('aria-pressed', String(active));
+      button.closest('th')?.setAttribute('aria-sort', active
+        ? (state.librarySort.dir === 1 ? 'ascending' : 'descending') : 'none');
+    });
+    renderChains();
+  }
   let lastMapURL = '';
   function renderMap(force = false) {
     if (!state.runId || state.turn == null) {
@@ -335,7 +464,7 @@
     const query = new URLSearchParams({id: state.runId, turn: String(state.turn)});
     if (perspective === 'spectator') query.set('spectator', '1');
     else query.set('player', perspective);
-    const url = '/map?' + query.toString();
+    const url = 'map?' + query.toString();
     $('openMap').href = url;
     $('observedMap').hidden = false;
     if (force || url !== lastMapURL) {
@@ -348,6 +477,7 @@
   }
   function render() {
     renderMetrics(); renderTurnSelect(); renderCards(); renderGraph(); renderStrategy(); renderMap();
+    renderSpotlight(); renderLibrary();
     $('emptyState').hidden = Boolean(state.data);
     runRenderers(); announceTurn();
   }
@@ -361,9 +491,13 @@
   }
   function updateRuns(runs) {
     const sorted = [...runs].sort((a, b) => (timestamp(b.updated_at)?.getTime() || 0) - (timestamp(a.updated_at)?.getTime() || 0));
+    state.runs = sorted;
     const stillPresent = sorted.some(run => run.id === state.runId);
     if (!state.runPinned || !stillPresent) {
-      const candidate = sorted.find(run => !/(^|[-_/])startup($|[-_/])/.test(run.id)) || sorted[0];
+      // A match that is still producing events is what someone opening the room
+      // wants to see; otherwise fall back to the most recent real match.
+      const candidate = sorted.find(run => run.status === 'running') ||
+        sorted.find(run => !/(^|[-_/])startup($|[-_/])/.test(run.id)) || sorted[0];
       if ((candidate?.id || '') !== state.runId) {
         state.runId = candidate?.id || ''; state.turn = null; state.selectedCall = null; state.data = null;
       }
@@ -378,16 +512,23 @@
     if (state.busy) return;
     clearTimeout(state.timer); state.busy = true;
     try {
-      const inventory = await request('/api/runs');
+      const inventory = await request('api/runs');
       if (!Array.isArray(inventory.runs)) throw new Error('Unavailable match inventory');
       updateRuns(inventory.runs);
       if (state.runId) {
         const requestedId = state.runId;
-        const data = await request(`/api/run?id=${encodeURIComponent(requestedId)}`);
+        const data = await request(`api/run?id=${encodeURIComponent(requestedId)}`);
         if (state.runId !== requestedId) return;
         if (!Array.isArray(data.turns) || !Array.isArray(data.agents)) throw new Error('Unavailable match records');
         state.data = data;
       } else state.data = null;
+      if (Date.now() - state.chainsAt > 10000) {
+        state.chainsAt = Date.now();
+        try {
+          const ledger = await request('api/chains');
+          if (Array.isArray(ledger.chains)) state.chains = ledger.chains;
+        } catch (ledgerError) { /* Roll-ups are context; never fail the match view for them. */ }
+      }
       render();
       updateConnection(true, state.data ? 'Match records synced · every 2s' : 'Connected · waiting for a match');
     } catch (error) {
@@ -397,12 +538,20 @@
       state.busy = false; state.timer = setTimeout(refresh, 2000);
     }
   }
-  $('runSelect').addEventListener('change', event => {
-    state.runId = event.target.value; state.runPinned = true; state.turn = null;
-    state.selectedCall = null; state.data = null; state.lastCards = '';
-    resetJournal();
-    render(); refresh();
+  $('runSelect').addEventListener('change', event => selectRun(event.target.value));
+  $('libraryStartups').addEventListener('change', event => {
+    state.showStartups = event.target.checked;
+    renderLibrary();
   });
+  document.querySelectorAll('[data-sort]').forEach(button => button.addEventListener('click', () => {
+    const key = button.dataset.sort;
+    // Re-clicking a column flips it; a new column starts the way that column reads
+    // best — names ascending, outcomes and times newest/largest first.
+    state.librarySort = state.librarySort.key === key
+      ? {key, dir: -state.librarySort.dir}
+      : {key, dir: key === 'id' || key === 'result' ? 1 : -1};
+    renderLibrary();
+  }));
   $('turnSelect').addEventListener('change', event => selectTurn(event.target.value));
   $('mapPerspective').addEventListener('change', () => renderMap());
   $('refreshMap').addEventListener('click', () => renderMap(true));

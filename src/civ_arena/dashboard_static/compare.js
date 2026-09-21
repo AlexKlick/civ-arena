@@ -186,7 +186,7 @@
     tree = {runId, status: 'loading', data: null};
     lastTree = '';
     renderTree();
-    fetch('/api/tech-tree', {cache: 'no-store'}).then(response => {
+    fetch('api/tech-tree', {cache: 'no-store'}).then(response => {
       if (!response.ok) throw new Error(`tech tree unavailable (${response.status})`);
       return response.json();
     }).then(payload => {

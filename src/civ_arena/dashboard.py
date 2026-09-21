@@ -38,6 +38,17 @@ MAX_TECH_NODES = 512
 MAX_TECH_EDGES = 2048
 MAX_TECH_ROW = 8
 NOTE_TOOLS = frozenset({'write_diary', 'set_goal', 'record_prediction', 'record_lesson'})
+MAX_CHAINS = 50
+MAX_CHAIN_ROWS = 200
+# Published match outcome. A whitelist, never a summary passthrough: everything
+# else in summary.json (identities, hashes, full per-turn tables) stays server-side.
+RESULT_FIELDS = ('clean', 'completed_rounds', 'requested_rounds', 'elapsed_s',
+                 'violations_total', 'flagged_anomaly_count', 'final_turn',
+                 'aborted', 'failure_stage', 'match_id')
+CHAIN_ROW_FIELDS = ('verdict', 'index', 'wall_s', 'completed_rounds',
+                    'violations_total', 'clean')
+CHAIN_VERDICTS = frozenset({'pass', 'partial', 'fail'})
+RUN_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}')
 STATIC_FILES = {'/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js',
                 '/journal-core.js': 'journal-core.js', '/journal.js': 'journal.js',
                 '/compare-core.js': 'compare-core.js', '/compare.js': 'compare.js',
@@ -192,6 +203,53 @@ def tech_tree(assets: Path):
     return validate_tech_tree(parse_json(raw))
 
 
+def summary_results(summary, redactor):
+    """The published outcome of a finished run: whitelisted scalars only."""
+    if not isinstance(summary, dict):
+        return {}
+    results = {}
+    for key in RESULT_FIELDS:
+        if key not in summary:
+            continue
+        value = summary[key]
+        if value is None or isinstance(value, bool) or finite_number(value):
+            results[key] = value
+        elif isinstance(value, str):
+            results[key] = redactor.text(value)
+    return results
+
+
+def chain_row(record, redactor):
+    """One validated ledger row, or None when the ledger stops being trustworthy."""
+    if not isinstance(record, dict) or not isinstance(record.get('run_id'), str):
+        return None
+    if not RUN_ID.fullmatch(record['run_id']):
+        return None
+    if record.get('verdict') not in CHAIN_VERDICTS:
+        return None
+    row = {'run_id': record['run_id']}
+    for key in CHAIN_ROW_FIELDS:
+        value = record.get(key)
+        if value is None or isinstance(value, bool) or finite_number(value):
+            row[key] = value
+        elif isinstance(value, str):
+            row[key] = redactor.text(value)
+        else:
+            row[key] = None
+    return row
+
+
+def chain_totals(rows):
+    totals = {'matches': len(rows), 'pass': 0, 'partial': 0, 'fail': 0,
+              'completed_rounds': 0, 'wall_s': 0, 'violations_total': 0}
+    for row in rows:
+        totals[row['verdict']] += 1
+        for key in ('completed_rounds', 'wall_s', 'violations_total'):
+            if finite_number(row.get(key)):
+                totals[key] += row[key]
+    return totals
+
+
 class DashboardStore:
     def __init__(self, runs_root: Path):
         self.root = Path(runs_root).resolve(strict=True)
@@ -201,8 +259,7 @@ class DashboardStore:
         self.cache_lock = threading.Lock()
 
     def resolve_run(self, run_id):
-        if not isinstance(run_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,159}',
-                                                         run_id):
+        if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
             raise InvalidRun('invalid run id')
         run = self.root / run_id
         if run.is_symlink():
@@ -316,6 +373,7 @@ class DashboardStore:
                         if call['status'] == 'pending':
                             call['status'] = 'incomplete'
         payload.update(id=redactor.text(run_id), status=status,
+                       results=summary_results(summary, redactor),
                        last_event_at=redactor.text(last_ts) if last_time is not None else None)
         return bound_response(payload)
 
@@ -367,19 +425,69 @@ class DashboardStore:
                     if read_bytes > MAX_INDEX_BYTES:
                         break
                     full = self.load(name)
-                    result = {key: full[key] for key in ('id', 'last_event_at', 'status')}
+                    result = {key: full[key]
+                              for key in ('id', 'last_event_at', 'status', 'results')}
                     with self.cache_lock:
                         self.index_cache[name] = (signature, result)
             except (InvalidRun, OSError, ValueError, TypeError, KeyError, RecursionError):
                 continue
             runs.append({'id': result['id'], 'updated_at': result['last_event_at'],
-                         'status': result['status']})
+                         'status': result['status'], 'results': result['results']})
+        # A `<id>-startup` directory is the launch record OF `<id>`, not a match of
+        # its own. It is only folded when its match is actually listed, so a startup
+        # record whose match never appeared stays visible instead of vanishing.
+        listed = {row['id'] for row in runs}
+        for row in runs:
+            base = row['id'][:-len('-startup')] if row['id'].endswith('-startup') else None
+            row['startup_for'] = base if base in listed else None
+            row['kind'] = 'startup' if row['startup_for'] else 'match'
         with self.cache_lock:
             if len(self.index_cache) > MAX_RUNS * 2:
                 keep = {row['id'] for row in runs}
                 self.index_cache = {key: value for key, value in self.index_cache.items()
                                     if key in keep}
         return {'runs': runs}
+
+    def list_chains(self):
+        """Roll up `chain-*/chain.jsonl` ledgers written by scripts/chain_matches.py."""
+        names = []
+        with os.scandir(self.root) as entries:
+            for index, entry in enumerate(entries):
+                if index >= 5000:
+                    break
+                if entry.name.startswith('chain-') and entry.is_dir(follow_symlinks=False):
+                    names.append(entry.name)
+        redactor, chains = Redactor(), []
+        for name in sorted(names)[:MAX_CHAINS]:
+            try:
+                raw, limited = read_artifact(self.resolve_run(name), 'chain.jsonl',
+                                             MAX_SUMMARY_BYTES)
+            except (InvalidRun, OSError):
+                continue
+            if raw is None:
+                continue
+            rows, complete = [], not limited
+            for line in raw.splitlines():
+                if not line.strip():
+                    continue
+                if len(rows) >= MAX_CHAIN_ROWS:
+                    complete = False
+                    break
+                try:
+                    record = parse_json(line)
+                except (ValueError, UnicodeError, RecursionError):
+                    complete = False
+                    break
+                # One unreadable row makes every later row untrustworthy: stop and
+                # say so rather than publishing a silently short ledger.
+                row = chain_row(record, redactor)
+                if row is None:
+                    complete = False
+                    break
+                rows.append(row)
+            chains.append({'id': redactor.text(name), 'matches': rows,
+                           'totals': chain_totals(rows), 'complete': complete})
+        return {'chains': chains}
 
 
 def project_events(events, warnings, redactor):
@@ -636,9 +744,14 @@ def loopback(host):
         return False
 
 
-def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=None):
+def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=None,
+                  allowed_hosts=()):
     if not loopback(host):
         raise ValueError('Dashboard binds loopback only')
+    # The Host check defends against DNS rebinding, so a public name reached through
+    # an authenticated reverse proxy must be opted in by exact match; the listening
+    # socket above stays loopback-only either way.
+    permitted = frozenset(name.strip().lower() for name in allowed_hosts if name.strip())
     store = DashboardStore(runs_root)
     assets = Path(static_root or Path(__file__).with_name('dashboard_static')).resolve()
 
@@ -664,8 +777,9 @@ def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=N
         def serve(self, head=False):
             try:
                 authority = urlsplit('//' + self.headers.get('Host', '')).hostname
-                if not authority or not loopback(authority):
-                    self.respond(403, b'{"error":"loopback Host required"}', head=head)
+                if not authority or not (loopback(authority) or authority in permitted):
+                    self.respond(403, b'{"error":"loopback or configured Host required"}',
+                                 head=head)
                     return
                 parsed = urlsplit(self.path)
                 if parsed.path == '/map':
@@ -707,6 +821,8 @@ def create_server(runs_root: Path, host='127.0.0.1', port=8788, *, static_root=N
                     return
                 if parsed.path == '/api/runs':
                     payload = store.list_runs()
+                elif parsed.path == '/api/chains':
+                    payload = store.list_chains()
                 elif parsed.path == '/api/tech-tree':
                     payload = tech_tree(assets)
                 elif parsed.path == '/api/run':
@@ -759,8 +875,12 @@ def main():
     parser.add_argument('--runs-root', type=Path, default=Path('runs'))
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8788)
+    parser.add_argument('--allowed-host', action='append', default=[], metavar='HOSTNAME',
+                        help='extra exact Host header to accept (e.g. the name an '
+                             'authenticated reverse proxy forwards); repeatable')
     args = parser.parse_args()
-    with create_server(args.runs_root, args.host, args.port) as server:
+    with create_server(args.runs_root, args.host, args.port,
+                       allowed_hosts=args.allowed_host) as server:
         print(f'Read-only arena dashboard: http://{args.host}:{server.server_port}', flush=True)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()

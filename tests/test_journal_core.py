@@ -302,7 +302,9 @@ def test_the_match_room_scripts_share_one_global_scope_without_a_name_clash(tmp_
     """
     if NODE is None:
         pytest.fail('node is required')
-    order = re.findall(r'<script src="/([^"]+\.js)" defer></script>',
+    # Script sources are document-relative so the page also works behind a
+    # prefix-stripping reverse proxy; no leading slash to strip here.
+    order = re.findall(r'<script src="([^"/][^"]*\.js)" defer></script>',
                        (ASSETS / 'index.html').read_text())
     assert order == ['app.js', 'journal-core.js', 'journal.js', 'compare-core.js',
                      'compare.js'], order

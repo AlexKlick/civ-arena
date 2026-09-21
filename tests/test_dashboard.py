@@ -321,7 +321,11 @@ def test_static_scripts_only_reach_same_origin_api_paths():
         assert targets or 'fetch(' not in code, script.name
         inspected += targets
         for target in targets:
-            assert target.startswith('/api/'), (script.name, target)
+            # Document-relative API paths: the room is served both at the server
+            # root and under a reverse-proxy prefix that strips its own segment.
+            # A relative target cannot leave the serving origin; an absolute or
+            # scheme-relative one could, so neither is allowed.
+            assert target.startswith('api/'), (script.name, target)
     assert inspected
 
 
@@ -477,3 +481,160 @@ def test_unusable_spectator_worlds_are_counted_not_projected(tmp_path):
     records = result['spectator_world_summary']['records']
     assert [row['turn'] for row in records] == [2]
     assert any('unusable' in warning for warning in result['warnings'])
+
+
+def test_page_references_stay_relative_so_a_proxy_prefix_survives():
+    """Served at '/' and at '/civ-arena/' behind a prefix-stripping proxy.
+
+    A single root-absolute reference (``/app.js``, ``/map?``) escapes the prefix
+    and lands on the proxy's own root, so the page must ask for everything
+    relative to the document.
+    """
+    html = (ASSETS / 'index.html').read_text()
+    references = re.findall(r'(?:src|href)="([^"]+)"', html)
+    assert references, 'no asset references found'
+    for target in references:
+        assert not target.startswith('/'), target
+        assert '://' not in target, target
+    # The brand returns to the room, never to the origin root (Pop Deck owns '/').
+    assert 'href="./"' in html
+    app = (ASSETS / 'app.js').read_text()
+    assert "'map?'" in app and "'/map?'" not in app
+
+
+def finished(root, name, summary):
+    """A run whose terminal summary agrees with its observed seat turns."""
+    events = [start(), identity()]
+    for pid in (0, 1):
+        events.append(event('HEARTBEAT', audit='completed_seat_turn', row={
+            'turn': 1, 'player': pid, 'agent': f'seat{pid}',
+            'lease_released': True, 'elapsed_s': 2.5}))
+    events.append(event('MATCH_END', summary=summary))
+    return write_run(root, events, summary, name=name)
+
+
+def test_configured_public_host_is_accepted_and_every_other_host_refused(tmp_path):
+    root, assets = tmp_path / 'runs', tmp_path / 'assets'
+    root.mkdir()
+    assets.mkdir()
+    (assets / 'index.html').write_text('<html>dashboard</html>')
+    write_run(root, [start()])
+    server = d.create_server(root, port=0, static_root=assets,
+                             allowed_hosts=['Arena.Example.TS.NET'])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+        for host, status in [('arena.example.ts.net', 200), ('ARENA.EXAMPLE.TS.NET', 200),
+                             ('arena.example.ts.net:443', 200), ('127.0.0.1', 200),
+                             ('localhost', 200), ('attacker.invalid', 403),
+                             ('evil.arena.example.ts.net', 403),
+                             ('arena.example.ts.net.evil.invalid', 403)]:
+            connection.request('GET', '/api/runs', headers={'Host': host})
+            response = connection.getresponse()
+            assert response.status == status, (host, status)
+            response.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    # Widening the accepted Host header must never widen the listening socket.
+    with pytest.raises(ValueError, match='loopback'):
+        d.create_server(root, host='0.0.0.0', port=0, allowed_hosts=['arena.example.ts.net'])
+
+
+def test_run_index_publishes_only_whitelisted_redacted_summary_results(tmp_path, monkeypatch):
+    monkeypatch.setenv('RESULT_SECRET', 'summary-private-value')
+    summary = {'clean': True, 'aborted': None, 'completed_rounds': 1, 'requested_rounds': 30,
+               'elapsed_s': 811.03, 'violations_total': 2, 'flagged_anomaly_count': 1,
+               'final_turn': 30, 'failure_stage': 'stage summary-private-value',
+               'match_id': 'live-hotseat-001', 'final_state_hash': 'must-not-publish',
+               'identity': {'commit': 'must-not-publish'}, 'scores': {'seat0': 3}}
+    finished(tmp_path, 'match-done', summary)
+    store = d.DashboardStore(tmp_path)
+    row = {entry['id']: entry for entry in store.list_runs()['runs']}['match-done']
+    results = row['results']
+    assert results['clean'] is True and results['completed_rounds'] == 1
+    assert results['requested_rounds'] == 30 and results['violations_total'] == 2
+    assert results['elapsed_s'] == 811.03 and results['match_id'] == 'live-hotseat-001'
+    assert results['aborted'] is None
+    # Whitelist, not a passthrough: nested and unlisted summary keys stay server-side.
+    assert 'final_state_hash' not in results and 'identity' not in results
+    assert 'scores' not in results
+    encoded = json.dumps(store.list_runs())
+    assert 'must-not-publish' not in encoded
+    assert 'summary-private-value' not in encoded and '[redacted]' in encoded
+    assert store.load('match-done', now=NOW)['results']['final_turn'] == 30
+
+
+def test_run_index_omits_results_when_no_terminal_summary_exists(tmp_path):
+    write_run(tmp_path, [start()])
+    row = {entry['id']: entry for entry in
+           d.DashboardStore(tmp_path).list_runs()['runs']}['match-one']
+    assert row['results'] == {}
+
+
+def test_startup_companions_fold_into_their_match_without_hiding_orphans(tmp_path):
+    write_run(tmp_path, [start()], name='m-001')
+    write_run(tmp_path, [start()], name='m-001-startup')
+    write_run(tmp_path, [start()], name='orphan-startup')
+    rows = {row['id']: row for row in d.DashboardStore(tmp_path).list_runs()['runs']}
+    assert rows['m-001-startup']['kind'] == 'startup'
+    assert rows['m-001-startup']['startup_for'] == 'm-001'
+    assert rows['m-001']['kind'] == 'match' and rows['m-001']['startup_for'] is None
+    # A startup record whose match was never recorded is still a visible artifact.
+    assert rows['orphan-startup']['kind'] == 'match'
+    assert rows['orphan-startup']['startup_for'] is None
+
+
+def chain_row(index, run_id, verdict, **fields):
+    return {'run_id': run_id, 'verdict': verdict, 'index': index, 'wall_s': 1499.0,
+            'completed_rounds': 30, 'violations_total': 1, 'clean': verdict == 'pass',
+            **fields}
+
+
+def write_chain(root, name, rows, tail=''):
+    chain = root / name
+    chain.mkdir()
+    (chain / 'chain.jsonl').write_text(
+        ''.join(json.dumps(row) + '\n' for row in rows) + tail)
+    return chain
+
+
+def test_chain_ledger_rolls_up_verdicts_rounds_and_wall_time(tmp_path):
+    write_chain(tmp_path, 'chain-overnight', [
+        chain_row(1, 'overnight-001', 'pass'),
+        chain_row(2, 'overnight-002', 'partial', completed_rounds=8, wall_s=700.5),
+        chain_row(3, 'overnight-003', 'pass', violations_total=0)])
+    chains = d.DashboardStore(tmp_path).list_chains()['chains']
+    assert [chain['id'] for chain in chains] == ['chain-overnight']
+    chain = chains[0]
+    assert chain['complete'] is True
+    assert [row['run_id'] for row in chain['matches']] == [
+        'overnight-001', 'overnight-002', 'overnight-003']
+    assert chain['totals'] == {'matches': 3, 'pass': 2, 'partial': 1, 'fail': 0,
+                               'completed_rounds': 68, 'wall_s': 3698.5,
+                               'violations_total': 2}
+
+
+def test_chain_ledger_stops_at_a_bad_row_and_reports_incompleteness(tmp_path):
+    write_chain(tmp_path, 'chain-mixed', [chain_row(1, 'mixed-001', 'pass')],
+                tail=json.dumps(chain_row(2, '../escape', 'pass')) + '\n')
+    chain = d.DashboardStore(tmp_path).list_chains()['chains'][0]
+    assert [row['run_id'] for row in chain['matches']] == ['mixed-001']
+    assert chain['complete'] is False
+    assert chain['totals']['matches'] == 1
+    write_chain(tmp_path, 'chain-verdict', [chain_row(1, 'v-001', 'triumphant')])
+    verdict = {c['id']: c for c in d.DashboardStore(tmp_path).list_chains()['chains']}
+    assert verdict['chain-verdict']['matches'] == []
+    assert verdict['chain-verdict']['complete'] is False
+
+
+def test_chain_index_ignores_non_chain_directories_and_serves_over_http(tmp_path):
+    write_run(tmp_path, [start()], name='match-one')
+    write_chain(tmp_path, 'chain-one', [chain_row(1, 'match-one', 'pass')])
+    assert [c['id'] for c in d.DashboardStore(tmp_path).list_chains()['chains']] == ['chain-one']
+    status, body = get(tmp_path, ['/api/chains'])[0]
+    assert status == 200
+    assert json.loads(body)['chains'][0]['totals']['pass'] == 1

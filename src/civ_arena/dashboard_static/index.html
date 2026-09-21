@@ -5,18 +5,20 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#09101b">
   <title>Civ Arena · Match room</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/style.css">
-  <script src="/app.js" defer></script>
-  <script src="/journal-core.js" defer></script>
-  <script src="/journal.js" defer></script>
-  <script src="/compare-core.js" defer></script>
-  <script src="/compare.js" defer></script>
+  <!-- Document-relative so one build serves both http://127.0.0.1:8788/ and a
+       prefixed reverse proxy (/civ-arena/) that strips its prefix upstream. -->
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+  <script src="journal-core.js" defer></script>
+  <script src="journal.js" defer></script>
+  <script src="compare-core.js" defer></script>
+  <script src="compare.js" defer></script>
 </head>
 <body>
   <div class="shell">
     <header class="masthead">
-      <a class="brand" href="/" aria-label="Civ Arena match room"><span class="brand-mark" aria-hidden="true">◈</span><span>CIV<span class="brand-light">ARENA</span><small>MATCH ROOM</small></span></a>
+      <a class="brand" href="./" aria-label="Civ Arena match room"><span class="brand-mark" aria-hidden="true">◈</span><span>CIV<span class="brand-light">ARENA</span><small>MATCH ROOM</small></span></a>
       <div class="connection" role="status"><span id="connectionDot" class="status-dot"></span><span id="connectionText">Connecting to match records</span></div>
     </header>
     <main>
@@ -24,6 +26,7 @@
         <div><p class="eyebrow">TWO SEATS. ONE WORLD.</p><h1>Watch the game unfold.</h1><p class="subtitle">The agents’ recorded actions, plans, and progress, turn by turn.</p></div>
         <div class="match-state"><span id="matchStatus" class="badge">Waiting for a match</span><span id="lastEvent">No events received yet</span></div>
       </section>
+      <div id="liveSpotlight" class="live-spotlight" role="status" hidden></div>
       <section class="metrics" aria-label="Match progress">
         <article><span class="metric-label">COMPLETE ROUNDS</span><strong id="roundCount">—</strong><span class="metric-foot">Both seats finished</span></article>
         <article><span class="metric-label">SEAT TURNS</span><strong id="turnCount">—</strong><span class="metric-foot">Completed turns</span></article>
@@ -34,6 +37,24 @@
         <label class="run-control"><span>Match</span><select id="runSelect" aria-label="Select match"><option value="">Loading matches…</option></select></label>
         <label class="turn-control"><span>Turn</span><select id="turnSelect" aria-label="Select engine turn"><option value="">—</option></select></label>
         <label class="follow-control"><input id="followLive" type="checkbox" checked><span class="toggle" aria-hidden="true"></span><span>Follow latest turn</span></label>
+      </section>
+      <section class="panel library-panel" aria-label="Match library">
+        <div class="panel-heading">
+          <div><p class="eyebrow">MATCH LIBRARY</p><h2>Every recorded game</h2><p class="subtle">Results come from each run’s own terminal summary. A match with recent events is listed as playing now; that reflects recorded activity, not a live check of the game process.</p></div>
+          <div class="library-tools"><label class="library-toggle"><input id="libraryStartups" type="checkbox"><span>Show launch records</span></label><span id="libraryCount" class="subtle">—</span></div>
+        </div>
+        <div id="chainRollups" class="chain-rollups"></div>
+        <div class="table-scroll"><table id="libraryTable" class="library-table">
+          <thead><tr>
+            <th scope="col"><button type="button" data-sort="id">Match</button></th>
+            <th scope="col"><button type="button" data-sort="result">Result</button></th>
+            <th scope="col"><button type="button" data-sort="rounds">Rounds</button></th>
+            <th scope="col"><button type="button" data-sort="violations">Violations</button></th>
+            <th scope="col"><button type="button" data-sort="elapsed">Duration</button></th>
+            <th scope="col"><button type="button" data-sort="updated">Last activity</button></th>
+          </tr></thead>
+          <tbody id="libraryBody"></tbody>
+        </table></div>
       </section>
       <div id="warnings" class="warnings" role="status" hidden></div>
       <div id="emptyState" class="empty-state" hidden><span aria-hidden="true">◈</span><h2>No match records yet</h2><p>This room will update when a match starts producing events.</p></div>
