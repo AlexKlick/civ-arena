@@ -1,11 +1,11 @@
-"""Read correlation — hundred-20260920b's desync death, pinned.
+"""Read correlation v2 — the marker LEADS the script.
 
-The lost UNITS read (empty at 2311ms) was delivered LATE into the CITIES
-read; the stream desynced by one and the parser failed closed. Every
-decorated read now carries ARENA_READ|<token> before its sentinel: late
-foreign responses are skipped by their markers, lost reads retry with a
-fresh token, and exhausted correlation reports [] (the "read lost"
-signal) — never foreign rows.
+overnight-20260920's lesson: the mod's own functions print ---END--- rows
+INSIDE their output (Puppeteer.Handshake, SetPuppet, Status), and the
+collector stops at the first sentinel row — an END-placed marker never
+arrives on exactly the reads that matter (the S4 handshake died
+present:False off a correlation-exhausted []). v2 prints the marker
+FIRST; data = rows after it up to the first sentinel.
 """
 
 from __future__ import annotations
@@ -21,41 +21,47 @@ TOK = "a" * 32
 FOREIGN = "b" * 32
 
 
-def test_decorate_puts_the_marker_before_the_sentinel() -> None:
+def test_decorate_prefixes_the_marker() -> None:
     lua = lua_translator.units_read()
     out = decorate(lua, TOK)
     assert out is not None
-    assert out.index('print("ARENA_READ|' + TOK + '")') < out.rindex('---END---')
+    assert out.index('print("ARENA_READ|' + TOK + '")') < out.index('print("UNITS|1")')
     # the script body is otherwise untouched
-    assert out.replace(f'print("ARENA_READ|{TOK}")\n', "") == lua
+    assert out.replace(f'print("ARENA_READ|{TOK}")\n', "", 1).lstrip("\n") == lua.lstrip("\n")
+
+
+def test_decorate_keeps_leading_comments_above_the_marker() -> None:
+    lua = ("-- arena:human_handoff=verify,1,1,deadbeef\n\n"
+           "local seats={0,1}\nprint('V|1')\nprint('---END---')\n")
+    out = decorate(lua, TOK)
+    assert out is not None
+    assert out.index("-- arena:human_handoff") < out.index(f'print("ARENA_READ|{TOK}")')
 
 
 def test_decorate_returns_none_without_a_sentinel() -> None:
     assert decorate("print('NOPE|1')", TOK) is None
 
 
-def test_extract_skips_the_late_foreign_response() -> None:
-    # hundred-20260920b's exact shape: the stale UNITS block (carrying the
-    # FOREIGN token it was decorated with) precedes the real CITIES rows.
+def test_extract_takes_rows_after_marker_to_first_sentinel() -> None:
+    # the mod's Handshake() shape: its own ---END--- ends the DATA
+    rows = [f"ARENA_READ|{TOK}", "MOD_VERSION|0.4.0", "SUPPORTS_FREEZE|true",
+            "---END---"]
+    assert extract_correlated(rows, TOK) == ["MOD_VERSION|0.4.0", "SUPPORTS_FREEZE|true"]
+
+
+def test_extract_skips_a_late_foreign_response() -> None:
+    # hundred-20260920b's shape: the stale UNITS block (carrying the
+    # FOREIGN token it was decorated with) precedes this command's marker
     rows = ["UNITS|1", "UNITROW|u0|x", f"ARENA_READ|{FOREIGN}",
-            "CITIES|2", "CITYROW|c0|x", f"ARENA_READ|{TOK}"]
+            f"ARENA_READ|{TOK}", "CITIES|2", "CITYROW|c0|x", "---END---"]
     assert extract_correlated(rows, TOK) == ["CITIES|2", "CITYROW|c0|x"]
-
-
-def test_extract_skips_through_the_last_of_several_foreign_markers() -> None:
-    rows = ["S|1", f"ARENA_READ|{FOREIGN}", "S|2", f"ARENA_READ|{'c' * 32}",
-            "MINE|1", f"ARENA_READ|{TOK}"]
-    assert extract_correlated(rows, TOK) == ["MINE|1"]
 
 
 def test_extract_returns_none_when_my_marker_never_arrived() -> None:
     assert extract_correlated(["UNITS|1", "UNITROW|u0|x"], TOK) is None
     assert extract_correlated([], TOK) is None
-
-
-def test_extract_plain_response_passes_through() -> None:
-    rows = ["CITIES|2", "CITYROW|c0|x", f"ARENA_READ|{TOK}"]
-    assert extract_correlated(rows, TOK) == ["CITIES|2", "CITYROW|c0|x"]
+    # truncated before my command executed at all (a stale block's END)
+    assert extract_correlated(["UNITS|1", "---END---"], TOK) is None
 
 
 class FakeConn:
@@ -78,8 +84,6 @@ def _lua() -> str:
 
 
 async def test_proxy_retries_a_lost_read_and_recovers() -> None:
-    # call 1 serves the stale late block; the retry's response carries ITS
-    # OWN token's marker, built from the lua the proxy actually sent
     calls = {"n": 0}
 
     async def scripted(lua, timeout=5.0):
@@ -87,8 +91,8 @@ async def test_proxy_retries_a_lost_read_and_recovers() -> None:
         calls["n"] += 1
         marker = lua.split('print("ARENA_READ|')[1].split('")')[0]
         if calls["n"] == 1:
-            return ["UNITS|1", f"ARENA_READ|{FOREIGN}"]
-        return ["CITIES|2", "CITYROW|c0|x", f"ARENA_READ|{marker}"]
+            return ["UNITS|1", f"ARENA_READ|{FOREIGN}", "---END---"]
+        return [f"ARENA_READ|{marker}", "CITIES|2", "CITYROW|c0|x", "---END---"]
 
     conn = FakeConn([])
     conn.execute_read = scripted  # type: ignore[assignment]
@@ -101,7 +105,7 @@ async def test_proxy_retries_a_lost_read_and_recovers() -> None:
 
 async def test_proxy_reports_empty_after_exhausted_correlation() -> None:
     async def always_lost(lua, timeout=5.0):
-        return ["UNITS|1", f"ARENA_READ|{FOREIGN}"]  # never MY marker
+        return ["UNITS|1", f"ARENA_READ|{FOREIGN}", "---END---"]
 
     conn = FakeConn([])
     conn.execute_read = always_lost  # type: ignore[assignment]
@@ -114,9 +118,3 @@ async def test_undecorated_script_passes_through_untouched() -> None:
     proxy = CorrelatedConnection(conn)
     assert await proxy.execute_read("print('NOPE|1')") == ["ANY|rows"]
     assert conn.sent == ["print('NOPE|1')"]  # no decoration attempted
-
-
-def test_marker_is_stable_shape_for_the_fake_and_the_mod() -> None:
-    # 32 lowercase hex, exactly like human_handoff tokens
-    out = decorate(lua_translator.units_read(), "d" * 32)
-    assert out is not None and 'print("ARENA_READ|' + "d" * 32 + '")' in out

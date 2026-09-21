@@ -54,47 +54,58 @@ _RETRY_SLEEP_S = 0.4
 
 
 def decorate(lua: str, token: str) -> str | None:
-    """Insert the marker print before the script's final ---END---.
+    """Prefix the script with the marker print.
 
-    None when no sentinel statement is findable (caller runs the script
+    v2 (overnight-20260920's lesson): the mod's own functions print
+    ``---END---`` rows INSIDE their output (Puppeteer.Handshake, SetPuppet,
+    Status...), and the collector stops at the first sentinel row — an
+    END-placed marker never arrives on exactly the reads that matter most
+    (the S4 handshake died present:False off a correlation-exhausted []).
+    The marker goes FIRST: data = rows after it up to the first sentinel.
+
+    None when the script has no sentinel statement (caller runs it
     undecorated and passes the response through).
     """
-    matches = list(_SENTINEL.finditer(lua))
-    if not matches:
+    if not _SENTINEL.search(lua):
         return None
-    match = matches[-1]
     marker = f'print("{MARKER_PREFIX}{token}")'
-    return lua[:match.start()] + marker + "\n" + lua[match.start():]
+    body = lua.lstrip("\n")
+    if body.startswith("--"):  # keep leading comments above the print
+        first_code = next((i for i, line in enumerate(lua.splitlines(), 1)
+                           if line.strip() and not line.lstrip().startswith("--")), 1)
+        lines = lua.splitlines(keepends=True)
+        return "".join(lines[:first_code - 1]) + marker + "\n" + "".join(lines[first_code - 1:])
+    return marker + "\n" + lua
 
 
 def echo_marker(rows: list[str], token: str) -> list[str]:
     """Fakes: where the injected marker row goes in a response.
 
-    The real tuner executes the injected print BEFORE the script's
-    sentinel, so the marker arrives as the last DATA row. The fakes'
-    convention is a trailing embedded '---END---' row (the collector
-    stops at the first sentinel — anything after it never arrives), so
-    the marker is inserted just before a trailing sentinel and appended
-    when there is none.
+    v2: the marker arrives as the FIRST data row (the print leads the
+    script), before any embedded sentinel the fake's rows carry.
     """
-    marker = f"{MARKER_PREFIX}{token}"
-    if rows and rows[-1].strip() == "---END---":
-        return [*rows[:-1], marker, rows[-1]]
-    return [*rows, marker]
+    return [f"{MARKER_PREFIX}{token}", *rows]
 
 
 def extract_correlated(rows: list[str], token: str) -> list[str] | None:
     """The data rows belonging to THIS token, or None if its marker
-    (the whole response) never arrived."""
+    (the whole response) never arrived.
+
+    rows-after-my-marker, stopping at the first ``---END---`` row (the
+    collector's own stop — the mod's embedded sentinels end the DATA
+    legitimately). Rows before my marker are skipped: they belong to a
+    late previous response.
+    """
     marker = f"{MARKER_PREFIX}{token}"
     if marker not in rows:
         return None
-    end = rows.index(marker)
-    start = 0
-    for i in range(end):
-        if rows[i].startswith(MARKER_PREFIX) and rows[i] != marker:
-            start = i + 1  # a late foreign response — skip through it
-    return rows[start:end]
+    start = rows.index(marker) + 1
+    data: list[str] = []
+    for row in rows[start:]:
+        if row.strip() == "---END---":
+            break
+        data.append(row)
+    return data
 
 
 class CorrelatedConnection:

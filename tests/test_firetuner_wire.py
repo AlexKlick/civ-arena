@@ -9,6 +9,7 @@ import pytest
 from civ_arena.game.adapter import ObserveKind, ObserveRequest
 from civ_arena.game.civ6.fake_tuner_server import FakeMod, FakeTunerServer
 from civ_arena.game.civ6.firetuner import FireTunerAdapter
+from civ_arena.game.civ6.read_correlation import echoed_response
 from civ_arena.game.civ6.response_parser import parse_kv_lines
 from civ_arena.game.civ6.vendor import tuner_client
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
@@ -350,10 +351,7 @@ class _StubDigestConn:
         rows = self.responses.pop(0) if self.responses else []
         if not rows:
             return rows
-        marker = re.search(r'print\("ARENA_READ\|([0-9a-f]{32})"\)', lua_code)
-        if marker is not None:
-            return [*rows, f"ARENA_READ|{marker.group(1)}"]
-        return rows
+        return echoed_response(lua_code, rows)
 
 
 async def test_refresh_digest_retries_one_empty_wire_read(monkeypatch):
