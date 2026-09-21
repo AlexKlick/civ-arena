@@ -171,11 +171,16 @@ def sample_candidates(rng: random.Random, state: SimState, n: int):
 def test_legal_actions_complete_against_sampler() -> None:
     rng = random.Random(1234)
     hits: dict[str, int] = {}
-    for seed, turns in ((5, 2), (13, 8), (29, 14)):
+    # (41, 24): the tier-2 catalog keeps research options populated deeper,
+    # which shifts the random playouts' economies — short games park gold at
+    # 28-46, below even the cheapest purchase (SCOUT 50), so purchase
+    # coverage was a statistical knife-edge. The longer playout clears
+    # purchase costs deterministically.
+    for seed, turns in ((5, 2), (13, 8), (29, 14), (41, 24)):
         state = playout(seed, turns)
         for pid in (0, 1):
             enumerated = {as_key(t, a) for t, a in legal_actions(state, pid)}
-            for tool, args in sample_candidates(rng, state, 600):
+            for tool, args in sample_candidates(rng, state, 1000):
                 if check_action(state, pid, tool, args) is None:
                     hits[tool] = hits.get(tool, 0) + 1
                     assert as_key(tool, args) in enumerated, (
