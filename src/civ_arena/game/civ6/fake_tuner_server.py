@@ -523,18 +523,11 @@ class FakeMod:
     def respond(self, code: str) -> list[str] | None:
         """Rows for a command's Lua code, or None if not mod-shaped.
 
-        Read-correlation aware: when the command carries an ARENA_READ
-        marker (read_correlation.decorate), the marker row is echoed as
-        the last data row so the CorrelatedConnection proxy sees it —
-        exactly what the real tuner does with the injected print.
+        Marker echoing lives ONE level up (FakeTunerServer._handle_command
+        covers both the canned and the mod paths); echoing here too would
+        duplicate the row into the data under v2 marker-first extraction.
         """
-        marker_match = re.search(r'print\("ARENA_READ\|([0-9a-f]{32})"\)', code)
-        rows = self._respond_command(code)
-        if rows is None:
-            return None
-        if marker_match is not None:
-            return echo_marker(rows, marker_match.group(1))
-        return rows
+        return self._respond_command(code)
 
     def _respond_command(self, code: str) -> list[str] | None:
         # game-level probes (the fake IS the whole game, mod included)
