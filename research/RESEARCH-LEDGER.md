@@ -169,3 +169,38 @@ Append-only record of the research loop: one section per iteration, written by t
   every doctrine's science freezes by t30; (c) unit caps tied to city
   count (the t160 unit treadmill); (d) settler escorts (purchased
   settlers walking through contested space).
+
+## Iteration 005 — research overflow CONFIRMED: the freeze was a catalog artifact (2026-09-20)
+
+- Batch-005 (aa6e34e + 6c5b7b4): the treatment is a RULES change —
+  TECHS gains a tier-2 (6 techs, cost 50-70, tier-1 prereqs) and the
+  scripted research selection gains a cheapest-first overflow fallback
+  (cost, then name — deterministic). Roster = batch-004 VERBATIM
+  (turtler, flood_pivot, flood_pivot_sticky, settler_broker_banked),
+  4 fresh seeds x 4 rotations, 16/16 clean, so the cross-batch
+  comparison isolates the rules change.
+- H5 CONFIRMED at its core: every one of 64 seat-games researched
+  EXACTLY 6/6 techs beyond its doctrine list (min=med=max=6 — the
+  whole tier-2 catalog, science fully unfrozen, deterministically);
+  mean_scalar ROSE for every doctrine (turtler 2522.8->2705.3,
+  flood_pivot 2750.7->2905.9, sticky 2722.3->2963.8, banked
+  1655.9->1705.1).
+- REFINEMENT 1 — the economy axis is ADDITIVE, not substitutive: the
+  t160 unit treadmill persists (turtler med 158, flood_pivot med 174 —
+  the batch-003 100-250 band). Overflow did not convert military
+  production into economy; it added a scoring channel on top.
+- REFINEMENT 2 — overflow rewards wide-and-late profiles: the two pivot
+  seats pulled away (sticky 7 wins/1.875 — now TIED with the champion
+  flood_pivot 8 wins/1.875, indistinguishable at n=16) while static
+  turtler FELL to 1 win (was 3). More cities = more science income =
+  more overflow score; the pivot profile captures it, the pure turtle
+  cannot. settler_broker_banked still 0 wins (4.0) — overflow does not
+  rescue a strategy that loses the land race first (H3's mechanism,
+  now replicated under a second rules regime).
+- Batch-006 candidates: (a) tier-3 or deeper catalog — does scalar
+  separate further or saturate?; (b) the production-first broker
+  (found via PRODUCTION early, bank late — H3's direct test, still
+  unrun); (c) a doctrine that trades units for science (unit caps tied
+  to city count) now that both channels score; (d) dwell-time
+  hysteresis (H4's untested half) now that games have a longer
+  economic arc.

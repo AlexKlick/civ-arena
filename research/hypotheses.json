@@ -14,7 +14,12 @@
    "batch": "batch-001b",
    "games": "16/16 clean",
    "seat2_pooled_mean_rank": 2.875,
-   "pooled_seat_means": {"seat0": 2.375, "seat1": 2.438, "seat2": 2.875, "seat3": 2.312},
+   "pooled_seat_means": {
+    "seat0": 2.375,
+    "seat1": 2.438,
+    "seat2": 2.875,
+    "seat3": 2.312
+   },
    "seat_spread_before": 2.75,
    "seat_spread_after": 0.563,
    "secondary": "with the seat confound removed the doctrine gap widened: turtler mean_rank 1.75 (14 wins) vs expansionist 3.25 (2 wins); pre-seam 2.31 vs 2.66",
@@ -86,6 +91,22 @@
    "param": "TECHS tier-2 + scripted cheapest-first overflow fallback",
    "value": "6 new techs (cost 50-70, tier-1 prereqs)"
   },
-  "status": "open"
+  "status": "confirmed",
+  "outcome": {
+   "batch": "batch-005",
+   "games": "16/16 clean",
+   "beyond_list_techs": "6/6 in ALL 64 seat-games (min=med=max)",
+   "mean_scalar_delta": {
+    "+turtler": 182.5,
+    "+flood_pivot": 155.2,
+    "+sticky": 241.4,
+    "+banked": 49.2
+   },
+   "ranking": "champion preserved on wins (8 v 7) but sticky ties mean_rank 1.875; turtler fell 3->1 wins",
+   "refinements": [
+    "economy axis ADDITIVE not substitutive (unit treadmill persists at med 158-174)",
+    "overflow rewards wide-and-late profiles; pure turtler loses relatively"
+   ]
+  }
  }
 ]
