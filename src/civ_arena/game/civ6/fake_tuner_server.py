@@ -21,6 +21,7 @@ import re
 import zlib
 
 from civ_arena.game.civ6 import lua_translator
+from civ_arena.game.civ6.read_correlation import echo_marker
 from civ_arena.game.civ6.vendor import tuner_client
 
 APP_IDENTITY = "FakeSidMeiersCivilizationVI"
@@ -520,7 +521,22 @@ class FakeMod:
         return None
 
     def respond(self, code: str) -> list[str] | None:
-        """Rows for a command's Lua code, or None if not mod-shaped."""
+        """Rows for a command's Lua code, or None if not mod-shaped.
+
+        Read-correlation aware: when the command carries an ARENA_READ
+        marker (read_correlation.decorate), the marker row is echoed as
+        the last data row so the CorrelatedConnection proxy sees it —
+        exactly what the real tuner does with the injected print.
+        """
+        marker_match = re.search(r'print\("ARENA_READ\|([0-9a-f]{32})"\)', code)
+        rows = self._respond_command(code)
+        if rows is None:
+            return None
+        if marker_match is not None:
+            return echo_marker(rows, marker_match.group(1))
+        return rows
+
+    def _respond_command(self, code: str) -> list[str] | None:
         # game-level probes (the fake IS the whole game, mod included)
         if 'print("TS|1")' in code:
             return [f"TURN|{self.turn}", "LOCAL|0", "PUPPET_ACTIVE|false"]
@@ -1218,6 +1234,13 @@ class FakeTunerServer:
             lines = self.mod.respond(code)
         if lines is None:
             lines = ["ERR:FAKE unknown command"]
+
+        # read-correlation: echo the injected ARENA_READ marker as the last
+        # data row (both the canned and the mod paths) — same as the real
+        # tuner executing the injected print before its sentinel.
+        marker = re.search(r'print\("ARENA_READ\|([0-9a-f]{32})"\)', code)
+        if marker is not None and lines:
+            lines = echo_marker(lines, marker.group(1))
 
         context = LUA_STATES.get(state_index, "GameCore_Tuner")
         for line in lines:

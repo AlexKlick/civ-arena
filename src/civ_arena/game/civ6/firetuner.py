@@ -64,6 +64,7 @@ from civ_arena.game.adapter import (
     RejectionReason,
 )
 from civ_arena.game.civ6 import lua_translator, productive_native, response_parser
+from civ_arena.game.civ6.read_correlation import CorrelatedConnection
 from civ_arena.game.civ6.entity_ids import decode
 from civ_arena.game.civ6.vendor.connection import GameConnection, LuaError
 from civ_arena.game.terrain_metadata import (
@@ -315,7 +316,8 @@ class FireTunerAdapter:
                 f"{sorted(VISIBLE_MAP_CONTEXTS)}, got "
                 f"{visible_map_context!r}")
         self._visible_map_context = visible_map_context
-        self._conn = conn if conn is not None else GameConnection(host, port)
+        self._conn = CorrelatedConnection(
+            conn if conn is not None else GameConnection(host, port))
         self._strategy = end_phase_strategy
         self._poll_interval_s = poll_interval_s
         self._poll_timeout_s = poll_timeout_s

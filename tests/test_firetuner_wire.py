@@ -335,41 +335,60 @@ def test_visible_map_context_ctor_validates():
 # -- digest read wire jitter (pure unit: a stub connection, no server) -------
 
 class _StubDigestConn:
-    """execute_read stand-in serving one canned response per call."""
+    """execute_read stand-in serving one canned response per call.
+
+    Read-correlation aware, like the real tuner and FakeMod: a canned []
+    is a LOST read (no marker ever arrives); any non-empty canned list is
+    the command's rows plus an echo of the ARENA_READ marker the proxy
+    injected into the lua it was sent."""
     def __init__(self, responses):
         self.responses = list(responses)
         self.reads: list[str] = []
 
     async def execute_read(self, lua_code, *args, **kwargs):
         self.reads.append(lua_code)
-        return self.responses.pop(0)
+        rows = self.responses.pop(0) if self.responses else []
+        if not rows:
+            return rows
+        marker = re.search(r'print\("ARENA_READ\|([0-9a-f]{32})"\)', lua_code)
+        if marker is not None:
+            return [*rows, f"ARENA_READ|{marker.group(1)}"]
+        return rows
 
 
 async def test_refresh_digest_retries_one_empty_wire_read(monkeypatch):
-    """Moonlight jitter hits the digest read too: a >5s Lua stall expires the
-    connection's read deadline, GameConnection returns [] silently, and
-    parse_digest raises ValueError off a read that sits on the critical path
-    (begin_phase, end_phase seal, every accepted act, lease open). The act()
-    path already retries; the digest read gets the same bounded retry — a
-    re-read is side-effect free (a read-only whole-board dump)."""
+    """Moonlight jitter: a >5s Lua stall expires the read deadline and the
+    response arrives LATE — pre-correlation that meant [] to this reader and
+    the stale rows poisoned the NEXT command (hundred-20260920b). The
+    CorrelatedConnection proxy now absorbs a lost read: one bounded retry
+    with a fresh marker token and the digest lands transparently to callers.
+    Firetuner's own empty-retry (below) remains as the second layer."""
     from civ_arena.canonical import state_hash
-    from civ_arena.game.civ6 import firetuner, lua_translator
+    from civ_arena.game.civ6 import firetuner, lua_translator, read_correlation
     monkeypatch.setattr(firetuner, "_WIRE_RETRY_SLEEP_S", 0)
+    monkeypatch.setattr(read_correlation, "_RETRY_SLEEP_S", 0)
     conn = _StubDigestConn([[], ["DIGEST|u0:1|0|1", "---END---"]])
     adapter = FireTunerAdapter(conn=conn)
 
     digest = await adapter.refresh_digest()
 
-    assert conn.reads == [lua_translator.mod_digest(), lua_translator.mod_digest()]
+    # the proxy re-dispatched the DECORATED digest script (marker aboard)
+    assert len(conn.reads) == 2
+    assert all("ARENA_READ|" in lua for lua in conn.reads)
     assert digest == state_hash({"live_digest": "u0:1|0|1"})
 
 
 async def test_refresh_digest_still_raises_once_retries_exhaust(monkeypatch):
-    from civ_arena.game.civ6 import firetuner
+    """Persistently lost reads stay fail-closed: both layers exhaust their
+    bounded retries and parse_digest raises off the [] the proxy honestly
+    reports (never foreign rows)."""
+    from civ_arena.game.civ6 import firetuner, read_correlation
     monkeypatch.setattr(firetuner, "_WIRE_RETRY_SLEEP_S", 0)
-    conn = _StubDigestConn([[], [], []])
+    monkeypatch.setattr(read_correlation, "_RETRY_SLEEP_S", 0)
+    conn = _StubDigestConn([])  # dry script = every read lost forever
     adapter = FireTunerAdapter(conn=conn)
 
     with pytest.raises(ValueError, match="DIGEST"):
         await adapter.refresh_digest()
-    assert len(conn.reads) == firetuner._WIRE_RETRY_MAX
+    # proxy attempts x firetuner retries all fired before giving up
+    assert len(conn.reads) >= firetuner._WIRE_RETRY_MAX
