@@ -11,6 +11,11 @@ import uuid
 
 from civ_arena.game.civ6.response_parser import drop_status_rows
 
+# Lost-read retries for the pure-observation RPC only (same knobs as the
+# firetuner act() retry): 3 attempts, 500ms apart, fresh token each.
+_VERIFY_ATTEMPTS = 3
+_VERIFY_RETRY_SLEEP_S = 0.5
+
 
 def _identity(player: int, turn: int, seats: tuple[int, ...]) -> str:
     if (type(player) is not int or type(turn) is not int or not 0 < turn < 2**53
@@ -88,14 +93,20 @@ UI.RequestAction(ActionTypes.ACTION_ENDTURN)
 
 
 async def _rpc(conn, operation, player, turn, seats):
-    """Exactly one dispatch on the current connection; no reconnect or replay.
+    """Exactly one dispatch on the current connection for MUTATING
+    operations; no reconnect or replay — a lost result there is ambiguous
+    and aborts the match.
 
-    The five-second bound includes lock wait and execution. A lost result is
-    ambiguous and aborts the match. TapConnection retains the same wire path.
+    ``verify`` is the one pure observation (asserts + a fresh-token
+    receipt, zero mutations), so its LOST reads — the empty-response
+    jitter band; hundred-20260920 died on verify returning [] at 2304ms
+    while activate/reflag receipts landed — retry with a fresh token.
+    A NON-empty wrong receipt still fails immediately at every operation.
+    The five-second bound includes lock wait and execution. TapConnection
+    retains the same wire path.
     """
-    token = uuid.uuid4().hex
-    lua = script(operation, player, turn, seats, token)
     state = "GameCore_Tuner" if operation in {"activate", "verify"} else "InGame"
+    attempts = _VERIFY_ATTEMPTS if operation == "verify" else 1
     reader, writer = conn._reader, conn._writer
     try:
         async with asyncio.timeout(5):
@@ -106,19 +117,29 @@ async def _rpc(conn, operation, player, turn, seats):
                 indices = [i for i, name in conn.lua_states.items() if name == state]
                 if len(indices) != 1:
                     raise RuntimeError("human handoff VM unavailable or ambiguous")
-                rows = await conn._locked_execute(indices[0], lua, 5)
-                expected = f"HUMAN_HANDOFF|{token}|{operation}|{player}|{turn}|observed"
-                # An interleaved mod status print (AMBIENT_WINDOW et al) is
-                # noise, not a mismatch — chain match-001's death. Anything
-                # else unexpected still fails the exact-shape check below.
-                if drop_status_rows(list(rows)) != [expected]:
-                    raise RuntimeError("human handoff receipt missing or mismatched")
+                for attempt in range(attempts):
+                    token = uuid.uuid4().hex
+                    lua = script(operation, player, turn, seats, token)
+                    rows = await conn._locked_execute(indices[0], lua, 5)
+                    expected = f"HUMAN_HANDOFF|{token}|{operation}|{player}|{turn}|observed"
+                    # Interleaved mod status prints (AMBIENT_WINDOW et al) are
+                    # noise, not a mismatch — chain match-001's death. An
+                    # EMPTY read is lost, not wrong — retryable only for the
+                    # pure observation; anything else fails the exact shape.
+                    kept = drop_status_rows(list(rows))
+                    if kept == [expected]:
+                        return {"operation": operation, "status": "observed",
+                                "player": player, "turn": turn,
+                                "seats": list(seats), "receipt": expected}
+                    if kept or attempt == attempts - 1:
+                        raise RuntimeError(
+                            "human handoff receipt missing or mismatched")
+                    await asyncio.sleep(_VERIFY_RETRY_SLEEP_S)
     except BaseException:
         # A following game action must never reuse an ambiguous response stream.
         # Normal driver cleanup owns disconnect and its 20-second bound.
         raise
-    return {"operation": operation, "status": "observed", "player": player, "turn": turn,
-            "seats": list(seats), "receipt": expected}
+    raise RuntimeError("human handoff receipt missing or mismatched")
 
 
 async def _sequence(conn, player, turn, seats, operations, on_result):
