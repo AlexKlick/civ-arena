@@ -31,6 +31,21 @@ import uuid
 from typing import Any
 
 MARKER_PREFIX = "ARENA_READ|"
+# The marker print decorate() injects (also the test-fake detector).
+_MARKER_IN_LUA = re.compile(r'print\("ARENA_READ\|([0-9a-f]{32})"\)')
+
+
+def echoed_response(lua: str, rows: list[str]) -> list[str]:
+    """What a correlation-aware endpoint returns for ``lua``.
+
+    Shared by the fakes and the test stubs so every canned-response
+    stand-in mirrors the real tuner: echo the injected marker on real
+    rows; a lost read stays empty (no marker ever arrives).
+    """
+    marker = _MARKER_IN_LUA.search(lua)
+    if marker is None or not rows:
+        return rows
+    return echo_marker(rows, marker.group(1))
 # The sentinel statement forms lua_translator and handoff emit.
 _SENTINEL = re.compile(r"print\((['\"])---END---\1\)\s*$", re.M)
 
