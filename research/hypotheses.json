@@ -75,5 +75,17 @@
    "verdict": "stickiness is not the improvement; the incumbent's dual hp/count pressure triggers capture 'punished enough' better than 'any contact'. True dwell-time / 2-consecutive-check hysteresis remains untested (needs the history-dependent trigger extension)"
   },
   "evidence": "batch-003: flood_pivot 5/8 wins mean_rank 1.50 (pivots t10-t30 on pressure, 6/8 single clean switch); turtle_pivot 0/8 mean_rank 3.875 (deterministic t30 clock switch, zero post-pivot foundings); flash audit timing_sensible=False for both; batch-004 results.md per-strategy table"
+ },
+ {
+  "id": "H5",
+  "statement": "The t20-30 science freeze is a catalog artifact, not a strategy equilibrium: every doctrine's list IS the tier-1 catalog, so 'list exhausted' and 'nothing left to research' coincided. With a tier-2 catalog (6 techs) and a cheapest-first overflow fallback, science continues past list exhaustion in every seat.",
+  "prediction": "In batch-005 (batch-004 roster verbatim, fresh seeds, overflow on): every seat researches >=4 techs beyond its list by t160; mean_scalar rises for every doctrine vs batch-004; the ranking order (flood_pivot first) is preserved; the late-game unit treadmill shrinks or converts production share back to economy.",
+  "test": {
+   "kind": "rules_change",
+   "doctrine": "all seats",
+   "param": "TECHS tier-2 + scripted cheapest-first overflow fallback",
+   "value": "6 new techs (cost 50-70, tier-1 prereqs)"
+  },
+  "status": "open"
  }
 ]

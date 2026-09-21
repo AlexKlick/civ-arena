@@ -276,6 +276,15 @@ async def run_policy(runtime: Any, facade: Any,
         if any(o["tech_id"] == pick for o in options):
             await facade.set_research(pick)
             break
+    else:
+        # Research overflow (batch-005's controlled rules change): the
+        # doctrine list is exhausted by t20-30 and science previously
+        # froze for the rest of the game in every batch; now it converts
+        # to the cheapest remaining catalog tech (cost, then name —
+        # deterministic) instead of idling.
+        if options:
+            overflow = min(options, key=lambda o: (o["cost"], o["tech_id"]))
+            await facade.set_research(overflow["tech_id"])
 
     # cities: keep production going, occasionally purchase. ALWAYS set the
     # doctrine pick (idempotent — the read-back wants cur == item.Hash):

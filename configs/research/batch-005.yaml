@@ -1,0 +1,31 @@
+# Batch 5 — research overflow: a controlled RULES change, matched roster.
+#
+# The treatment: the TECHS catalog gains a tier-2 (6 techs) and the
+# scripted research selection gains a cheapest-first overflow fallback —
+# after a doctrine's list exhausts (t20-30 in every prior batch), science
+# converts to the cheapest remaining catalog tech instead of freezing for
+# 130+ turns. The roster is batch-004 VERBATIM so the cross-batch
+# comparison isolates the rules change (H5 in hypotheses.json).
+#
+# 160 turns, 4 fresh seed blocks x 4 Latin rotations = 16 games.
+batch:
+  batch_id: batch-005
+  roster:
+    - turtler
+    - spec_id: flood_pivot
+      initial: hyperwide_flood
+      interval: 5
+      triggers:
+        - when: {own_units_hp_below_frac: 0.5}
+          switch_to: turtler
+        - when: {min_foreign_units_seen: 4}
+          switch_to: turtler
+    - spec_id: flood_pivot_sticky
+      initial: hyperwide_flood
+      interval: 5
+      triggers:
+        - when: {min_foreign_units_seen: 1}
+          switch_to: turtler
+    - settler_broker_banked
+  seeds: [271443, 635029, 118217, 990031]
+  max_turns: 160

@@ -68,6 +68,16 @@ TECHS: dict[str, dict[str, Any]] = {
     "MASONRY": {"cost": 35, "prereq": ["MINING"]},
     "BRONZE_WORKING": {"cost": 40, "prereq": ["MINING"]},
     "IRRIGATION": {"cost": 40, "prereq": ["ANIMAL_HUSBANDRY"]},
+    # tier-2 (batch-005's controlled rules change): every doctrine's list
+    # is the tier-1 catalog, which exhausts by t20-30 and froze science for
+    # 130+ turns in batches 001-004. Overflow converts science into these
+    # via the cheapest-first fallback (scripted.py).
+    "SAILING": {"cost": 50, "prereq": ["POTTERY"]},
+    "CONSTRUCTION": {"cost": 60, "prereq": ["MASONRY"]},
+    "CURRENCY": {"cost": 60, "prereq": ["WRITING"]},
+    "THE_WHEEL": {"cost": 60, "prereq": ["BRONZE_WORKING"]},
+    "CALENDAR": {"cost": 60, "prereq": ["IRRIGATION"]},
+    "HORSEBACK_RIDING": {"cost": 70, "prereq": ["ANIMAL_HUSBANDRY"]},
 }
 
 AXIAL_DIRS = [(1, 0), (1, -1), (0, -1), (-1, 0), (-1, 1), (0, 1)]
